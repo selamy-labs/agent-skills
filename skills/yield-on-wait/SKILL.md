@@ -37,11 +37,30 @@ agent can resume without the original conversation.
 
 ## Yield
 
+- For short waits, use a bounded in-turn poll.
+- For longer waits, prefer closing or pausing the current item with evidence so
+  far and creating a scoped verification tail. The tail body should be the
+  checkpoint: awaited artifact, check location, resume condition, and
+  success/failure actions.
 - Switch to the next queued or unblocked work item.
 - Prefer work that is independent of the parked wait.
 - At natural boundaries, poll parked waits before pulling more work.
 - If a parked wait becomes the only remaining work, requeue a scoped
   verification tail instead of holding the original directive open.
+
+## Checkpoint As Queue Item
+
+When a queue exists, the durable queue item is usually a better carrier than
+the current turn's memory. Use this shape:
+
+- close or mark the broad item with evidence completed so far
+- create a narrow verification tail at the right priority
+- include the exact artifact link or ID, check command, success condition,
+  failure condition, and next action
+- let the next worker resume from the tail without needing the original thread
+
+This prevents a wait from becoming "work in progress" that survives only in a
+single process or conversation.
 
 ## Resume
 
@@ -59,6 +78,8 @@ When the wait completes:
 - checkpointing only "waiting on CI" with no run link, resume condition, or
   next action
 - leaving parked waits without a stall alarm or bounded follow-up
+- holding a broad directive open when the only remaining step is a long wait
+  that could be represented as a scoped verification tail
 - treating green CI as a product or deploy verification when the user asked for
   a real artifact
 
