@@ -52,6 +52,22 @@ BLOCKED_TERMS = {
         "hermes pod",
         "selamy-agents",
     ],
+    "internal counterpart leak": [
+        "internal-agent-skills",
+        "internal skills",
+        "internal initiative",
+        "internal initiatives",
+        "private repo",
+        "private repository",
+        "private repos",
+        "private repositories",
+        "public subset",
+        "internal counterpart",
+        "internal counterparts",
+        "private sources",
+        "private skill",
+        "private skills",
+    ],
 }
 
 BLOCKED_TERM_PATTERNS = [
