@@ -40,6 +40,26 @@ The release workflow validates all skills, creates the next `vX.Y.Z` tag, and
 publishes a GitHub release from `main`. IaC consumers should upgrade by changing
 the pinned tag in a reviewable PR.
 
+## Public API Stability
+
+Treat each skill directory name and frontmatter `name` as a public API.
+Additions are cheap; removals and renames are disruptive for consumers that pin
+and invoke skills by name.
+
+- Incubate new workflows outside this public repository until the name,
+  frontmatter, structure, and behavior are stable.
+- Prefer adding a sharper new skill over publishing a thin slogan.
+- Mark a skill deprecated in one minor release before removing or renaming it.
+  The deprecation note must point to the replacement or explain that there is no
+  replacement.
+- Remove or rename a public skill only in a major release. The breaking commit
+  must use `!` in the conventional-commit header or include `BREAKING CHANGE`
+  in the body.
+- Never silently remove, rename, or repurpose an existing skill.
+
+CI enforces the major-release part of this policy with
+`scripts/public_api_stability.py`.
+
 ## Public-Safety Rule
 
 Everything in this repository must be safe for a public internet audience.
@@ -60,6 +80,8 @@ CI enforces this with:
   patterns.
 - `scripts/test_privacy_scan.py`: proves representative private-boundary leaks
   fail the scanner.
+- `scripts/public_api_stability.py`: blocks removals or renames unless the
+  release is explicitly marked breaking.
 - `scripts/lint_skills.py`: validates every `SKILL.md` has required
   frontmatter and concise metadata.
 

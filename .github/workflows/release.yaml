@@ -28,6 +28,7 @@ jobs:
           python scripts/lint_skills.py
           python scripts/privacy_scan.py
           python scripts/test_privacy_scan.py
+          python scripts/public_api_stability.py
       - name: Plan release
         id: plan
         run: python scripts/semantic_release.py --notes-file release-notes.md
