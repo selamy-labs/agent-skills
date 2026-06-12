@@ -7,6 +7,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_RE = re.compile(r"^---\n(?P<frontmatter>.*?)\n---\n(?P<body>.*)$", re.DOTALL)
+NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+RESERVED_PREFIXES = ("selamy-", "claude-", "ai-")
+RESERVED_TERMS = {
+    "agent",
+    "agents",
+    "llm",
+    "workflow",
+    "skill",
+}
 
 
 def parse_frontmatter(text: str, path: Path) -> dict[str, str]:
@@ -47,6 +56,12 @@ def main() -> int:
             names.add(name)
             if name and name != skill.parent.name:
                 errors.append(f"{skill}: name must match directory ({skill.parent.name})")
+            if name and not NAME_RE.fullmatch(name):
+                errors.append(f"{skill}: name must be lowercase descriptive kebab-case")
+            if name and name.startswith(RESERVED_PREFIXES):
+                errors.append(f"{skill}: name must not use a vendor/tool/noise prefix")
+            if name and name in RESERVED_TERMS:
+                errors.append(f"{skill}: name is too generic to be stable")
             if len(description.split()) > 45:
                 errors.append(f"{skill}: description should stay concise (<=45 words)")
         except Exception as exc:
