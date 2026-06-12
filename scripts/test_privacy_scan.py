@@ -17,6 +17,18 @@ class PrivacyScanTests(unittest.TestCase):
         findings = findings_for_text(text, "README.md")
         self.assertTrue(findings)
 
+    def test_blocks_internal_counterpart_leaks(self) -> None:
+        examples = [
+            "The " + "internal" + "-agent-skills repo has the rest.",
+            "This is the " + "public" + " subset of our skills.",
+            "Copy " + "private" + " skills from a separate source.",
+            "The " + "internal" + " counterpart owns this workflow.",
+        ]
+        for text in examples:
+            with self.subTest(text=text):
+                findings = findings_for_text(text, "README.md")
+                self.assertTrue(findings)
+
     def test_blocks_internal_hosts(self) -> None:
         text = "Contact dev" + "@" + "localhost or api" + "." + "selamy" + "." + "dev."
         findings = findings_for_text(text, "README.md")

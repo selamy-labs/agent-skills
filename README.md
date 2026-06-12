@@ -3,13 +3,10 @@
 Reusable, public `SKILL.md` workflows for AI coding and operations agents.
 
 This repository is intentionally generic. It contains durable engineering
-practices that can be used in any organization without depending on private
-systems, customer names, internal paths, credentials, or product-specific
+practices that can be used in any organization without depending on customer
+names, local filesystem paths, credentials, or product-specific
 context.
 
-This public repository is only for original, scrubbed, generic skills. Private
-deployment images may combine these public skills with private internal skills,
-but private skills must stay in private sources and must not be copied here.
 Third-party public skills may be consumed from their upstream projects with
 their own license terms; they should not be republished in this repository.
 
@@ -46,15 +43,15 @@ the pinned tag in a reviewable PR.
 ## Public-Safety Rule
 
 Everything in this repository must be safe for a public internet audience.
-Do not add customer names, internal project names, private hostnames, local
-filesystem paths, IP addresses, credentials, tokens, subscription or billing
-details, or any organization-specific operating model.
+Do not add customer names, product-specific project names, non-public
+hostnames, local filesystem paths, IP addresses, credentials, tokens,
+subscription or billing details, or any organization-specific operating model.
 
-The scanner blocks public/private boundary leaks, including:
+The scanner blocks public-safety leaks, including:
 
-- private org, product, agent, vendor, customer, and person names
-- internal process/tool terms and operational file paths
-- localhost identities and internal service hostnames
+- organization-specific product, agent, vendor, customer, and person names
+- non-public process/tool terms and operational file paths
+- localhost identities and non-public service hostnames
 - common credential, token, private-key, secret-manager, and `pass` patterns
 
 CI enforces this with:
