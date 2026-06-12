@@ -24,6 +24,8 @@ their own license terms; they should not be republished in this repository.
   reproducible from source.
 - `data-connector-building`: build source-backed, observable, fixture-tested
   data connectors.
+- `reddit-research`: collect Reddit discussion signals with source lineage,
+  rate-limit discipline, and terms-aware access choices.
 
 ## Versioning
 
