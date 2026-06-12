@@ -21,3 +21,5 @@ jobs:
         run: python scripts/lint_skills.py
       - name: Block public information leaks
         run: python scripts/privacy_scan.py
+      - name: Test privacy scanner
+        run: python scripts/test_privacy_scan.py

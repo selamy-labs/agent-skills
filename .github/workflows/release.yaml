@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-skills-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate skills before release
+        run: |
+          python scripts/lint_skills.py
+          python scripts/privacy_scan.py
+          python scripts/test_privacy_scan.py
+      - name: Plan release
+        id: plan
+        run: python scripts/semantic_release.py --notes-file release-notes.md
+      - name: Create tag
+        if: steps.plan.outputs.release_needed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.plan.outputs.next_tag }}" -F release-notes.md
+          git push origin "${{ steps.plan.outputs.next_tag }}"
+      - name: Create GitHub release
+        if: steps.plan.outputs.release_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md
