@@ -26,6 +26,8 @@ their own license terms; they should not be republished in this repository.
   data connectors.
 - `reddit-research`: collect Reddit discussion signals with source lineage,
   rate-limit discipline, and terms-aware access choices.
+- `yield-on-wait`: checkpoint long waits, switch to other queued work, and
+  resume from durable state instead of watching spinners.
 
 ## Versioning
 
