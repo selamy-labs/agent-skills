@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-HEADER_RE = re.compile(r"^(?P<type>[a-zA-Z]+)(?:\([^)]+\))?(?P<breaking>!)?:")
+HEADER_RE = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]+\))?(?P<breaking>!)?:")
 
 INITIAL_VERSION = (0, 1, 0)
 
@@ -70,7 +70,7 @@ def bump_for(commits: list[Commit], has_existing_tag: bool) -> str | None:
         breaking = "BREAKING CHANGE" in commit.body or (header and header.group("breaking"))
         if breaking:
             return "major"
-        commit_type = header.group("type").lower() if header else ""
+        commit_type = header.group("type") if header else ""
         if commit_type == "feat":
             bump = "minor"
         elif commit_type in {"fix", "perf", "refactor"} and bump != "minor":

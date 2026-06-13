@@ -25,3 +25,11 @@ jobs:
         run: python scripts/test_privacy_scan.py
       - name: Check public API stability
         run: python scripts/public_api_stability.py
+      - name: Test semantic release planner
+        run: python scripts/test_semantic_release.py
+      - name: Validate PR title for squash release
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python scripts/validate_pr_title.py --title "$PR_TITLE" --body "$PR_BODY"

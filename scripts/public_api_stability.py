@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-HEADER_RE = re.compile(r"^[a-zA-Z]+(?:\([^)]+\))?!:")
+HEADER_RE = re.compile(r"^[a-z]+(?:\([^)]+\))?!:")
 
 
 def run_git(args: list[str], *, check: bool = True) -> str:
