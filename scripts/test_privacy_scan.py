@@ -39,6 +39,18 @@ class PrivacyScanTests(unittest.TestCase):
         findings = findings_for_text(text, "skills/generic/SKILL.md")
         self.assertEqual([], findings)
 
+    def test_allows_speedforge_only_as_workflow_runner_label(self) -> None:
+        label = "speed" + "for" + "ge"
+        text = f"jobs:\n  test:\n    runs-on: {label}\n"
+        findings = findings_for_text(text, ".github/workflows/quality.yaml")
+        self.assertEqual([], findings)
+
+    def test_blocks_speedforge_in_public_workflow_comments(self) -> None:
+        label = "speed" + "for" + "ge"
+        text = f"jobs:\n  test:\n    runs-on: {label}\n    # {label} product note\n"
+        findings = findings_for_text(text, ".github/workflows/quality.yaml")
+        self.assertTrue(findings)
+
 
 if __name__ == "__main__":
     unittest.main()

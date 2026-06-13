@@ -11,7 +11,7 @@ permissions:
 jobs:
   quality:
     name: Skill Quality And Privacy
-    runs-on: ubuntu-latest
+    runs-on: speedforge
     steps:
       - uses: actions/checkout@v6.0.3
       - uses: actions/setup-python@v6.2.0
