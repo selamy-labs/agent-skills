@@ -15,7 +15,7 @@ concurrency:
 jobs:
   release:
     name: Semantic Release
-    runs-on: ubuntu-latest
+    runs-on: speedforge
     steps:
       - uses: actions/checkout@v6.0.3
         with:

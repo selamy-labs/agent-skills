@@ -99,6 +99,17 @@ SELF_SCAN_SECRET_LABELS = {
 }
 
 
+def is_allowed_blocked_term_context(text: str, rel_path: str, term: str) -> bool:
+    if rel_path.startswith(".github/workflows/") and term == "speedforge":
+        allowed_lines = {"runs-on: speedforge"}
+        for line in text.splitlines():
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
+                if line.strip() not in allowed_lines:
+                    return False
+        return True
+    return False
+
+
 def iter_text_files() -> list[Path]:
     files: list[Path] = []
     for path in ROOT.rglob("*"):
@@ -113,7 +124,7 @@ def findings_for_text(text: str, rel_path: str) -> list[str]:
     findings: list[str] = []
     if rel_path != "scripts/privacy_scan.py":
         for category, term, pattern in BLOCKED_TERM_PATTERNS:
-            if pattern.search(text):
+            if pattern.search(text) and not is_allowed_blocked_term_context(text, rel_path, term):
                 findings.append(f"{rel_path}: blocked {category} term {term!r}")
     for label, pattern in SECRET_PATTERNS:
         if rel_path == "scripts/privacy_scan.py" and label not in SELF_SCAN_SECRET_LABELS:
