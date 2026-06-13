@@ -24,6 +24,9 @@ their own license terms; they should not be republished in this repository.
   reproducible from source.
 - `data-connector-building`: build source-backed, observable, fixture-tested
   data connectors.
+- `instrumented-service-scaffold`: create long-running services with
+  observability, runtime flags, tests, coverage gates, and release controls
+  from the first commit.
 - `reddit-research`: collect Reddit discussion signals with source lineage,
   rate-limit discipline, and terms-aware access choices.
 - `yield-on-wait`: checkpoint long waits, switch to other queued work, and
