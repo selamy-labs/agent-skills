@@ -1,77 +1,23 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.naming import validate_all_skills
+
 ROOT = Path(__file__).resolve().parents[1]
-SKILL_RE = re.compile(r"^---\n(?P<frontmatter>.*?)\n---\n(?P<body>.*)$", re.DOTALL)
-NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-RESERVED_PREFIXES = ("selamy-", "claude-", "ai-")
-RESERVED_TERMS = {
-    "agent",
-    "agents",
-    "llm",
-    "workflow",
-    "skill",
-}
-
-
-def parse_frontmatter(text: str, path: Path) -> dict[str, str]:
-    match = SKILL_RE.match(text)
-    if not match:
-        raise ValueError(f"{path}: missing YAML frontmatter")
-
-    data: dict[str, str] = {}
-    for line in match.group("frontmatter").splitlines():
-        if not line.strip():
-            continue
-        if ":" not in line:
-            raise ValueError(f"{path}: malformed frontmatter line: {line!r}")
-        key, value = line.split(":", 1)
-        data[key.strip()] = value.strip().strip('"')
-    return data
 
 
 def main() -> int:
-    errors: list[str] = []
-    skills = sorted((ROOT / "skills").glob("*/SKILL.md"))
-    if not skills:
-        errors.append("no skills found under skills/*/SKILL.md")
-
-    names: set[str] = set()
-    for skill in skills:
-        try:
-            text = skill.read_text()
-            data = parse_frontmatter(text, skill)
-            name = data.get("name", "")
-            description = data.get("description", "")
-            if not name:
-                errors.append(f"{skill}: missing name")
-            if not description:
-                errors.append(f"{skill}: missing description")
-            if name and name in names:
-                errors.append(f"{skill}: duplicate skill name {name}")
-            names.add(name)
-            if name and name != skill.parent.name:
-                errors.append(f"{skill}: name must match directory ({skill.parent.name})")
-            if name and not NAME_RE.fullmatch(name):
-                errors.append(f"{skill}: name must be lowercase descriptive kebab-case")
-            if name and name.startswith(RESERVED_PREFIXES):
-                errors.append(f"{skill}: name must not use a vendor/tool/noise prefix")
-            if name and name in RESERVED_TERMS:
-                errors.append(f"{skill}: name is too generic to be stable")
-            if len(description.split()) > 45:
-                errors.append(f"{skill}: description should stay concise (<=45 words)")
-        except Exception as exc:
-            errors.append(str(exc))
-
+    errors, count = validate_all_skills(ROOT)
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
         return 1
-    print(f"validated {len(skills)} skills")
+    print(f"validated {count} skills")
     return 0
 
 

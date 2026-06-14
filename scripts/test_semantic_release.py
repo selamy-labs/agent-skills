@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Legacy test runner kept for CI backward compat. Real tests live in tests/."""
 from __future__ import annotations
 
 import unittest
