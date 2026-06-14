@@ -40,6 +40,8 @@ their own license terms; they should not be republished in this repository.
   with standard linters.
 - `feature-coverage-not-just-line-coverage`: pair coverage percentages with
   named behavior checks and anti-overfit evidence.
+- `authoring-html-email`: compose and verify client-safe HTML email with
+  correct multipart MIME and render checks.
 
 ## Decision Docs
 
