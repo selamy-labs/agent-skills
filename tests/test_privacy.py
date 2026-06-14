@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tools.privacy import findings_for_text, iter_text_files, scan_all
+from tools.privacy import BLOCKED_TERMS, SECRET_PATTERNS, SILENCE_PHRASES, findings_for_text, iter_text_files, scan_all
+from tools.privacy.loader import load_denylist
 
 
 class TestOrgProductTerms:
@@ -117,6 +118,11 @@ class TestNegativeCases:
         text = "matchpoint tradestream ralph tokenomics"
         assert findings_for_text(text, "scripts/privacy_scan.py") == []
         assert findings_for_text(text, "tools/privacy.py") == []
+        assert findings_for_text(text, "tools/privacy/__init__.py") == []
+
+    def test_denylist_file_self_excluded(self) -> None:
+        text = "matchpoint tradestream ralph tokenomics"
+        assert findings_for_text(text, "tools/privacy/denylist.yml") == []
 
 
 class TestIterTextFiles:
@@ -137,6 +143,34 @@ class TestIterTextFiles:
         (tmp_path / "real.md").write_text("content")
         files = iter_text_files(tmp_path)
         assert all(".git" not in f.parts for f in files)
+
+
+class TestDenylistIntegrity:
+    """Verify the denylist.yml is loaded and drives all scanner lists."""
+
+    def test_denylist_loads_all_categories(self) -> None:
+        denylist_path = Path(__file__).resolve().parents[1] / "tools" / "privacy" / "denylist.yml"
+        data = load_denylist(denylist_path)
+        assert "org_product" in data
+        assert "business_person" in data
+        assert "internal_process" in data
+        assert "counterpart_leak" in data
+        assert "silence_phrase" in data
+        assert "secret_patterns" in data
+
+    def test_blocked_terms_match_denylist(self) -> None:
+        assert len(BLOCKED_TERMS) == 4
+        assert "org/product" in BLOCKED_TERMS
+        assert "matchpoint" in BLOCKED_TERMS["org/product"]
+
+    def test_secret_patterns_loaded(self) -> None:
+        labels = {label for label, _ in SECRET_PATTERNS}
+        assert "GitHub classic token" in labels
+        assert "internal service host" in labels
+
+    def test_silence_phrases_loaded(self) -> None:
+        assert "do not mention" in SILENCE_PHRASES
+        assert len(SILENCE_PHRASES) >= 8
 
 
 class TestScanAll:

@@ -1,0 +1,111 @@
+# Privacy scanner denylist — SINGLE SOURCE OF TRUTH
+# All repos consuming privacy scanning pin to this file.
+# Changes here propagate to every consumer on their next version bump.
+#
+# Categories:
+#   org_product       — internal product and project names
+#   business_person   — people, vendors, partners
+#   internal_process  — internal tooling and workflow names
+#   counterpart_leak  — phrases that reveal repo structure
+#   silence_phrase    — phrases that suppress disclosure
+
+org_product:
+  - matchpoint
+  - match point
+  - tradestream
+  - sterling
+  - signalstream
+  - velix
+  - veinroute
+  - beaconfi
+  - speedforge
+  - loam
+  - nash
+  - reid
+  - reeve
+  - sable
+  - axel
+  - nolan
+  - forge
+
+business_person:
+  - louie
+  - laura
+  - lerman
+  - jerry
+  - bryan
+  - remine
+  - ylopo
+  - gohighlevel
+  - ghl
+  - showingtime
+
+internal_process:
+  - codex-q
+  - ralph
+  - dotfiles-dispatch
+  - orchestrator
+  - swimlane
+  - drive-codex
+  - tokenomics
+  - hermes pod
+  - selamy-agents
+
+counterpart_leak:
+  - internal-agent-skills
+  - internal skills
+  - internal initiative
+  - internal initiatives
+  - private repo
+  - private repository
+  - private repos
+  - private repositories
+  - public subset
+  - internal counterpart
+  - internal counterparts
+  - private sources
+  - private skill
+  - private skills
+
+silence_phrase:
+  - do not mention
+  - never reveal
+  - keep this secret
+  - hide the fact
+  - suppress this
+  - do not disclose
+  - never disclose
+  - do not share
+  - keep quiet
+  - say nothing about
+
+secret_patterns:
+  - label: GitHub classic token
+    pattern: 'ghp_[A-Za-z0-9_]{20,}'
+  - label: GitHub fine-grained token
+    pattern: 'github_pat_[A-Za-z0-9_]{20,}'
+  - label: API key token
+    pattern: '\bsk-[A-Za-z0-9_-]{20,}\b'
+  - label: private key PEM
+    pattern: '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  - label: IPv4 address
+    pattern: '\b\d{1,3}(?:\.\d{1,3}){3}\b'
+  - label: GSM secret path
+    pattern: '\b(?:gsm|secret-manager|google-secret-manager)://[A-Za-z0-9_./-]+'
+    flags: IGNORECASE
+  - label: pass entry path
+    pattern: '\bpass(?: show)? [A-Za-z0-9_./-]+'
+    flags: IGNORECASE
+  - label: localhost identity
+    pattern: '\b[A-Za-z0-9._%+-]+@localhost\b'
+    flags: IGNORECASE
+  - label: internal group/user
+    pattern: '\bpatrick-agents\b'
+    flags: IGNORECASE
+  - label: internal service host
+    pattern: '\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.selamy\.dev\b'
+    flags: IGNORECASE
+  - label: local home path
+    pattern: '/home/[A-Za-z0-9._-]+/'
+  - label: state-file path
+    pattern: '/tmp/tmux-session-state[A-Za-z0-9._/-]*'
