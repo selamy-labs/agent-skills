@@ -8,6 +8,8 @@
 #   internal_process  — internal tooling and workflow names
 #   counterpart_leak  — phrases that reveal repo structure
 #   silence_phrase    — phrases that suppress disclosure
+#   source_origin     — product/platform names used for source-lineage checks
+#                       (subset of org_product consumed by private repos)
 
 org_product:
   - matchpoint
@@ -78,6 +80,16 @@ silence_phrase:
   - do not share
   - keep quiet
   - say nothing about
+
+source_origin:
+  - matchpoint
+  - velix
+  - qinn
+  - tradestream
+  - veinroute
+  - beaconfi
+  - loamdev
+  - speedforge
 
 secret_patterns:
   - label: GitHub classic token
