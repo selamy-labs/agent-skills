@@ -10,7 +10,7 @@ When behavior varies by some type/mode/flag, the reflex is `if/elif/else` (or `s
 ## The move
 1. Name the varying behavior as an **interface** (one method, or a small cohesive set).
 2. One **implementation per variant** — each self-contained, independently testable.
-3. **Select once** at the boundary (a factory / DI container / a map from key→impl) and pass the chosen impl down. Call sites just call `impl.do(x)` — no branching.
+3. **Select once** at the boundary (a factory / DI container / a map from key→impl) and hand the chosen impl down. Call sites just call `impl.do(x)` — no branching.
 
 ```
 # instead of, at every call site:
