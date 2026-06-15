@@ -1,49 +1,35 @@
 ---
 name: authoring-html-email
-description: Use when composing, implementing, sending, or reviewing HTML email so the message has correct multipart MIME, inline styles, client-safe markup, link/image handling, and render/MIME verification.
+description: Build client-facing HTML email that actually renders — correct multipart MIME (HTML + plain-text fallback ALWAYS), inline styles, and verify by rendering the received message.
 ---
 
-# Authoring HTML Email
+# authoring-html-email
 
-HTML email is not a web page. Build for conservative mail clients and verify the
-actual received message, not just the send call.
+Email is not the web. Clients (Gmail, Outlook, Apple Mail) strip `<head>`/`<style>`, ignore most CSS, and some show only plain text. A "looks fine in my browser" HTML email arrives broken or as raw tags. Build for the medium.
 
-## MIME Contract
+## The non-negotiable: multipart/alternative with BOTH parts
+EVERY client-facing email MUST be `multipart/alternative` carrying **both** a `text/html` part AND a `text/plain` fallback — always, no exceptions. Clients that can't/won't render HTML show the plain part; a missing plain part = some recipients see nothing useful (or your HTML as raw source). Order matters: plain-text first, HTML second (clients pick the LAST part they support).
 
-- Send `multipart/alternative` for every HTML email.
-- Attach `text/plain` first and `text/html` second.
-- The plain part must be readable on its own; do not use an empty placeholder.
-- Use UTF-8 for both parts.
-- If attachments are needed, wrap the alternative body inside
-  `multipart/mixed`; do not replace the alternative body with one HTML part.
+```
+Content-Type: multipart/alternative; boundary="b"
+--b
+Content-Type: text/plain; charset="utf-8"
+<readable plain version>
+--b
+Content-Type: text/html; charset="utf-8"
+<the HTML>
+--b--
+```
 
-## HTML Constraints
+## HTML that survives email clients
+- **INLINE every style** (`style="..."` on each element). `<style>` blocks and external CSS are stripped by major clients. Use a tool/step that inlines CSS before send.
+- **Tables for layout**, not flexbox/grid (Outlook uses Word's rendering engine). Set explicit widths; avoid negative margins, position, float.
+- **Images:** absolute https URLs (no `cid:`/attachments unless intentional); ALWAYS set `alt` (many clients block images by default) and width/height; don't rely on background-images.
+- **Links:** full absolute URLs; don't hide critical info behind images-only.
+- **Keep it narrow** (~600px), web-safe fonts with fallbacks, sufficient contrast.
 
-- Use simple semantic structure: headings, paragraphs, lists, links, and tables
-  only when table layout is needed.
-- Inline critical CSS. Many clients strip `<style>`, external CSS, scripts,
-  forms, and complex positioning.
-- Keep widths responsive and conservative. Avoid relying on flexbox, grid,
-  JavaScript, web fonts, or background images for meaning.
-- Escape user-provided content before inserting it into HTML.
-- Make links absolute, descriptive, and visible in the plain-text fallback.
+## Verify BY RENDERING the received message (not the send log)
+"Sent" ≠ "renders". Verification = inspect the ACTUALLY-RECEIVED message: confirm it's `multipart/alternative` with both parts (read the raw MIME), and that it renders as HTML in a real client (or a rendering preview), images/links work, and the plain-text fallback is readable. A send-API 200 proves nothing about rendering.
 
-## Images And Attachments
-
-- Prefer hosted HTTPS images only when the recipient can tolerate remote-image
-  blocking.
-- Include meaningful alt text for images.
-- For required artifacts, attach the file or link to a durable location; do not
-  make comprehension depend on a remote image rendering.
-
-## Verification
-
-Before claiming an HTML email works:
-
-- Parse the outbound raw MIME and assert `multipart/alternative` contains both
-  `text/plain` and `text/html`.
-- Render or inspect the HTML in at least one realistic email client or browser
-  harness for layout regressions.
-- Fetch the sent or received message and verify recipient, subject, MIME shape,
-  HTML body, plain fallback, links, and attachments.
-- Treat send logs or API message IDs as insufficient by themselves.
+## DONE means
+The received message is multipart/alternative with a text/plain fallback AND a text/html part; styles are inlined; it renders correctly in a real client; verified by inspecting the received MIME + rendering — not by the send log.
