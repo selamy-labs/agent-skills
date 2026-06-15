@@ -23,7 +23,7 @@ Don't make the agent call a tool to emit its own spans (circular, unreliable). I
      -- <the tool command>
    ```
 2. **Attributes that matter** (use semconv): `gen_ai.request.model`, `gen_ai.usage.input_tokens`/`output_tokens`, `gen_ai.operation.name`, the tool name, the task/run id, success/error. Latency is the span duration (automatic).
-3. **Context propagation:** pass the traceparent down so child tool-calls nest under the run (otel-cli `--tp-print`/env propagation).
+3. **Context propagation:** propagate the traceparent so child tool-calls nest under the run (otel-cli `--tp-print`/env propagation).
 4. **Export vendor-neutral OTLP** → the environment's backend (e.g. Cloud Trace on GCP) via the OTLP endpoint env (`OTEL_EXPORTER_OTLP_ENDPOINT`). Never hardcode a vendor.
 5. **Emit on failure too** — error spans with the failure attribute are the most valuable (where the trajectory broke).
 
