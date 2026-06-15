@@ -31,6 +31,22 @@ their own license terms; they should not be republished in this repository.
   rate-limit discipline, and terms-aware access choices.
 - `yield-on-wait`: checkpoint long waits, switch to other queued work, and
   resume from durable state instead of watching spinners.
+- `early-return-over-else`: reduce nesting with guard clauses and tests.
+- `map-dispatch-over-conditionals`: replace stable conditional chains with
+  explicit dispatch tables.
+- `enums-codify-behavior`: make behavior modes explicit and exhaustively
+  handled.
+- `complexity-budgets`: enforce branching, nesting, and function-size limits
+  with standard linters.
+- `feature-coverage-not-just-line-coverage`: pair coverage percentages with
+  named behavior checks and anti-overfit evidence.
+- `authoring-html-email`: compose and verify client-safe HTML email with
+  correct multipart MIME and render checks.
+
+## Decision Docs
+
+- `docs/code-style-foundation.md`: language-agnostic code-style baseline and
+  current open-source toolchain bindings.
 
 ## Versioning
 

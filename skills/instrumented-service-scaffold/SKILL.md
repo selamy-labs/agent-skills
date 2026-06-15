@@ -16,10 +16,18 @@ From the first commit, the service must include:
   environment's normal exporter.
 - Runtime flags through OpenFeature or the repository's established equivalent,
   with a source of truth that can be reviewed and rolled back.
-- A test harness with unit tests, contract tests where interfaces matter, and a
-  coverage gate appropriate to the risk of the service.
+- A formatter, linter, and type/static-analysis gate using the ecosystem's
+  standard tools for the service language.
+- Complexity and nesting budgets that stop new outliers before they become
+  review-only style debates.
+- A test harness with unit tests, contract tests where interfaces matter,
+  named feature checks for promised behavior, and a coverage gate appropriate
+  to the risk of the service.
 - PR-only delivery with branch protection and required checks for tests,
   coverage, release policy, and build/deploy validation.
+- Deploy, apply, and image-publish workflows with a per-repository or
+  per-environment concurrency group and `cancel-in-progress: false`; CI-only
+  workflows may cancel superseded runs, but state-changing delivery queues.
 - Conventional release or changelog metadata when the repository uses automated
   versioning.
 
@@ -45,7 +53,13 @@ Before claiming the service is ready, verify the real repository contains:
 - OpenTelemetry initialization code and at least one meaningful span or metric
   around a business-critical flow.
 - Runtime flag client initialization and a reviewed flag source.
-- Coverage configuration enforced by CI.
+- Formatter, linter, static-analysis, complexity, and coverage configuration
+  enforced by CI.
+- At least one feature-level behavior check for the primary user/system
+  promise, not only line coverage.
+- Deployment, infrastructure apply, release, and image-publish workflows declare
+  queue-not-cancel concurrency, scoped tightly enough to serialize each target
+  environment, state file, or published artifact.
 - Required PR checks and release policy checks in the repository settings or
   infrastructure source of truth.
 - Documentation that explains how to observe the service and change flags.

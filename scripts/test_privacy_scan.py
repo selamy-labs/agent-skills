@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
+"""Legacy test runner kept for CI backward compat. Real tests live in tests/."""
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 
-from privacy_scan import findings_for_text
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.privacy import findings_for_text
 
 
 class PrivacyScanTests(unittest.TestCase):

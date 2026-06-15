@@ -20,6 +20,11 @@ answer is not trustworthy without source lineage.
   run, API response, or user-visible behavior.
 - Explain how it was produced: source data, tool path, repo branch, execution
   path, or build/deploy path.
+- For a bug, incident, or runtime edge case, name the same-PR regression
+  ratchet that would have caught it. Use the cheapest durable layer:
+  container-structure test or runtime smoke assertion for container/runtime
+  shape, unit/regression test for code behavior, policy/Helm/IaC test for
+  configuration gaps, or monitoring alert when no test can catch the failure.
 - State the anti-shortcut check: no copied answer, no data leakage, no
   overfit/lookahead, no hallucinated route or feature, no unverified send.
 - Record gaps explicitly. If verification is queued or blocked, call it
@@ -30,3 +35,5 @@ answer is not trustworthy without source lineage.
 - A circular evaluation is not an independent win.
 - A merged PR with a broken user flow is not done.
 - A synthetic artifact without source-backed verification is a demo only.
+- A fix PR for a reproduced failure without its regression ratchet is
+  incomplete.

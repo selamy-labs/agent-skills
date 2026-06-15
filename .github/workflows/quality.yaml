@@ -33,3 +33,18 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: python scripts/validate_pr_title.py --title "$PR_TITLE" --body "$PR_BODY"
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install pytest pytest-cov ruff
+      - name: Lint with ruff
+        run: ruff check tools/ tests/
+      - name: Run tests with coverage
+        run: pytest --cov=tools --cov-report=term-missing --cov-fail-under=85
