@@ -1,0 +1,6 @@
+{
+  "name": "selamy-skills",
+  "version": "0.1.0",
+  "description": "Selamy Labs public engineering-discipline skills. Single versioned unit; pin by tag/SHA for reproducible installs. Hooks and MCP servers will be bundled here as they are harvested (#590 step 4).",
+  "skills": "./skills/"
+}
