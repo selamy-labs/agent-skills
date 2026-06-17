@@ -38,6 +38,8 @@ their own license terms; they should not be republished in this repository.
   handled.
 - `complexity-budgets`: enforce branching, nesting, and function-size limits
   with standard linters.
+- `single-responsibility`: when a unit is hard to reason about, decompose it
+  into single-responsibility units that collaborate through clear interfaces.
 - `feature-coverage-not-just-line-coverage`: pair coverage percentages with
   named behavior checks and anti-overfit evidence.
 - `authoring-html-email`: compose and verify client-safe HTML email with
