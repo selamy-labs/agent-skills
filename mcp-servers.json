@@ -1,0 +1,36 @@
+{
+  "mcpServers": {
+    "laneq": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "laneq[mcp] @ git+https://github.com/selamy-labs/laneq@v0.4.0",
+        "laneq-mcp"
+      ]
+    },
+    "reddit": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "reddit-mcp[mcp] @ git+https://github.com/selamy-labs/reddit-mcp@v0.1.0",
+        "reddit-mcp"
+      ]
+    },
+    "dispatch": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "dispatch-mcp[mcp] @ git+https://github.com/selamy-labs/dispatch-mcp@v0.1.0",
+        "dispatch-mcp"
+      ]
+    },
+    "memory": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "memory-mcp[mcp] @ git+https://github.com/selamy-labs/memory-mcp@v0.1.0",
+        "memory-mcp"
+      ]
+    }
+  }
+}
