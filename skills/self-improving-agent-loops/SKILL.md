@@ -75,8 +75,8 @@ a refinement step, not a fresh random draw — or it is search without learning.
 ## Design requirements
 
 - **A measurable objective.** The loop can only optimize what it can score. Define
-  a concrete, reproducible metric the system computes itself each round (a test
-  pass rate, an eval score, a benchmark number, a rubric). No human-judged score in
+  a concrete, reproducible metric the system computes itself each round (a fraction
+  of tests passing, an eval score, a benchmark number, a rubric). No human-judged score in
   the inner loop, or the loop stalls on you.
 - **Automated evaluation.** Scoring must run without a human, identically each
   round, or the loop is not autonomous. If evaluation needs taste, you have not
