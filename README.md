@@ -114,3 +114,26 @@ This repository is MIT licensed. Some practices are inspired by common
 industry patterns and public skill libraries. If a future skill adapts content
 from another project, preserve that project's license and attribution in the
 same change.
+
+## Use as a Claude Code plugin marketplace (#590)
+
+These skills are distributed as a versioned Claude Code **plugin** via the
+marketplace manifest in `.claude-plugin/`. This replaces bespoke skill sync:
+declare the marketplace + enable the plugin (pinned) in a workload, and Claude
+Code installs/updates it natively and reproducibly.
+
+Per-workload `.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "selamy-labs": { "source": { "source": "github", "repo": "selamy-labs/agent-skills" } }
+  },
+  "enabledPlugins": { "selamy-skills@selamy-labs": true }
+}
+```
+
+Pin to a tag or commit for reproducibility (recommended for workloads), e.g.
+`/plugin marketplace add selamy-labs/agent-skills@<tag-or-sha>`. Private/headless
+or agent contexts need a `GITHUB_TOKEN` / `GH_TOKEN` in the environment for
+auto-update. Workload-unique skills stay local and layer on top of these shared ones.
