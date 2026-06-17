@@ -7,22 +7,26 @@ description: Use when an agent operates a UI on the user's behalf through conver
 
 A UX where the **agent operates the application for the user through conversation**: the user says "go to Atlas and show this address" and the agent drives the map + street view; "set the campaign time" and events appear in the live calendar instantly. The agent isn't just chatting beside the app — it **drives** the app, and the UI stays in **real-time sync** both ways.
 
-## Adopt the open protocol — don't invent one
-Use **AG-UI (Agent–User Interaction Protocol)** as the standard for this layer rather than a bespoke websocket scheme:
+## Adopt an open protocol — don't invent one
+Drive the app over an open, standardized agent-to-UI protocol rather than a
+bespoke websocket scheme. The properties that matter for this layer:
 - Open, lightweight, **bi-directional** connection between a user-facing app and any agent backend.
-- Streams a **single JSON event sequence** over standard HTTP / **SSE** (optional binary channel).
-- Event types: **messages, tool calls, state patches, lifecycle signals.**
+- A **single event stream** over standard HTTP / **SSE** (with an optional binary channel).
+- Event types covering **messages, tool calls, state patches, and lifecycle signals.**
 - **Shared state**: bi-directional sync of agent ↔ application state (read/write or read-only).
-- Built-in **frontend tool calls** (agent invokes UI actions), **human-in-the-loop approvals**, session management.
-- Backend-agnostic; TypeScript / Python SDKs.
+- **Frontend tool calls** (agent invokes UI actions), **human-in-the-loop approvals**, and session management.
+- Backend-agnostic, with first-class client SDKs.
 
-Source/spec: `github.com/ag-ui-protocol/ag-ui` (CopilotKit). Evaluate `A2UI` if generative/declarative UI is needed (related, different scope).
+The reference implementation of this layer is the **AG-UI (Agent–User
+Interaction Protocol)**. Prefer an established protocol with these properties
+over rolling your own; evaluate a declarative/generative-UI protocol separately
+if the app needs the agent to *render* UI rather than *drive* existing UI.
 
-## Where it sits in the 2026 stack
-Layer the protocols, don't conflate them:
-- **MCP** — agent ↔ tools/data.
-- **A2A** — agent ↔ other agents.
-- **AG-UI** — agent runtime ↔ the user-facing app. ← this skill.
+## How the protocol layers compose
+Each layer connects a different pair of parties — keep them distinct:
+- **Agent ↔ tools/data** (e.g. MCP).
+- **Agent ↔ other agents** (e.g. A2A).
+- **Agent runtime ↔ the user-facing app** — this skill's layer.
 
 ## Design rules
 1. **Frontend actions are tools.** Model "navigate", "set field", "open view", "create event" as explicit frontend tool calls the agent invokes — not free-text the UI guesses at.

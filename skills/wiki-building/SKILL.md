@@ -5,7 +5,7 @@ description: Use when building or maintaining a durable, compounding knowledge b
 
 # Wiki Building (the LLM-Wiki pattern)
 
-A durable, **plain-markdown** knowledge base that **compounds** over time and is queried by feeding files into a **long-context model** — **no RAG, no chunking, no embeddings.** Based on Andrej Karpathy's LLM-Wiki pattern. This skill is **how to build/maintain** the wiki; pair it with where it lives (a read/write blob store) and how knowledge is shared/verified across agents — one coherent story, not three competing skills.
+A durable, **plain-markdown** knowledge base that **compounds** over time and is queried by feeding files into a **long-context model** — **no RAG, no chunking, no embeddings.** Based on Andrej Karpathy's LLM-Wiki pattern. This skill is **how to build and maintain** the wiki; pair it with wherever it lives (any read/write store).
 
 ## The structure
 ```
@@ -31,9 +31,6 @@ Treat knowledge like a build: **compile `/raw` → `/wiki` artifacts once; query
 4. **`agents.md` defines the contract** — how agents read, when they recompile, how they add to `/raw`.
 5. **Legibility over cleverness** — a human can read any page; that's the point.
 
-## Surface it once, universally
-When deploying across a fleet: surface this skill **once, audience = universal** (all agents and operators), resolved via a common skill root — **never per-agent copies, no colliding/ambiguous names, no org prefixes** (apply `skill-curation`). It's generically useful and based on public work → **public-first** (privacy-scanner gate).
-
 ## When to use / not
 - **Use** for building a compounding, legible knowledge base queried by long context.
 - **Not** for high-churn structured data needing real-time queries (use a database), or when the corpus genuinely exceeds practical context limits and retrieval is unavoidable.
@@ -42,7 +39,4 @@ When deploying across a fleet: surface this skill **once, audience = universal**
 - Reaching for RAG/embeddings/chunking by default when long-context + compiled pages suffice.
 - Editing `/raw` (destroys ground truth) instead of correcting in `/wiki`.
 - Dumping concatenated sources into `/wiki` without synthesis (no compile step).
-- Per-agent duplicate wikis with drifting content / colliding skill names.
-
-## Related (composition, not duplication)
-The pattern comes from public Karpathy material (the LLM-wiki write-up). Adopt existing public skills where they cover a piece (e.g. the widely-used "Karpathy guidelines" for coding discipline) and dedup against them rather than rebuild — see `skill-curation`.
+- Duplicate wikis with drifting content instead of one recompiled source.

@@ -10,22 +10,26 @@ much, nest too deeply, take too many parameters, or own too many responsibilitie
 
 ## Workflow
 
-1. Use the repository's existing formatter and linter first.
-2. Add the smallest complexity rule that catches the problem: cyclomatic
-   complexity, cognitive complexity, max nesting depth, max function length, or
-   max parameter count.
-3. Set the first threshold to stop new outliers without requiring a large
-   cleanup PR. A threshold near 10 is a practical starting point for many
-   cyclomatic-complexity tools.
-4. Add focused tests around a complex function before reducing complexity.
-5. Ratchet thresholds down only after code is already below the new threshold.
+1. Run the repository's existing formatter and linter first.
+2. Add the smallest rule that catches the problem — cyclomatic complexity,
+   cognitive complexity, max nesting depth, max function length, or max
+   parameter count — not all of them.
+3. Set the first threshold to the current worst offender, so it stops *new*
+   outliers without forcing a cleanup PR. For cyclomatic complexity, a starting
+   threshold of 10 is the conventional default across the linters below; raise
+   it to fit existing debt, then ratchet down.
+4. Add focused tests around a complex function before reducing its complexity.
+5. Lower a threshold only after the code is already below the new value.
 
 ## Tool Bindings
 
-- Python: Ruff with McCabe complexity rules enabled.
-- TypeScript and JavaScript: ESLint complexity and max-depth rules; use
+Each tool's cyclomatic-complexity check defaults to a limit near 10 — a sound
+starting point before ratcheting:
+
+- Python: Ruff with McCabe (`C901`) complexity rules enabled.
+- TypeScript and JavaScript: ESLint `complexity` and `max-depth`; use
   typescript-eslint where type information matters.
-- Go: golangci-lint with gocyclo or gocognit.
+- Go: golangci-lint with `gocyclo` or `gocognit`.
 - Java: Checkstyle complexity checks plus SpotBugs for bug patterns.
 - Kotlin: detekt complexity rules.
 - Shell: ShellCheck plus shfmt; extract shell functions once branches grow.
