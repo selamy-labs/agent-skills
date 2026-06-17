@@ -1,0 +1,36 @@
+{
+  "mcpServers": {
+    "laneq": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/selamy-labs/laneq@v0.3.0",
+        "laneq-mcp"
+      ]
+    },
+    "reddit": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/selamy-labs/reddit-mcp@ab789d4d83c767fc826407e1eab27b48124944d7",
+        "reddit-mcp"
+      ]
+    },
+    "dispatch": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/selamy-labs/dispatch-mcp@14afca48df83fa8070aad6c654c83e8308059758",
+        "dispatch-mcp"
+      ]
+    },
+    "memory": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/selamy-labs/memory-mcp@5d54573604409a2ba62a5081bf4d91233cbbbba2",
+        "memory-mcp"
+      ]
+    }
+  }
+}

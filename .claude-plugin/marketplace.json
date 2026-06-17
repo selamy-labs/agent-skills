@@ -1,16 +1,16 @@
 {
   "name": "selamy-labs",
   "owner": { "name": "Selamy Labs" },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "metadata": {
-    "description": "Selamy Labs public engineering-discipline skills, distributed as a versioned Claude Code plugin (#590). Workloads declare this marketplace + enable the plugin, pinned, instead of bespoke sync."
+    "description": "Selamy Labs public engineering-discipline skills plus four bundled MCP servers, distributed as a versioned Claude Code plugin. Workloads declare this marketplace + enable the plugin, pinned, instead of bespoke sync."
   },
   "plugins": [
     {
       "name": "selamy-skills",
       "source": "./",
-      "version": "0.1.0",
-      "description": "Public engineering-discipline skills (process-aware-done, iac-not-ad-hoc, yield-on-wait, technical-integrity, terraform-module-layout, grounded-generation, using-laneq, and more)."
+      "version": "0.2.0",
+      "description": "Public engineering-discipline skills (process-aware-done, iac-not-ad-hoc, yield-on-wait, technical-integrity, terraform-module-layout, grounded-generation, using-laneq, and more) plus four MCP servers (laneq, reddit, dispatch, memory)."
     }
   ]
 }
