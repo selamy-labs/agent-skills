@@ -37,7 +37,7 @@ Single-concept tests **multiply the test count** → more suite time + maintenan
 
 ## When to use / not
 - **Use** for designing or reviewing test *structure/quality*.
-- **Not** the place for the red-green-refactor loop, mocking strategy, or fakes-vs-mocks — see the upstream TDD skills and the relevant fakes/sim-zero guidance.
+- **Not** the place for the red-green-refactor loop, or test-double strategy (fakes-vs-mocks) — see the upstream TDD skills and [[prefer-fakes-over-mocks]].
 
 ## Per-language bindings
 - **Python (pytest):** AAA with blank lines; `@pytest.mark.parametrize` with `ids=[...]` for labels; soft checks via `pytest.raises`/`pytest-check` or grouping asserts on one object; descriptive `test_<behavior>_when_<condition>` names.
