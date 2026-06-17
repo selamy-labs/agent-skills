@@ -1,6 +1,6 @@
 ---
 name: agent-drives-ui
-description: Use when building an app where an agent operates the UI on the user's behalf through conversation — navigating, filling forms, updating live views, calling frontend tools — with real-time bi-directional state sync. Activates on "conversational app control", "agent drives the front end", "agentic UX", or choosing a protocol to connect an agent backend to a user-facing app.
+description: Use when an agent operates a UI on the user's behalf through conversation, navigating, filling forms, updating live views, with real-time bi-directional state sync. Activates on conversational app control, agent drives the front end, agentic UX, or choosing an agent-to-app protocol.
 ---
 
 # Agent Drives the UI (AG-UI pattern)

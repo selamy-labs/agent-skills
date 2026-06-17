@@ -1,6 +1,6 @@
 ---
 name: sim-zero-mode
-description: Use when building or testing an app/agent that depends on paid APIs, LLM calls, or external services, and you need to exercise the plumbing/UI/harness without spend or real intelligence — for CI, local dev, and safe demos. Activates on "test without burning API budget", "demo without live calls", "is the wiring correct", or designing a fakes/offline mode.
+description: Use when building/testing an app or agent that depends on paid APIs or LLM calls and you must exercise plumbing/UI/harness without spend or real intelligence, for CI, demos, local dev. Activates on test without burning API budget, demo without live calls, or fakes/offline mode.
 ---
 
 # Sim-Zero Mode
