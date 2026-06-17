@@ -24,14 +24,5 @@ was necessary.
 
 ## Module Structure (Terraform / OpenTofu)
 
-Keep each module to four files: `main.tf`, `variables.tf`, `outputs.tf`, and
-`locals.tf`. The root module additionally has `providers.tf` and, when remote
-state is used, `backend.tf`. If you find you need another file, that is usually
-a signal to decompose into a smaller submodule rather than to add a file.
-
-Share reusable modules through a dedicated modules repository and import them by
-pinned git source:
-
-    module "example" {
-      source = "git::https://github.com/<org>/terraform-modules.git//modules/<name>?ref=<tag>"
-    }
+For Terraform/OpenTofu module file layout, see the `terraform-module-layout`
+skill.
