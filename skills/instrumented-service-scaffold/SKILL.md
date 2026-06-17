@@ -12,23 +12,23 @@ API, or other long-running software component.
 
 From the first commit, the service must include:
 
-- OpenTelemetry traces, metrics, and structured logs wired through the
-  environment's normal exporter.
-- Runtime flags through OpenFeature or the repository's established equivalent,
-  with a source of truth that can be reviewed and rolled back.
-- A formatter, linter, and type/static-analysis gate using the ecosystem's
-  standard tools for the service language.
-- Complexity and nesting budgets that stop new outliers before they become
-  review-only style debates.
-- A test harness with unit tests, contract tests where interfaces matter,
-  named feature checks for promised behavior, and a coverage gate appropriate
-  to the risk of the service.
+- OpenTelemetry traces, metrics, and structured logs wired through a real
+  exporter.
+- A runtime flag client (e.g. OpenFeature) backed by a flag source that can be
+  reviewed and rolled back without a redeploy.
+- A formatter, linter, and type/static-analysis gate using the language's
+  standard tools.
+- Complexity and nesting budgets that stop new outliers before they turn into
+  review-time style debates.
+- A test harness: unit tests, contract tests where interfaces matter, at least
+  one feature check for promised behavior, and a coverage gate sized to the
+  service's risk.
 - PR-only delivery with branch protection and required checks for tests,
   coverage, release policy, and build/deploy validation.
-- Deploy, apply, and image-publish workflows with a per-repository or
-  per-environment concurrency group and `cancel-in-progress: false`; CI-only
-  workflows may cancel superseded runs, but state-changing delivery queues.
-- Conventional release or changelog metadata when the repository uses automated
+- State-changing delivery workflows (deploy, apply, image-publish) that
+  serialize per target via a concurrency group with `cancel-in-progress: false`;
+  read-only CI may cancel superseded runs.
+- Conventional release or changelog metadata when the repo uses automated
   versioning.
 
 Do not defer these to a later hardening pass. If the service is too small to
@@ -48,21 +48,22 @@ owner's behalf.
 
 ## Conformance Check
 
-Before claiming the service is ready, verify the real repository contains:
+Before claiming the service is ready, grep the real repository for each item —
+not the intent, the artifact:
 
-- OpenTelemetry initialization code and at least one meaningful span or metric
-  around a business-critical flow.
-- Runtime flag client initialization and a reviewed flag source.
-- Formatter, linter, static-analysis, complexity, and coverage configuration
-  enforced by CI.
-- At least one feature-level behavior check for the primary user/system
-  promise, not only line coverage.
-- Deployment, infrastructure apply, release, and image-publish workflows declare
-  queue-not-cancel concurrency, scoped tightly enough to serialize each target
-  environment, state file, or published artifact.
-- Required PR checks and release policy checks in the repository settings or
-  infrastructure source of truth.
-- Documentation that explains how to observe the service and change flags.
+- OpenTelemetry init code and at least one meaningful span or metric on a
+  business-critical flow.
+- Runtime flag client init pointing at a reviewed flag source.
+- Formatter, linter, static-analysis, complexity, and coverage config enforced
+  by CI (the config files plus the CI job that runs them).
+- At least one feature-level behavior check for the primary promise, not only
+  line coverage.
+- State-changing workflows (deploy, apply, release, image-publish) that declare
+  queue-not-cancel concurrency scoped to serialize each target environment,
+  state file, or published artifact.
+- Required PR checks and release-policy checks present in the repo settings or
+  IaC source of truth.
+- Docs that explain how to observe the service and change a flag.
 
-Record any exception as a blocker or an explicit temporary waiver with a removal
-date. Do not call the service production-ready while the baseline is missing.
+Record any gap as a blocker or an explicit temporary waiver with a removal date.
+Do not call the service production-ready while the baseline is missing.
