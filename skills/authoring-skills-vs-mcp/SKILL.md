@@ -35,14 +35,8 @@ Hybrids are real: keep the **methodology** as a skill and the **call** as an MCP
 - **Idempotency & errors**: make writes safe to retry; return typed errors the agent can branch on.
 - **Provenance / security audit**: run the server through a **static skill/tool audit** (malicious-code + injection scan) before any agent adopts it.
 
-## 4. The gates (both artifacts)
-- **Privacy / secret scanner** — nothing ships with secrets or private references.
-- **Utility / gold bar** — proven behavioral value, not elegance.
-- **Gated PR, never direct-push** — review + required checks; one unit per PR.
-- **Contribution guide** — a documented path so others can add artifacts the same way.
-
-## 5. Public-first model
-Default to the most-shared safe home: **public first → thin internal wrapper → dense internal only as a last resort.** A public artifact carries **zero org traces** — it never references internal systems or counterparts, *not even their absence*. Public skills and servers are a visibility flywheel; protect it with a gold-only bar, because slop kills the flywheel.
+## 4. Gates and where it ships
+Both artifacts clear the same publishing bar — gold-only utility, privacy/secret scan, gated PR, public-first routing. That bar lives in **`skill-curation`**; apply it, don't restate it here.
 
 ## When to use / not
 - **Use** when classifying a capability/knowledge item, or deciding how to extend an agent.
