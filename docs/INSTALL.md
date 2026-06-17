@@ -63,24 +63,32 @@ workload's `settings.json` — nothing else changes.
 ## The four bundled MCP servers
 
 Declared in `mcp-servers.json`. Each launches its published console-script entry
-point through `uvx`, pinned to a git ref so installs are reproducible:
+point through `uvx`, pinned to a release **tag** so installs are reproducible:
 
 | Server name | Source repo | Entry point | Pin |
 | --- | --- | --- | --- |
-| `laneq` | `selamy-labs/laneq` | `laneq-mcp` | tag `v0.3.0` |
-| `reddit` | `selamy-labs/reddit-mcp` | `reddit-mcp` | commit SHA |
-| `dispatch` | `selamy-labs/dispatch-mcp` | `dispatch-mcp` | commit SHA |
-| `memory` | `selamy-labs/memory-mcp` | `memory-mcp` | commit SHA |
+| `laneq` | `selamy-labs/laneq` | `laneq-mcp` | tag `v0.4.0` |
+| `reddit` | `selamy-labs/reddit-mcp` | `reddit-mcp` | tag `v0.1.0` |
+| `dispatch` | `selamy-labs/dispatch-mcp` | `dispatch-mcp` | tag `v0.1.0` |
+| `memory` | `selamy-labs/memory-mcp` | `memory-mcp` | tag `v0.1.0` |
 
-`laneq` is pinned to a published release tag. The other three repos do not yet
-carry release tags, so they are pinned to an exact commit SHA (the most
-reproducible pin available). When those repos start cutting `vX.Y.Z` tags, swap
-the SHA for the tag in `mcp-servers.json`.
+In every repo the `mcp` SDK is an **optional** dependency (extra `[mcp]`), and
+the MCP entry point only exists from the tagged version above (for `laneq` the
+`laneq-mcp` entry point and the `[mcp]` extra are on `v0.4.0`, not the older
+`v0.3.0`). Each launch therefore installs the extra and pins to the tag:
+
+```
+uvx --from "laneq[mcp] @ git+https://github.com/selamy-labs/laneq@v0.4.0" laneq-mcp
+```
+
+Without the `[mcp]` extra the entry point ImportErrors at launch
+(`requires the 'mcp' package`); with it, the server starts. To roll a server
+forward, cut a new tag in its repo and bump the `@vX.Y.Z` in `mcp-servers.json`.
 
 ### Runtime requirements on each workload
 
 - **`uvx`** (from [uv](https://docs.astral.sh/uv/)) must be on `PATH`.
-- **git access to the source repos.** `uvx --from git+https://github.com/...`
+- **git access to the source repos.** `uvx --from "<pkg>[mcp] @ git+https://github.com/..."`
   performs a git fetch at launch, so the host needs read access to each repo. If
   any repo is not publicly readable, configure a git credential helper (or a
   token-bearing remote) before enabling the plugin; otherwise the MCP server

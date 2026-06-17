@@ -4,7 +4,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/selamy-labs/laneq@v0.3.0",
+        "laneq[mcp] @ git+https://github.com/selamy-labs/laneq@v0.4.0",
         "laneq-mcp"
       ]
     },
@@ -12,7 +12,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/selamy-labs/reddit-mcp@ab789d4d83c767fc826407e1eab27b48124944d7",
+        "reddit-mcp[mcp] @ git+https://github.com/selamy-labs/reddit-mcp@v0.1.0",
         "reddit-mcp"
       ]
     },
@@ -20,7 +20,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/selamy-labs/dispatch-mcp@14afca48df83fa8070aad6c654c83e8308059758",
+        "dispatch-mcp[mcp] @ git+https://github.com/selamy-labs/dispatch-mcp@v0.1.0",
         "dispatch-mcp"
       ]
     },
@@ -28,7 +28,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/selamy-labs/memory-mcp@5d54573604409a2ba62a5081bf4d91233cbbbba2",
+        "memory-mcp[mcp] @ git+https://github.com/selamy-labs/memory-mcp@v0.1.0",
         "memory-mcp"
       ]
     }
