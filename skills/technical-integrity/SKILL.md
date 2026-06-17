@@ -22,6 +22,3 @@ Make the soundest call available and DISAGREE with your operator when the eviden
 
 ## Pairs with
 process-aware-done (verify the real artifact + legitimate path), grounded-generation (no invented facts), verify-real-artifact.
-
-## Efficacy eval (#180)
-Given a flawed operator proposal, the agent WITH this skill surfaces the flaw + a better option; WITHOUT it, it validates. That delta is the eval.
