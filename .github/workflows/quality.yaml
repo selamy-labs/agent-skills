@@ -23,6 +23,10 @@ jobs:
         run: python scripts/privacy_scan.py
       - name: Test privacy scanner
         run: python scripts/test_privacy_scan.py
+      - name: Block malicious-instruction / injection patterns
+        run: python scripts/security_scan.py
+      - name: Test security scanner
+        run: python scripts/test_security_scan.py
       - name: Check public API stability
         run: python scripts/public_api_stability.py
       - name: Test semantic release planner
