@@ -42,6 +42,14 @@ their own license terms; they should not be republished in this repository.
   named behavior checks and anti-overfit evidence.
 - `authoring-html-email`: compose and verify client-safe HTML email with
   correct multipart MIME and render checks.
+- `colocated-pod-tolerations`: when pinning a pod to a node via affinity, carry
+  that node's tolerations or it is permanently unschedulable.
+- `batched-ssh-enumeration`: run host-enumeration loops with non-interactive
+  bounded SSH and heartbeat-based wedged detection.
+- `resilient-pool-refresh`: isolate per-item failures, classify terminal vs
+  transient, and alert clearly when refreshing a pool of credentials.
+- `rwo-volume-maintenance`: prefer snapshot/offline processing and bound
+  single-writer maintenance jobs so they cannot starve themselves.
 
 ## Decision Docs
 
