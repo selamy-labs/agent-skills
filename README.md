@@ -2,6 +2,12 @@
 
 Reusable, public `SKILL.md` workflows for AI coding and operations agents.
 
+Part of Patrick Selamy's public agent-systems work:
+[selamy.dev](https://selamy.dev) ·
+[GitHub profile](https://github.com/pselamy) ·
+[laneq](https://github.com/selamy-labs/laneq) ·
+[resume](https://selamy.dev/resume/)
+
 This repository is intentionally generic. It contains durable engineering
 practices that can be used in any organization without depending on customer
 names, local filesystem paths, credentials, or product-specific
@@ -137,13 +143,19 @@ Per-workload `.claude/settings.json`:
 ```json
 {
   "extraKnownMarketplaces": {
-    "selamy-labs": { "source": { "source": "github", "repo": "selamy-labs/agent-skills" } }
+    "selamy-labs": {
+      "source": {
+        "source": "github",
+        "repo": "selamy-labs/agent-skills"
+      }
+    }
   },
   "enabledPlugins": { "selamy-skills@selamy-labs": true }
 }
 ```
 
 Pin to a tag or commit for reproducibility (recommended for workloads), e.g.
-`/plugin marketplace add selamy-labs/agent-skills@<tag-or-sha>`. Private/headless
-or agent contexts need a `GITHUB_TOKEN` / `GH_TOKEN` in the environment for
-auto-update. Workload-unique skills stay local and layer on top of these shared ones.
+`/plugin marketplace add selamy-labs/agent-skills@<tag-or-sha>`.
+Private/headless or agent contexts need a `GITHUB_TOKEN` / `GH_TOKEN` in the
+environment for auto-update. Workload-unique skills stay local and layer on top
+of these shared ones.
