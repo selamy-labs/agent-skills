@@ -31,6 +31,11 @@ _SELF_SCAN_PATHS = {
     "scripts/test_security_scan.py",
     "tools/security/__init__.py",
     "tests/test_security.py",
+    # Intentional known-bad sample for the regression test (see
+    # tests/test_fixtures.py::TestFixtureRejections.test_malicious_skill_rejected).
+    # Excluded from the live gate so the deliberate poison does not fail the real
+    # scan, while the scanner still inspects every OTHER file under tests/.
+    "tests/fixtures/malicious-skill/SKILL.md",
 }
 
 # (category, human description, compiled pattern). IGNORECASE throughout.
