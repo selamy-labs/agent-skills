@@ -167,3 +167,20 @@ Pin to a tag or commit for reproducibility (recommended for workloads), e.g.
 Private/headless or agent contexts need a `GITHUB_TOKEN` / `GH_TOKEN` in the
 environment for auto-update. Workload-unique skills stay local and layer on top
 of these shared ones.
+
+## Install with the skills CLI (any agent)
+
+For cross-agent or ad-hoc installs, the [`skills`](https://github.com/vercel-labs/skills)
+CLI installs straight from this monorepo, no per-skill repo needed:
+
+```bash
+npx skills add selamy-labs/agent-skills            # add all skills
+npx skills add selamy-labs/agent-skills --list     # enumerate available skills
+npx skills add selamy-labs/agent-skills --skill <name>   # add a single skill
+```
+
+It works across agents that read `SKILL.md` (Claude Code, Codex, and others).
+Pin to a tag or commit (`selamy-labs/agent-skills@<tag-or-sha>`) for reproducible
+installs. The marketplace plugin above is the reproducible, pinned channel for
+the fleet; this CLI is the one-command path for everyone else. Same monorepo,
+two channels.
