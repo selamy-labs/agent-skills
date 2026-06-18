@@ -125,7 +125,7 @@ industry patterns and public skill libraries. If a future skill adapts content
 from another project, preserve that project's license and attribution in the
 same change.
 
-## Use as a Claude Code plugin marketplace (#590)
+## Use as a Claude Code plugin marketplace
 
 These skills are distributed as a versioned Claude Code **plugin** via the
 marketplace manifest in `.claude-plugin/`. This replaces bespoke skill sync:
