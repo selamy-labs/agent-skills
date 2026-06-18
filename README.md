@@ -58,6 +58,13 @@ their own license terms; they should not be republished in this repository.
   transient, and alert clearly when refreshing a pool of credentials.
 - `rwo-volume-maintenance`: prefer snapshot/offline processing and bound
   single-writer maintenance jobs so they cannot starve themselves.
+- `oke-arc-runners-opentofu`: design OKE-hosted Actions Runner Controller
+  runner scale sets with OpenTofu, GitOps, GitHub App secrets, and OKE-aware
+  autoscaling.
+- `secret-to-secret-manager-verified`: migrate secrets with non-empty
+  extraction, exact-byte readback, and hash verification before source removal.
+- `full-disk-forensics`: diagnose full filesystems, especially `df` versus
+  `du` gaps, deleted-open files, privilege blind spots, and safe cleanup.
 
 ## Decision Docs
 
