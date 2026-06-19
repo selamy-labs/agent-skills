@@ -72,6 +72,15 @@ their own license terms; they should not be republished in this repository.
 - `docs/code-style-foundation.md`: language-agnostic code-style baseline and
   current open-source toolchain bindings.
 
+## Public Code Coverage
+
+This public repository requires at least 90 percent coverage for repo-owned
+tooling code. The percentage applies to `tools/` and the tests around the
+validators, scanners, and release helpers. Skill content correctness is enforced
+separately by the SKILL conformance, privacy, security, and public API stability
+checks, so markdown-heavy content is not used to inflate the code coverage
+number.
+
 ## Versioning
 
 Consumers should pin this repository by semantic version tag, not by a raw
