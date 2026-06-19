@@ -51,4 +51,4 @@ jobs:
       - name: Lint with ruff
         run: ruff check tools/ tests/
       - name: Run tests with coverage
-        run: pytest --cov=tools --cov-report=term-missing --cov-fail-under=85
+        run: pytest --cov=tools --cov-report=term-missing --cov-fail-under=90
