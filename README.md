@@ -43,6 +43,11 @@ their own license terms; they should not be republished in this repository.
   explicit dispatch tables.
 - `enums-codify-behavior`: make behavior modes explicit and exhaustively
   handled.
+- `parse-dont-validate`: parse loose input into typed domain shapes at
+  boundaries.
+- `exhaustive-match`: make finite variants handled exhaustively by tools or
+  tests.
+- `table-driven-tests`: cover one behavior across named input/output cases.
 - `complexity-budgets`: enforce branching, nesting, and function-size limits
   with standard linters.
 - `single-responsibility`: when a unit is hard to reason about, decompose it
