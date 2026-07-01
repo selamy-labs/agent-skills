@@ -34,6 +34,8 @@ their own license terms; they should not be republished in this repository.
 - `instrumented-service-scaffold`: create long-running services with
   observability, runtime flags, tests, coverage gates, and release controls
   from the first commit.
+- `agentic-coding-loop`: implement code from a spec through a bounded
+  build-test-fix loop with explicit checks, stop conditions, and evidence.
 - `reddit-research`: collect Reddit discussion signals with source lineage,
   rate-limit discipline, and terms-aware access choices.
 - `yield-on-wait`: checkpoint long waits, switch to other queued work, and
