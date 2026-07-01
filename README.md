@@ -38,6 +38,8 @@ their own license terms; they should not be republished in this repository.
   build-test-fix loop with explicit checks, stop conditions, and evidence.
 - `loop-governance-and-learning`: turn durable lessons from loops, reviews,
   bugs, and incidents into the right tests, skills, docs, or decision logs.
+- `product-feedback-loop`: turn stakeholder, customer, beta, analytics, and
+  interview feedback into product decisions, tracked work, and verification.
 - `reddit-research`: collect Reddit discussion signals with source lineage,
   rate-limit discipline, and terms-aware access choices.
 - `yield-on-wait`: checkpoint long waits, switch to other queued work, and
