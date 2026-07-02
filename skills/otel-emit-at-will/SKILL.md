@@ -12,6 +12,7 @@ An agent often wants to record something while it works: a value it just compute
 - **Metrics are the primary at-will path.** Counters, gauges, and histograms are **context-free**: they carry no trace or parent, so an agent can emit one at any point, safely, with no setup. Use a metric for any ad-hoc value: a running total, a count, a measured size or duration, a score. This is the default; reach for it first.
 - **Events/logs are occurrence markers.** For "X happened" with no value, emit a log record or span event. Attach it to the **active span if one exists**; otherwise emit it standalone. No new span is created just to hold an event.
 - **Spans only for bounded operations you can parent.** Create a span only for a clear start-to-end operation, and **auto-parent it to the active trajectory span** via `traceparent`. **Never orphan a span.** If you cannot establish a parent, do not emit a span: record a metric or an event instead. An orphan span is worse than no span.
+- **State changes whose history must be reconstructable are events carrying the change, not gauges of the result.** If anyone will ask "how did this value get here?" (quota spend, budget, membership), a latest-value metric destroys provenance — emit the change itself, with enough data to re-derive the running state. Compose with `event-sourcing` (https://github.com/selamy-labs/agent-skills/tree/main/skills/event-sourcing).
 
 ## Conventions
 

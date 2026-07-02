@@ -30,6 +30,10 @@ From the first commit, the service must include:
   read-only CI may cancel superseded runs.
 - Conventional release or changelog metadata when the repo uses automated
   versioning.
+- For state where change history matters (quotas, balances, membership,
+  config), record changes as replayable events rather than only the latest
+  value; compose with `event-sourcing`
+  (https://github.com/selamy-labs/agent-skills/tree/main/skills/event-sourcing).
 
 Do not defer these to a later hardening pass. If the service is too small to
 justify them, document that decision and keep it short-lived or non-production.
@@ -63,6 +67,9 @@ not the intent, the artifact:
   state file, or published artifact.
 - Required PR checks and release-policy checks present in the repo settings or
   IaC source of truth.
+- For any state the service declared history-bearing: an append-only
+  event/change record plus the code path that emits it — not only a
+  latest-value column or gauge.
 - Docs that explain how to observe the service and change a flag.
 
 Record any gap as a blocker or an explicit temporary waiver with a removal date.
