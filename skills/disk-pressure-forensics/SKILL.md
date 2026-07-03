@@ -37,6 +37,29 @@ normal `du` output does not explain.
    - root-owned directories can make unprivileged `du` under-report.
    - suppressed errors can turn a permission problem into a false "empty" result.
 
+## Kubernetes Local-Path Trap
+
+On single-node k3s or similar clusters, `local-path` PersistentVolumes,
+container images, writable overlay layers, pod logs, and kubelet eviction
+accounting can all share the node root filesystem. A pod may report its mounted
+state path as "full" even when its PVC request looks large enough, because the
+PVC is just a directory on the same root disk.
+
+When Kubernetes reports `DiskPressure=True`:
+
+- Check the node condition and kubelet summary first:
+  - `kubectl describe node <node>`
+  - `kubectl get --raw /api/v1/nodes/<node>/proxy/stats/summary`
+- Separate `imageFs` from local-path PVC usage:
+  - containerd image/snapshot data is usually under
+    `/var/lib/rancher/k3s/agent/containerd`
+  - local-path PVC data is usually under `/var/lib/rancher/k3s/storage`
+- If GitOps controllers are down because of disk pressure, merge the desired
+  source change first, then use a short controller-gap bridge that applies the
+  same declared manifest. Record it as bridge work, not a new source of truth.
+- Stop recurring CronJobs that pull large images before trying deeper cleanup;
+  a failed image pull can consume the last free blocks repeatedly.
+
 ## Cleanup Rules
 
 - Prefer deleting caches, build outputs, and clearly abandoned temp work.
@@ -44,6 +67,14 @@ normal `du` output does not explain.
   for incident reconstruction without an explicit owner decision.
 - For recurring pressure, codify cleanup as a timer or job with an allowlist and
   a dry-run mode.
+- In Kubernetes incidents, prefer service-native cleanup before manual host
+  deletion:
+  - delete terminal `Failed` / `Succeeded` pods when their logs have been
+    captured
+  - use `crictl rmi --prune` for unused images
+  - prune only allowlisted rebuildable cache paths such as `.cache`, `.npm`,
+    `tmp`, or language-server caches; do not prune databases, sessions,
+    credentials, queues, or archives unless they have an owner-approved backup
 
 ## Done
 

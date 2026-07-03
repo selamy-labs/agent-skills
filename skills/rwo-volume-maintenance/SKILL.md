@@ -58,3 +58,20 @@ deadline is the safety net.
       mid-run doesn't corrupt or lose progress.
 - [ ] Store growth is monitored, so maintenance falling behind is visible before
       it becomes unrecoverable.
+
+## SQLite on agent state volumes
+
+For SQLite state on an RWO volume, treat compaction as offline maintenance:
+
+1. Capture `PRAGMA integrity_check`, `page_count`, `freelist_count`, and
+   `page_size` before changing the database.
+2. Stop the sole writer before `VACUUM`. Scaling a StatefulSet to zero for a
+   short maintenance window is safer than compacting while the service runs.
+3. Run `PRAGMA wal_checkpoint(TRUNCATE)` when the database uses WAL.
+4. Run `VACUUM` only when free disk is comfortably larger than the expected
+   compacted database size.
+5. Run `PRAGMA integrity_check` again and record the before/after size.
+6. Bring the writer back and run its health check.
+
+If the volume shares a root filesystem with container images, compaction may be
+the difference between a pod starting and a startup-health gate refusing writes.
