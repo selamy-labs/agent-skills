@@ -48,6 +48,11 @@ class TestParseFrontmatter:
         assert data["name"] == "my-skill"
         assert data["description"] == "A test skill"
 
+    def test_metadata_mapping_is_valid(self) -> None:
+        text = "---\nname: my-skill\ndescription: A test skill\nmetadata:\n  author: test\n---\nBody."
+        data = parse_frontmatter(text, Path("test"))
+        assert data["metadata"] == {"author": "test"}
+
     def test_missing_frontmatter_raises(self) -> None:
         with pytest.raises(ValueError, match="missing YAML frontmatter"):
             parse_frontmatter("no frontmatter here", Path("test"))
@@ -55,6 +60,35 @@ class TestParseFrontmatter:
     def test_malformed_line_raises(self) -> None:
         with pytest.raises(ValueError, match="malformed frontmatter"):
             parse_frontmatter("---\nbadline\n---\nbody", Path("test"))
+
+    def test_missing_body_raises(self) -> None:
+        with pytest.raises(ValueError, match="missing skill body"):
+            parse_frontmatter("---\nname: my-skill\ndescription: A test skill\n---\n", Path("test"))
+
+    def test_duplicate_key_raises(self) -> None:
+        text = "---\nname: my-skill\nname: other\ndescription: A test skill\n---\nBody."
+        with pytest.raises(ValueError, match="duplicate frontmatter key"):
+            parse_frontmatter(text, Path("test"))
+
+    def test_unsupported_key_raises(self) -> None:
+        text = "---\nname: my-skill\ndescription: A test skill\nlicense: MIT\n---\nBody."
+        with pytest.raises(ValueError, match="unsupported frontmatter key"):
+            parse_frontmatter(text, Path("test"))
+
+    def test_empty_value_raises(self) -> None:
+        text = "---\nname: my-skill\ndescription:\n---\nBody."
+        with pytest.raises(ValueError, match="empty frontmatter value"):
+            parse_frontmatter(text, Path("test"))
+
+    def test_metadata_indentation_required(self) -> None:
+        text = "---\nname: my-skill\ndescription: A test skill\n  author: test\n---\nBody."
+        with pytest.raises(ValueError, match="malformed frontmatter indentation"):
+            parse_frontmatter(text, Path("test"))
+
+    def test_metadata_duplicate_key_raises(self) -> None:
+        text = "---\nname: my-skill\ndescription: A test skill\nmetadata:\n  author: test\n  author: other\n---\nBody."
+        with pytest.raises(ValueError, match="duplicate metadata key"):
+            parse_frontmatter(text, Path("test"))
 
 
 class TestValidateSkill:
