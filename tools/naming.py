@@ -19,6 +19,49 @@ RESERVED_TERMS = {
 }
 
 
+def _clean_frontmatter_value(value: str) -> str:
+    return value.strip().strip('"').strip("'")
+
+
+def _split_frontmatter_entry(line: str, path: Path, label: str) -> tuple[str, str]:
+    if ":" not in line:
+        raise ValueError(f"{path}: malformed {label} line: {line!r}")
+    key, value = line.split(":", 1)
+    key = key.strip()
+    if not FRONTMATTER_KEY_RE.fullmatch(key):
+        raise ValueError(f"{path}: invalid {label} key: {key!r}")
+    return key, _clean_frontmatter_value(value)
+
+
+def _add_metadata_entry(data: dict[str, object], line: str, path: Path) -> None:
+    key, value = _split_frontmatter_entry(line.strip(), path, "metadata")
+    if not value:
+        raise ValueError(f"{path}: empty metadata value for {key!r}")
+    metadata = data.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{path}: metadata must be a mapping")
+    if key in metadata:
+        raise ValueError(f"{path}: duplicate metadata key: {key!r}")
+    metadata[key] = value
+
+
+def _add_frontmatter_entry(data: dict[str, object], line: str, path: Path) -> str | None:
+    key, value = _split_frontmatter_entry(line, path, "frontmatter")
+    if key not in ALLOWED_FRONTMATTER_KEYS:
+        raise ValueError(f"{path}: unsupported frontmatter key: {key!r}")
+    if key in data:
+        raise ValueError(f"{path}: duplicate frontmatter key: {key!r}")
+    if key == "metadata":
+        if value:
+            raise ValueError(f"{path}: metadata must be a mapping")
+        data[key] = {}
+        return key
+    if not value:
+        raise ValueError(f"{path}: empty frontmatter value for {key!r}")
+    data[key] = value
+    return None
+
+
 def parse_frontmatter(text: str, path: Path) -> dict[str, object]:
     match = SKILL_RE.match(text)
     if not match:
@@ -34,46 +77,11 @@ def parse_frontmatter(text: str, path: Path) -> dict[str, object]:
         if line.startswith("  "):
             if active_block != "metadata":
                 raise ValueError(f"{path}: malformed frontmatter indentation: {line!r}")
-            child = line.strip()
-            if ":" not in child:
-                raise ValueError(f"{path}: malformed metadata line: {line!r}")
-            key, value = child.split(":", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if not FRONTMATTER_KEY_RE.fullmatch(key):
-                raise ValueError(f"{path}: invalid metadata key: {key!r}")
-            if not value:
-                raise ValueError(f"{path}: empty metadata value for {key!r}")
-            metadata = data.setdefault("metadata", {})
-            if not isinstance(metadata, dict):
-                raise ValueError(f"{path}: metadata must be a mapping")
-            if key in metadata:
-                raise ValueError(f"{path}: duplicate metadata key: {key!r}")
-            metadata[key] = value
+            _add_metadata_entry(data, line, path)
             continue
-        active_block = None
         if line != line.strip():
             raise ValueError(f"{path}: malformed frontmatter indentation: {line!r}")
-        if ":" not in line:
-            raise ValueError(f"{path}: malformed frontmatter line: {line!r}")
-        key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if not FRONTMATTER_KEY_RE.fullmatch(key):
-            raise ValueError(f"{path}: invalid frontmatter key: {key!r}")
-        if key not in ALLOWED_FRONTMATTER_KEYS:
-            raise ValueError(f"{path}: unsupported frontmatter key: {key!r}")
-        if key in data:
-            raise ValueError(f"{path}: duplicate frontmatter key: {key!r}")
-        if key == "metadata":
-            if value:
-                raise ValueError(f"{path}: metadata must be a mapping")
-            data[key] = {}
-            active_block = key
-            continue
-        if not value:
-            raise ValueError(f"{path}: empty frontmatter value for {key!r}")
-        data[key] = value
+        active_block = _add_frontmatter_entry(data, line, path)
     return data
 
 
