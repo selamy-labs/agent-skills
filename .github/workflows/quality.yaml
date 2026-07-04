@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v6.3.0
         with:
           python-version: "3.12"
-      - name: Lint SKILL.md files
+      - name: Validate skill frontmatter and naming
         run: python scripts/lint_skills.py
       - name: Block public information leaks
         run: python scripts/privacy_scan.py
