@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   quality:
     name: Skill Quality And Privacy
@@ -29,6 +33,8 @@ jobs:
         run: python scripts/test_security_scan.py
       - name: Check public API stability
         run: python scripts/public_api_stability.py
+      - name: Test PR workflow cancellation
+        run: python scripts/test_pr_workflow_cancellation.py
       - name: Test semantic release planner
         run: python scripts/test_semantic_release.py
       - name: Validate PR title for squash release
