@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub PR Shepherding"
+  short_description: "Drive PRs through checks and merge blockers"
+  default_prompt: "Use $github-pr-shepherding to classify this PR merge state and drive it to merged or blocked with evidence."
