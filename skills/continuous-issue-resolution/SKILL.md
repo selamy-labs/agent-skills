@@ -19,7 +19,36 @@ Use GitHub issues as the durable queue and audit log. The loop is:
 
 Only take an issue that is explicitly ready by label, assignment, milestone, or
 another repo-defined signal. Do not infer readiness from an interesting title.
-If no ready issues exist, report idle state and any blocked/non-ready work.
+An issue is available iff it has no open PR referencing it AND no fresh claim
+by another worker (see Worker Claims). If no ready issues exist, report idle
+state and any blocked/non-ready work.
+
+## Worker Claims (multi-worker locking)
+
+Multiple autonomous workers (Claude conductor, Codex lanes, humans) drain the
+same queues. Before implementing an issue, claim it; never work an issue
+another worker holds.
+
+- **Claim**: add label `claimed` and post:
+  `🔒 CLAIM worker=<worker-id> ts=<UTC ISO8601> ttl-minutes=90`. worker-id must
+  be unique per worker/run (e.g. `codex-lane-3`, `claude-cir-wf123`).
+- **Verify after claiming** (comments are not atomic): re-read the issue's
+  claim comments. The FRESH claim with the LOWEST comment id wins. If that is
+  not you, post `🔓 RELEASE worker=<id> outcome=lost-race` and move on.
+- **A claim is valid only while its newest CLAIM or HEARTBEAT comment is
+  younger than its ttl-minutes.** For work longer than the TTL, post
+  `🔒 HEARTBEAT worker=<id> ts=<UTC ISO8601>` to renew.
+- **Stale claims are broken, not respected**: if the newest lock comment is
+  older than the TTL, post `🔓 STALE-BREAK worker=<id> prior=<old-worker-id>`
+  and claim normally. This is how dead workers' issues return to the pool — no
+  separate reaper.
+- **Release**: when you stop working an issue for any reason, post
+  `🔓 RELEASE worker=<id> outcome=<pr-opened|decomposed|blocked|abandoned>` and
+  remove the `claimed` label. Once an open PR references the issue, the PR
+  supersedes the claim (workers already skip issues with open PRs).
+- **Readiness**: an issue is available iff it has no open PR referencing it AND
+  no fresh claim. `claimed` label + fresh lock comment = in progress. `claimed`
+  label + expired lock = stale, available via STALE-BREAK.
 
 ## Triage Decision
 
