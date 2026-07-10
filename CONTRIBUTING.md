@@ -24,3 +24,8 @@ elsewhere until the name, frontmatter, structure, and behavior are settled.
 
 Do not publish slogans. Publish compact workflows, checklists, or verification
 rules that materially change the result.
+
+## Architecture Documentation
+
+Architecture diagrams MUST be updated in the same PR that changes the behavior
+or spec they describe.
