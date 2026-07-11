@@ -5,7 +5,7 @@ Reusable, public `SKILL.md` workflows for AI coding and operations agents.
 Part of Patrick Selamy's public agent-systems work:
 [selamy.dev](https://selamy.dev) ·
 [GitHub profile](https://github.com/pselamy) ·
-[framework-seed](https://github.com/pselamy/framework-seed) ·
+[Operating Agent Fleets](https://github.com/pselamy/operating-agent-fleets) ·
 [laneq](https://github.com/selamy-labs/laneq) ·
 [resume](https://selamy.dev/resume/)
 
