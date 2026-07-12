@@ -29,7 +29,7 @@ def test_pull_request_workflows_cancel_obsolete_runs() -> None:
         assert PR_GROUP in text, f"{path.name} must group PR runs by workflow and PR number"
         assert PR_CANCEL in text, f"{path.name} must cancel only pull_request runs"
 
-    assert checked == ["diagram-freshness.yml", "quality.yaml", "secret-scan.yml"]
+    assert checked == ["diagram-freshness.yml", "quality.yaml", "secret-scan.yml", "vulture-check.yml"]
 
 
 def test_release_workflow_keeps_non_cancelling_serialisation() -> None:
