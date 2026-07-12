@@ -36,7 +36,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "telemetry-mcp[mcp] @ git+https://github.com/selamy-labs/telemetry-mcp@v0.2.0",
+        "telemetry-mcp[mcp,bigquery] @ git+https://github.com/selamy-labs/telemetry-mcp@537fa00d2ac9f082bacc98af45bff892b49ca9da",
         "telemetry-mcp"
       ]
     },
