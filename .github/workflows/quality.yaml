@@ -53,8 +53,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install pytest pytest-cov ruff
+        # ruff is pinned: `ruff format` output is version-dependent, so an
+        # unpinned formatter would let a future release turn main red with no
+        # code change — defeating the "formatter output is the source of truth"
+        # goal of the format gate (#101).
+        run: pip install pytest pytest-cov ruff==0.15.21
       - name: Lint with ruff
         run: ruff check tools/ tests/
+      - name: Check formatting with ruff
+        run: ruff format --check --diff .
       - name: Run tests with coverage
         run: pytest --cov=tools --cov-report=term-missing --cov-fail-under=90
