@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Legacy script-level runner kept for CI parity. Real tests live in tests/."""
+
 from __future__ import annotations
 
 import sys

@@ -26,10 +26,7 @@ _CATEGORY_MAP = {
     "counterpart_leak": "internal counterpart leak",
 }
 
-BLOCKED_TERMS: dict[str, list[str]] = {
-    _CATEGORY_MAP[key]: _denylist[key]
-    for key in _CATEGORY_MAP
-}
+BLOCKED_TERMS: dict[str, list[str]] = {_CATEGORY_MAP[key]: _denylist[key] for key in _CATEGORY_MAP}
 
 BLOCKED_TERM_PATTERNS = [
     (category, term, re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", re.IGNORECASE))
@@ -57,8 +54,7 @@ SELF_SCAN_SECRET_LABELS = {
 SILENCE_PHRASES: list[str] = _denylist["silence_phrase"]
 
 SILENCE_PATTERNS = [
-    re.compile(rf"(?<![A-Za-z0-9_]){re.escape(phrase)}(?![A-Za-z0-9_])", re.IGNORECASE)
-    for phrase in SILENCE_PHRASES
+    re.compile(rf"(?<![A-Za-z0-9_]){re.escape(phrase)}(?![A-Za-z0-9_])", re.IGNORECASE) for phrase in SILENCE_PHRASES
 ]
 
 # Self-scan exclusion paths — files that define or test the denylist itself.
