@@ -4,6 +4,7 @@
 Defense-in-depth companion to ``privacy_scan.py`` (which blocks leaks/secrets).
 This blocks content that would weaponize an agent that follows the skill.
 """
+
 from __future__ import annotations
 
 import sys

@@ -79,10 +79,7 @@ def main() -> int:
         return 0
 
     if has_breaking_marker(base):
-        print(
-            "public API stability check passed with explicit breaking marker; "
-            f"removed={removed}, added={added}"
-        )
+        print(f"public API stability check passed with explicit breaking marker; removed={removed}, added={added}")
         return 0
 
     print("Public API stability check failed:", file=sys.stderr)
