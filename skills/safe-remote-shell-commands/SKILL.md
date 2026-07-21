@@ -44,22 +44,19 @@ test "$remote_head" = "abc123"
 ```
 
 Single quotes protect text from the local shell. They do not make arbitrary
-nested quoting easy. When data must cross the boundary, use positional
-arguments rather than interpolating it into shell source:
+nested quoting easy. Also, SSH joins remote command arguments into one command
+string; do not assume local argument boundaries survive transport. When dynamic
+data must cross the boundary, send it to a fixed remote program over standard
+input or another data protocol rather than interpolating it into shell source:
 
 ```bash
 expected_ref="abc123"
-ssh build-host sh -s -- "$expected_ref" <<'REMOTE_SCRIPT'
-set -eu
-expected_ref=$1
-cd /srv/app
-actual_ref=$(git rev-parse HEAD)
-test "$actual_ref" = "$expected_ref"
-REMOTE_SCRIPT
+printf '%s\n' "$expected_ref" | ssh build-host '/srv/control/verify-ref'
 ```
 
-The quoted heredoc delimiter prevents local expansion. The value is passed as
-an argument, not concatenated into executable text.
+Here `/srv/control/verify-ref` is a previously copied, reviewed script that
+reads one constrained ref from standard input. The remote shell parses only the
+fixed command path; the ref remains data.
 
 ### 3. Reduce quoting depth
 
@@ -67,7 +64,8 @@ Use this preference order:
 
 1. Invoke a program directly with separate arguments.
 2. Run a short, single-quoted remote command.
-3. Send a script on standard input with `sh -s --` and positional arguments.
+3. Send a static script with a quoted heredoc, or pipe data to a fixed remote
+   program over standard input.
 4. Copy a reviewed script and run it by an explicit path.
 5. Use nested `sh -c` or `bash -lc` only when login-shell behavior is required.
 
@@ -85,8 +83,8 @@ quotes.
 ### 4. Keep data separate from shell source
 
 - Treat hostnames, paths, refs, session names, and user text as data.
-- Transmit dynamic data as positional arguments or environment entries supplied to
-  the final program; quote every expansion at the boundary where it is used.
+- Transmit dynamic data through standard input, files, or a structured protocol
+  to a fixed remote program; quote every expansion where that program uses it.
 - Do not embed credentials or other secrets in command strings, process titles,
   logs, or shell history.
 - Disable tracing around sensitive operations. Never rely on clever quoting to
