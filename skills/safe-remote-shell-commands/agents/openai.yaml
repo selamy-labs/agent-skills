@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Remote Shell Commands"
+  short_description: "Prevent expansion bugs across nested shells"
+  default_prompt: "Use $safe-remote-shell-commands to construct and verify this remote shell operation safely."
