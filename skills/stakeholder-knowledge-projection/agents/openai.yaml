@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stakeholder Knowledge Projection"
+  short_description: "Project canonical knowledge into stakeholder workspaces"
+  default_prompt: "Use $stakeholder-knowledge-projection to turn authoritative project knowledge into a governed stakeholder Doc, Sheet, and human task view."
