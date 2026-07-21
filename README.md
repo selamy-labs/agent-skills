@@ -25,6 +25,11 @@ their own license terms; they should not be republished in this repository.
   proxy such as logs or CI alone.
 - `grounded-generation`: generate from verified inputs with explicit source
   lineage.
+- `wiki-building`: compile immutable evidence and normative sources into a
+  durable, provenance-aware knowledge base without laundering synthesis into
+  authority.
+- `stakeholder-knowledge-projection`: project canonical knowledge into
+  stakeholder Docs, Sheets, journey evidence, and guarded human task lists.
 - `lean-on-oss-standards`: choose idiomatic open standards before custom
   machinery.
 - `iac-not-ad-hoc`: keep infrastructure and runtime configuration

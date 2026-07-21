@@ -1,42 +1,120 @@
 ---
 name: wiki-building
-description: Use when building or maintaining a durable, compounding knowledge base queried by feeding markdown into a long-context model, with no RAG, chunking, or embeddings. Based on Andrej Karpathy's LLM-Wiki pattern.
+description: Use when building or maintaining a durable LLM-compiled knowledge base from documents, transcripts, code, decisions, or other evidence. Preserves immutable sources, normative authority, claim provenance, contradiction state, staleness, and generated projections while the wiki compounds over time.
 ---
 
-# Wiki Building (the LLM-Wiki pattern)
+# Wiki Building
 
-A durable, **plain-markdown** knowledge base that **compounds** over time and is queried by feeding files into a **long-context model** — **no RAG, no chunking, no embeddings.** Based on Andrej Karpathy's LLM-Wiki pattern. This skill is **how to build and maintain** the wiki; pair it with wherever it lives (any read/write store).
+Treat knowledge like a build: compile immutable sources into legible,
+interlinked pages once, then incrementally rebuild affected knowledge when a
+source changes. The wiki is maintained synthesis, not a concatenated archive or
+an opaque retrieval index.
 
-## The structure
+## Layers and authority
+
+```text
+raw sources -> compiled wiki -> audience projections
+      |              |
+      +---- normative authority, when explicitly designated
 ```
-/raw     immutable source material — clips, transcripts, articles, logs.
-         APPEND-ONLY; never edit. This is the ground truth.
-/wiki     AI-"compiled" pages derived from /raw:
-            • concept pages   (one idea, explained)
-            • entity pages    (one person/system/thing)
-            • synthesis pages (cross-cutting, connects concepts)
-agents.md  operational spec: how an agent should read/maintain the wiki.
+
+- **Raw sources** are immutable evidence. Register a stable source ID, URI,
+  revision or digest, observed time, owner, and privacy class. Correct a source
+  by adding a new revision, never by rewriting history.
+- **Normative sources** are the explicitly designated contracts, policies, or
+  specifications within the raw set. State their precedence. A wiki summary
+  cannot promote evidence into authority.
+- **The wiki** is canonical for synthesis, retrieval, cross-links, and current
+  understanding. It remains derived unless a project explicitly makes a wiki
+  page normative.
+- **Projections** are audience-specific Docs, Sheets, dashboards, or briefs.
+  They link back to stable wiki claims and sources and never become a competing
+  authority by accident.
+
+If there is no normative source, say so. Do not manufacture one from the newest
+document or the most confident prose.
+
+## Minimal structure
+
+```text
+raw/                         optional approved source snapshots
+wiki/
+  sources/                   one page per registered source
+  entities/                  people, systems, organizations, artifacts
+  concepts/                  one concept per page
+  decisions/                 proposed, accepted, superseded
+  journeys/                  user or operational flows
+  synthesis/                 cross-cutting maintained understanding
+  projections/               generated audience views
+index.md                     content-oriented catalog
+log.md                       append-only operation history
+AGENTS.md                    schema, authority, ingest, query, lint rules
 ```
 
-## The compiler analogy (the core mental model)
-Treat knowledge like a build: **compile `/raw` → `/wiki` artifacts once; query the artifact, not the sources.** You don't re-derive understanding on every query — you compile it into legible pages and read those. When `/raw` grows, recompile the affected pages.
+Store structured source/page events in an append-only ledger when automation
+is available. Keep search indexes and embeddings rebuildable and non-authority.
+Long-context reading is the simplest query path; add exact-text or hybrid
+search only when corpus scale justifies it.
 
-## How to query
-**Feed the relevant `/wiki` (and `/raw` when needed) files into a long-context model.** No retrieval pipeline, no vector store, no chunking. The long context *is* the retrieval. This is simpler, fully legible (you can read every page), and avoids the failure modes of embedding-based RAG (chunk boundaries, stale indexes, opaque relevance).
+## Compile workflow
 
-## Maintenance rules
-1. **`/raw` is append-only and immutable** — corrections happen in `/wiki`, not by editing source.
-2. **`/wiki` pages are recompiled** from `/raw` as material accumulates — keep them synthesized, not just concatenated.
-3. **One page = one concept/entity** (mirrors one-fact-per-file memory discipline); link pages liberally.
-4. **`agents.md` defines the contract** — how agents read, when they recompile, how they add to `/raw`.
-5. **Legibility over cleverness** — a human can read any page; that's the point.
+1. **Register the source.** Record identity, revision/digest, classification,
+   authority class, and access boundary before extracting claims.
+2. **Extract candidates.** Separate facts, preferences, proposals, accepted
+   decisions, actions, questions, and contradictions. Preserve uncertain
+   speaker or entity identity as uncertain.
+3. **Integrate, do not append.** Update affected entity, concept, decision,
+   journey, and synthesis pages. Add backlinks and supersession links.
+4. **Cite material claims.** Give claims stable IDs and adjacent source or
+   normative references. Classify the strongest evidence each citation proves.
+5. **Handle conflict explicitly.** Mark claims `disputed`, `provisional`,
+   `stale`, or `superseded`. Never resolve contradictions with "latest wins"
+   unless the authority contract says that.
+6. **Close the operation.** Refresh the deterministic index and append a log
+   entry derived from recorded mutations. Re-ingesting the same digest must be
+   a no-op.
 
-## When to use / not
-- **Use** for building a compounding, legible knowledge base queried by long context.
-- **Not** for high-churn structured data needing real-time queries (use a database), or when the corpus genuinely exceeds practical context limits and retrieval is unavoidable.
+## Authority synchronization
+
+Synchronize normative material one way into generated reference blocks. Pin
+requirements or policies by stable ID and digest. When authority changes:
+
+- mark dependent claims and projections stale;
+- fail validation until affected synthesis is reconciled;
+- preserve claim identity across renames or archival moves;
+- route a discovery that changes intended behavior back through the authority's
+  review process before treating it as a requirement.
+
+Never let the wiki silently edit, accept, or supersede a normative contract.
+
+## Query workflow
+
+Read `index.md` first, then the smallest relevant pages. Group the answer by
+authority and evidence strength, cite stable claim/source IDs, and name gaps or
+conflicts. When a query produces durable new synthesis, propose a wiki update
+through the normal reviewed write path; do not let valuable conclusions die in
+chat history.
+
+## Lint and verification
+
+Periodically and before publishing a projection, check:
+
+- source digests and access classifications;
+- broken or one-way links, orphan pages, duplicate IDs, and missing concepts;
+- claims without citations or with inflated evidence classes;
+- contradictions, unresolved gaps, supersession, and stale freshness markers;
+- drift from normative IDs/digests;
+- deterministic index/log output and idempotent re-ingest;
+- projections that are older than their dependencies.
+
+Auto-fix deterministic metadata only. Human or model judgment must review
+semantic contradictions and changed decisions.
 
 ## Anti-patterns
-- Reaching for RAG/embeddings/chunking by default when long-context + compiled pages suffice.
-- Editing `/raw` (destroys ground truth) instead of correcting in `/wiki`.
-- Dumping concatenated sources into `/wiki` without synthesis (no compile step).
-- Duplicate wikis with drifting content instead of one recompiled source.
+
+- Treating compiled prose as more authoritative than its cited contract.
+- Copying private evidence into a public wiki or search index.
+- Dumping sources without synthesis and cross-linking.
+- Hand-counting pages or hand-editing a structured ledger.
+- Letting projections accept decisions, assign people, or send themselves.
+- Maintaining duplicate wikis or dashboards that drift independently.
