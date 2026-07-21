@@ -68,6 +68,8 @@ their own license terms; they should not be republished in this repository.
   that node's tolerations or it is permanently unschedulable.
 - `batched-ssh-enumeration`: run host-enumeration loops with non-interactive
   bounded SSH and heartbeat-based wedged detection.
+- `safe-remote-shell-commands`: prevent local/remote expansion mistakes across
+  SSH, nested shells, heredocs, and tmux launches.
 - `resilient-pool-refresh`: isolate per-item failures, classify terminal vs
   transient, and alert clearly when refreshing a pool of credentials.
 - `rwo-volume-maintenance`: prefer snapshot/offline processing and bound
