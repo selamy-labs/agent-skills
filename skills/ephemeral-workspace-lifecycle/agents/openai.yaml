@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ephemeral Workspace Lifecycle"
+  short_description: "Create, retain, and reap workspaces safely"
+  default_prompt: "Use $ephemeral-workspace-lifecycle to manage this task workspace through safe cleanup."

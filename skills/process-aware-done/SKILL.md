@@ -5,10 +5,12 @@ description: Use when reporting or reviewing done, verified, passed, sent, match
 
 # Process-Aware Done
 
-Completion requires both:
+Completion requires:
 
 1. **Artifact:** the real thing exists and works where it matters.
 2. **Trajectory:** the path that produced it was legitimate, independent, and reproducible.
+3. **Stewardship, when applicable:** ephemeral resources created by the task
+   were removed or retained with a named owner, reason, and expiry.
 
 Do not accept proxies as completion. Passing CI is not the same as a working
 product flow, a send ID is not the same as a received message, and a matched
@@ -29,6 +31,8 @@ answer is not trustworthy without source lineage.
   overfit/lookahead, no hallucinated route or feature, no unverified send.
 - Record gaps explicitly. If verification is queued or blocked, call it
   waiting or blocked, not done.
+- Apply `ephemeral-workspace-lifecycle` when the task created worktrees,
+  temporary clones, scratch directories, build outputs, or local caches.
 
 ## Hard Stops
 
@@ -37,3 +41,4 @@ answer is not trustworthy without source lineage.
 - A synthetic artifact without source-backed verification is a demo only.
 - A fix PR for a reproduced failure without its regression ratchet is
   incomplete.
+- A task that leaves unowned ephemeral resources with no expiry is incomplete.
