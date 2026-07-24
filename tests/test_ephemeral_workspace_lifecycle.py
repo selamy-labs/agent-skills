@@ -46,9 +46,7 @@ def test_resource_matrix_separates_exclusive_and_shared_cleanup() -> None:
     assert "git worktree remove" in rows["Linked Git worktree"][2]
     assert "freshly verified remote" in rows["Full temporary clone"][1]
     assert "no-symlink contained removal" in rows["Exclusive task directory"][2]
-    assert "no process or active task references it" in rows[
-        "Per-task build output or cache"
-    ][1]
+    assert "no process or active task references it" in rows["Per-task build output or cache"][1]
     assert rows["Shared or global cache"][1].startswith("Never as part of task teardown")
     assert "Cache-native" in rows["Shared or global cache"][2]
 
