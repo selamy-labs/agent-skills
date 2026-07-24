@@ -21,6 +21,8 @@ their own license terms; they should not be republished in this repository.
 
 - `process-aware-done`: require artifact verification and process evidence
   before accepting completion claims.
+- `ephemeral-workspace-lifecycle`: create, hand off, and safely reap temporary
+  worktrees, clones, task directories, build outputs, and caches.
 - `verify-real-artifact`: verify the real user/system artifact instead of a
   proxy such as logs or CI alone.
 - `grounded-generation`: generate from verified inputs with explicit source

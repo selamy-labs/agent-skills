@@ -65,6 +65,9 @@ Include every item the executor cannot infer on its own:
   pipeline will apply.
 - **The success criterion.** A concrete, checkable definition of done — what
   artifact must exist and in what state — not "make it work".
+- **The workspace lifecycle.** State the managed workspace and build-output
+  paths, owner, retention boundary, terminal cleanup action, and what must be
+  preserved if automatic cleanup is unsafe.
 - **What NOT to assume.** Call out the boundaries: which files to leave
   untouched, which scope not to widen, which adjacent work is out of bounds.
 
@@ -85,7 +88,9 @@ Precise delegation, which can succeed first try:
 > lowercase conventional commit — `feat: add example-skill` — and must be
 > correct at create time, because editing the title does not re-trigger the
 > title check. Validate locally first with `<lint-command>`. Done = PR open with
-> all required checks green and auto-merge enabled.
+> all required checks green and auto-merge enabled. Remove the clean disposable
+> workspace after the PR reaches its declared terminal state; otherwise record
+> its owner, dirty state, reason for retention, and expiry.
 
 The second version removes every place the executor would otherwise invent a
 value.
@@ -113,13 +118,14 @@ value.
   judgment.
 - Omitting a known gotcha because it "should be obvious".
 - Ending with "make it work" instead of a checkable success criterion.
+- Omitting disposal because the executor is expected to "clean up later".
 
 ## Done Standard
 
 The spec is complete when an executor with the relevant skills but zero
 knowledge of your system could finish the task from it alone — every path,
-command, name, identity, format, and success criterion is on the page, and
-nothing load-bearing is left to inference.
+command, name, identity, format, success criterion, and workspace disposition
+is on the page, and nothing load-bearing is left to inference.
 
 Pair this with [[dispatch-lane]] for routing the work to the right executor,
 and with [[verify-delegated-work]] for checking the result once it comes back —

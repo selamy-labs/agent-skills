@@ -87,6 +87,7 @@ For a workable issue:
 
 - comment that you are taking it, including the intended branch/worktree
 - create an isolated branch
+- record the workspace owner and terminal cleanup contract
 - add or update tests where practical before implementation
 - open a PR against the default branch
 - enable auto-merge only when branch protection and required checks are real
@@ -101,7 +102,9 @@ If blocked, comment on the issue with:
 - next legitimate unblock path
 - whether work should be retried, decomposed further, or reassigned
 
-Then label or mark it blocked and move to the next ready issue.
+Then label or mark it blocked and move to the next ready issue. Remove a clean
+disposable workspace, or record its path, owner, dirty state, and expiry in the
+blocker handoff.
 
 ## Closure
 
@@ -112,6 +115,9 @@ must include:
 - tests/checks run
 - deployed or produced artifact checked, when applicable
 - any residual gap or follow-up issue
+- workspace disposition: removed, or retained with owner, reason, and expiry
 
 Do not use green CI alone as proof of completion when the issue requires a
 runtime, user-visible, sent, deployed, or externally landed artifact.
+Use `ephemeral-workspace-lifecycle` for the creation, handoff, and removal
+checks.
