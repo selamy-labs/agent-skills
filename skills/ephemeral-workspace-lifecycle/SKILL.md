@@ -14,7 +14,7 @@ Do not apply one deletion policy to everything called a workspace or cache.
 
 | Resource | Ownership proof | Automatic removal authority | Removal method |
 | --- | --- | --- | --- |
-| Linked Git worktree | Task manifest plus matching `git worktree list --porcelain` entry | Only after the task is terminal, the tree is clean, and its commit is durably reachable | `git worktree remove`, then `git worktree prune` |
+| Linked Git worktree | Task manifest plus matching `git worktree list --porcelain` entry | Only after the task is terminal, the tree is clean, and its exact commit is durably recoverable | `git worktree remove` for the validated path |
 | Full temporary clone | Exclusive task manifest at a canonical managed path | Only after the task is terminal, the clone is clean, and every local commit is durably reachable from a freshly verified remote | VCS-aware inspection followed by contained directory removal |
 | Exclusive task directory | Unpredictable per-task ID, creator UID, and canonical path in the manifest | Only after the task is terminal and every nested resource has its own safe disposition | Descriptor-relative, no-symlink contained removal |
 | Per-task build output or cache | Exact output path and owning task in the manifest | Only after no process or active task references it | Tool-native clean or garbage collection; contained removal only when the tool has no native operation |
@@ -102,17 +102,29 @@ Run every gate immediately before mutation while holding the reaper claim:
 
 From the shared repository, confirm that the candidate is the exact canonical
 path reported by `git worktree list --porcelain`. Require a clean tracked and
-untracked status. Refresh the trusted remote and prove the worktree commit is
-reachable from the intended durable remote ref; an unrelated merged PR number
-is not proof.
+untracked status. Refresh the trusted remote and prove the exact worktree
+commit is reachable from the intended durable remote ref; an unrelated merged
+PR number is not proof.
+
+A squash or rebase merge does not make the original task HEAD reachable from
+the destination branch. Before deleting that worktree or its task branch,
+preserve the exact HEAD in either a protected archival ref on the trusted
+remote or a Git bundle stored outside every ephemeral root. Verify the
+archival ref or bundle enumerates that exact commit and can restore it, then
+record its location, commit, verification result, and retention policy in the
+terminal evidence. Fail closed if archival creation or verification fails.
+The same archival step is required whenever deleting a remote task branch
+would invalidate the only reachability proof.
 
 ```bash
 cd <main-repository>
 git worktree remove <canonical-workspace>
-git worktree prune
 ```
 
-Do not use `--force` in unattended cleanup.
+Do not use `--force` or repository-wide `git worktree prune` in unattended
+per-resource cleanup. Pruning scans registrations that are outside the
+validated resource and may only run as a separate repository maintenance
+operation with its own ownership and safety checks.
 
 ### Full temporary clone
 

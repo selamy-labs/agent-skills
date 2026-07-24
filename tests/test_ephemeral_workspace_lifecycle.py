@@ -44,6 +44,7 @@ def test_resource_matrix_separates_exclusive_and_shared_cleanup() -> None:
         "Shared or global cache",
     }
     assert "git worktree remove" in rows["Linked Git worktree"][2]
+    assert "git worktree prune" not in rows["Linked Git worktree"][2]
     assert "freshly verified remote" in rows["Full temporary clone"][1]
     assert "no-symlink contained removal" in rows["Exclusive task directory"][2]
     assert "no process or active task references it" in rows["Per-task build output or cache"][1]
@@ -71,6 +72,11 @@ def test_each_resource_contract_fails_closed() -> None:
     assert "missing/malformed manifests, and probe errors" in gates
     assert "Never replace a failed native cleanup" in gates
     assert "unrelated merged PR number is not proof" in contracts
+    assert "squash or rebase merge does not make the original task HEAD reachable" in contracts
+    assert "Git bundle stored outside every ephemeral root" in contracts
+    assert "enumerates that exact commit and can restore it" in contracts
+    assert "git worktree prune" in contracts
+    assert "may only run as a separate repository maintenance operation" in contracts
     assert "Retain the clone if fetch, reachability, submodule" in contracts
     assert "inventory contains no unknown or shared resource" in contracts
     assert "task completion may release a reference but must not delete the cache tree" in contracts
