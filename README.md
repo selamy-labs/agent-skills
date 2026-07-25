@@ -21,6 +21,9 @@ their own license terms; they should not be republished in this repository.
 
 - `process-aware-done`: require artifact verification and process evidence
   before accepting completion claims.
+- `connector-readiness`: separate connector configuration, authentication,
+  quota, and exact-artifact capability before declaring an MCP or integration
+  usable.
 - `ephemeral-workspace-lifecycle`: create, hand off, and safely reap temporary
   worktrees, clones, task directories, build outputs, and caches.
 - `verify-real-artifact`: verify the real user/system artifact instead of a
