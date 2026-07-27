@@ -20,6 +20,12 @@ The trap is running the obvious checks (build, unit tests) and missing the **bes
 
 Generic checks rarely fail twice; the **repo-specific** scanners and validators are where push-and-pray loses. Those are exactly the cheap-to-run, expensive-to-discover-remotely gates — running them locally is the highest-leverage minute you spend.
 
+## Tell the visual story when the evidence already exists
+
+When a UI change naturally produces useful before/after screenshots, golden images, or rendered design evidence, embed those images directly in the PR description with clear **Before** and **After** labels and one concise sentence explaining the visible outcome. Use durable GitHub-renderable URLs or checked-in evidence produced by the change so the comparison remains visible after temporary CI artifacts expire.
+
+Treat this as a high-value opportunity, not a universal gate. Do not manufacture low-signal screenshots for every PR or delay delivery to create them. The rule is to surface strong visual evidence that already exists instead of burying it in CI artifacts, files, or comments.
+
 ## Pairs with
 
 - CI economy: a locally-green PR is the per-PR analogue of keeping a stack short and its upper members drafted — don't multiply runner load with avoidable red runs.
