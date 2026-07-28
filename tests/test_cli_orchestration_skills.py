@@ -169,6 +169,55 @@ def test_followup_retries_enter_and_requires_fresh_post_marker_activity(tmp_path
         _kill_session(session)
 
 
+@pytest.mark.skipif(TMUX is None, reason="tmux is not installed")
+@pytest.mark.parametrize("tool", TOOLS)
+def test_accepted_active_followup_without_clean_composer_never_gets_second_enter(
+    tmp_path: Path, tool: str
+) -> None:
+    outcome = tmp_path / "outcome.txt"
+    fake_tui = tmp_path / "accepted-active-tui.py"
+    fake_tui.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, re, select, sys, time\n"
+        "outcome = pathlib.Path(sys.argv[1])\n"
+        "print('› ', end='', flush=True)\n"
+        "directive = sys.stdin.readline().rstrip('\\n')\n"
+        "dispatch_id = re.search(r'\\[dispatch-end:([^]]+)\\]', directive).group(1)\n"
+        "print(directive, flush=True)\n"
+        "print(f'[dispatch-accepted:{dispatch_id}]', flush=True)\n"
+        "print('• Working fresh', flush=True)\n"
+        "ready, _, _ = select.select([sys.stdin], [], [], 1.5)\n"
+        "outcome.write_text('second-enter' if ready else 'no-second-enter')\n"
+        "time.sleep(1)\n"
+    )
+    fake_tui.chmod(0o755)
+    followup = tmp_path / "followup.txt"
+    followup.write_text("Continue the accepted task.\n")
+    session = f"test-no-second-{tool}-{uuid.uuid4().hex[:8]}"
+    command = f"exec {shlex.quote(str(fake_tui))} {shlex.quote(str(outcome))}"
+    subprocess.run([TMUX, "new-session", "-d", "-s", session, "-c", str(tmp_path), command], check=True)
+    try:
+        _wait_for_pane_text(session, "›")
+        env = os.environ | {
+            "ORCHESTRATION_DISPATCH_ID": f"{tool}-accepted-active-test",
+            "ORCHESTRATION_VERIFY_ATTEMPTS": "1",
+            "ORCHESTRATION_VERIFY_DELAY_SECONDS": "0.05",
+        }
+        result = subprocess.run(
+            [str(_script(tool, "submit_followup.sh")), session, str(followup)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=8,
+        )
+        assert result.returncode == 1
+        assert "no second Enter sent" in result.stderr
+        _wait_for(outcome)
+        assert outcome.read_text() == "no-second-enter"
+    finally:
+        _kill_session(session)
+
+
 @pytest.mark.parametrize("tool", TOOLS)
 def test_stale_working_before_dispatch_never_verifies(tmp_path: Path, tool: str) -> None:
     dispatch_id = f"{tool}-stale-history-test"
