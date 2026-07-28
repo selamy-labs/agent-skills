@@ -171,9 +171,7 @@ def test_followup_retries_enter_and_requires_fresh_post_marker_activity(tmp_path
 
 @pytest.mark.skipif(TMUX is None, reason="tmux is not installed")
 @pytest.mark.parametrize("tool", TOOLS)
-def test_accepted_active_followup_without_clean_composer_never_gets_second_enter(
-    tmp_path: Path, tool: str
-) -> None:
+def test_accepted_active_followup_without_clean_composer_never_gets_second_enter(tmp_path: Path, tool: str) -> None:
     outcome = tmp_path / "outcome.txt"
     fake_tui = tmp_path / "accepted-active-tui.py"
     fake_tui.write_text(
@@ -224,20 +222,13 @@ def test_stale_working_before_dispatch_never_verifies(tmp_path: Path, tool: str)
     pre = tmp_path / "pre.txt"
     pre.write_text("• Working stale\n›\n")
     post = tmp_path / "post.txt"
-    post.write_text(
-        f"• Working stale\n[dispatch:{dispatch_id}]\nbounded task\n[dispatch-end:{dispatch_id}]\n›\n"
-    )
+    post.write_text(f"• Working stale\n[dispatch:{dispatch_id}]\nbounded task\n[dispatch-end:{dispatch_id}]\n›\n")
     command = [str(_script(tool, "verify_dispatch.sh")), "-", dispatch_id, str(pre), str(post)]
     stale = subprocess.run(command, capture_output=True, text=True)
     assert stale.returncode == 1
     assert "lacks ordered start/end/acceptance/activity/clean-composer evidence" in stale.stderr
 
-    post.write_text(
-        post.read_text()
-        + f"[dispatch-accepted:{dispatch_id}]\n"
-        + "• Working fresh\n"
-        + "›\n"
-    )
+    post.write_text(post.read_text() + f"[dispatch-accepted:{dispatch_id}]\n" + "• Working fresh\n" + "›\n")
     fresh = subprocess.run(command, check=True, capture_output=True, text=True)
     assert f"verified_dispatch={dispatch_id}" in fresh.stdout
 
@@ -248,12 +239,7 @@ def test_missing_start_marker_never_verifies(tmp_path: Path, tool: str) -> None:
     pre = tmp_path / "pre.txt"
     pre.write_text("›\n")
     post = tmp_path / "post.txt"
-    post.write_text(
-        f"[dispatch-end:{dispatch_id}]\n"
-        f"[dispatch-accepted:{dispatch_id}]\n"
-        "• Working fresh\n"
-        "›\n"
-    )
+    post.write_text(f"[dispatch-end:{dispatch_id}]\n[dispatch-accepted:{dispatch_id}]\n• Working fresh\n›\n")
     command = [str(_script(tool, "verify_dispatch.sh")), "-", dispatch_id, str(pre), str(post)]
     result = subprocess.run(command, capture_output=True, text=True)
     assert result.returncode == 1
@@ -266,9 +252,7 @@ def test_marker_held_in_composer_with_unrelated_activity_never_verifies(tmp_path
     pre.write_text("• Working stale\n›\n")
     post = tmp_path / "post.txt"
     post.write_text(
-        f"› [dispatch:{dispatch_id}] bounded task [dispatch-end:{dispatch_id}]\n"
-        "• Working unrelated-new-task\n"
-        "›\n"
+        f"› [dispatch:{dispatch_id}] bounded task [dispatch-end:{dispatch_id}]\n• Working unrelated-new-task\n›\n"
     )
     command = [str(_script(tool, "verify_dispatch.sh")), "-", dispatch_id, str(pre), str(post)]
     result = subprocess.run(command, capture_output=True, text=True)
