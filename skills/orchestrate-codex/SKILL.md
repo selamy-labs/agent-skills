@@ -33,6 +33,8 @@ tmux capture-pane -p -J -t "$PANE_ID" -S -120
 
 Confirm the cwd and child argv match the intended executable, flags, and prompt. Handle first-run trust, model, and login screens in the TUI; verify the authenticated identity before proceeding when accounts have different quota or authority.
 
+Treat trust, authentication, retry/fallback, model, and effort choosers as modal state, not as a composer. Inspect the pane before pasting or pressing Enter: Enter can select a fallback or silently change the model/effort instead of submitting the directive. After resolving any such menu, verify the displayed identity, intended model, and intended effort again, then submit with Enter and repeat the full dispatch proof below. Do not continue when the intended runtime selection cannot be proven.
+
 The launcher prints a unique dispatch ID and empty pre-capture path. After resolving trust/auth screens, verify that exact dispatch:
 
 ```bash
