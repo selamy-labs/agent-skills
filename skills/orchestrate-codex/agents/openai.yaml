@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrate Codex CLI"
+  short_description: "Run Codex reliably in interactive tmux sessions"
+  default_prompt: "Use $orchestrate-codex to launch and supervise an interactive Codex CLI worker in tmux."

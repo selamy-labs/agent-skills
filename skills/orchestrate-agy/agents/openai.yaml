@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrate AGY"
+  short_description: "Run AGY reliably in interactive tmux sessions"
+  default_prompt: "Use $orchestrate-agy to launch and supervise an interactive AGY worker in tmux."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrate Claude Code"
+  short_description: "Run Claude reliably in interactive tmux sessions"
+  default_prompt: "Use $orchestrate-claude to launch and supervise an interactive Claude Code worker in tmux."
