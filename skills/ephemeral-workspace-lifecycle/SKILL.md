@@ -38,6 +38,9 @@ resources even when they appear below a convenient parent path.
 - Check free space on every backing filesystem that will receive a workspace,
   output base, or cache. Stop admitting new build-heavy work below the host's
   hard watermark.
+- Treat language temporary-directory APIs and `/tmp` as placement mechanisms,
+  not lifecycle managers. Record the resource before launching the worker; do
+  not depend on process exit, reboot, or an operating-system temp reaper.
 
 Prefer a separate quota-controlled filesystem for high-churn workspaces and
 local build caches. A full scratch volume may fail a task; it must not make the
@@ -64,6 +67,20 @@ registry entry with an immutable tombstone containing the path, resource ID,
 terminal evidence, removal time, and bytes reclaimed. A tombstone is audit
 history, not a live reference, so it does not prevent removal or keep a lease
 active.
+
+## Finalization Ownership
+
+The controller that allocates a resource owns its final disposition. Register
+an exit observer before launching the worker and invoke the terminal lifecycle
+on success, merge or close, cancellation, iteration exhaustion, ordinary
+client exit, and handled failure. Do not make the worker process the sole owner
+of cleanup.
+
+A worker `finally` block, `defer`, shutdown hook, or temporary-directory
+context is a useful fast path, but OOM, `SIGKILL`, host loss, and client crashes
+can bypass it. After a worker exits, the controller must reconcile any resource
+still marked `active`; the periodic reaper remains a backstop for controller
+loss. Every path ends as `removed`, `retained`, or `blocked` with evidence.
 
 ## At Handoff
 
@@ -101,10 +118,26 @@ Run every gate immediately before mutation while holding the reaper claim:
 ### Linked Git worktree
 
 From the shared repository, confirm that the candidate is the exact canonical
-path reported by `git worktree list --porcelain`. Require a clean tracked and
-untracked status. Refresh the trusted remote and prove the exact worktree
-commit is reachable from the intended durable remote ref; an unrelated merged
-PR number is not proof.
+path reported by `git worktree list --porcelain`. Run every Git safety probe as
+the resource-owning UID, never as a privileged controller. Use a trusted
+absolute Git executable and sanitized environment; disable system/global
+configuration and executable integrations with `GIT_CONFIG_NOSYSTEM=1`,
+`GIT_CONFIG_GLOBAL=/dev/null`, `-c core.fsmonitor=false`, and
+`-c core.hooksPath=/dev/null`. Sanitize `PATH`, `GIT_EXEC_PATH`, and dynamic
+loader variables too. Fail closed if the privilege drop or sanitization is
+unavailable.
+
+Enumerate tracked, untracked, and ignored descendants with
+`git status --porcelain=v1 --untracked-files=all --ignored=traditional`.
+Treat ignored files as work, so any output retains the worktree. Clean a generated
+output only through its separate resource-specific contract, then re-run the
+status probe; never infer that an ignored path is rebuildable from its name.
+Also inspect `git ls-files -v`. Retain the worktree when it has lowercase
+status tags (assume-unchanged), an `S` tag (skip-worktree), or other hidden
+index state; do not silently clear those flags. Re-run both probes immediately
+before removal and retain on unknown or remaining content. Refresh the trusted
+remote and prove the exact worktree commit is reachable from the intended
+durable remote ref; an unrelated merged PR number is not proof.
 
 A squash or rebase merge does not make the original task HEAD reachable from
 the destination branch. Before deleting that worktree or its task branch,
