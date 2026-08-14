@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,20 @@ def section(text: str, heading: str) -> str:
 
 def normalized(text: str) -> str:
     return " ".join(text.split())
+
+
+def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
+    executable = shutil.which("git")
+    assert executable is not None
+    result = subprocess.run(
+        [executable, *args],
+        cwd=repo,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
 
 
 def resource_matrix(text: str) -> dict[str, tuple[str, str, str]]:
@@ -63,6 +80,21 @@ def test_registry_terminal_transition_does_not_block_its_own_removal() -> None:
     assert "missing heartbeat or old modification time is not a terminal transition" in registry
 
 
+def test_controller_owns_every_terminal_cleanup_edge() -> None:
+    text = read_skill("ephemeral-workspace-lifecycle")
+    creation = normalized(section(text, "At Creation"))
+    ownership = normalized(section(text, "Finalization Ownership"))
+
+    assert "temporary-directory APIs and `/tmp` as placement mechanisms" in creation
+    assert "controller that allocates a resource owns its final disposition" in ownership
+    assert "Register an exit observer before launching the worker" in ownership
+    assert "success, merge or close, cancellation, iteration exhaustion" in ownership
+    assert "ordinary client exit, and handled failure" in ownership
+    assert "Do not make the worker process the sole owner of cleanup" in ownership
+    assert "OOM, `SIGKILL`, host loss, and client crashes can bypass it" in ownership
+    assert "reconcile any resource still marked `active`" in ownership
+
+
 def test_each_resource_contract_fails_closed() -> None:
     text = read_skill("ephemeral-workspace-lifecycle")
     gates = normalized(section(text, "Common Safety Gates"))
@@ -80,6 +112,100 @@ def test_each_resource_contract_fails_closed() -> None:
     assert "Retain the clone if fetch, reachability, submodule" in contracts
     assert "inventory contains no unknown or shared resource" in contracts
     assert "task completion may release a reference but must not delete the cache tree" in contracts
+
+
+def test_worktree_cleanup_detects_ignored_and_hidden_index_state() -> None:
+    contracts = normalized(section(read_skill("ephemeral-workspace-lifecycle"), "Resource-Specific Removal"))
+
+    assert "Run every Git safety probe as the resource-owning UID" in contracts
+    assert "never as a privileged controller" in contracts
+    assert "GIT_CONFIG_NOSYSTEM=1" in contracts
+    assert "GIT_CONFIG_GLOBAL=/dev/null" in contracts
+    assert "-c core.fsmonitor=false" in contracts
+    assert "-c core.hooksPath=/dev/null" in contracts
+    assert "git status --porcelain=v1 --untracked-files=all --ignored=traditional" in contracts
+    assert "Treat ignored files as work" in contracts
+    assert "any output retains the worktree" in contracts
+    assert "git ls-files -v" in contracts
+    assert "lowercase status tags (assume-unchanged)" in contracts
+    assert "an `S` tag (skip-worktree)" in contracts
+    assert "do not silently clear those flags" in contracts
+    assert "Re-run both probes immediately before removal" in contracts
+
+
+def test_git_probes_enumerate_ignored_descendants_and_hidden_flags(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.name", "Lifecycle Test")
+    git(repo, "config", "user.email", "lifecycle@example.invalid")
+    (repo / ".gitignore").write_text("cache/\n")
+    (repo / "assume.txt").write_text("original\n")
+    (repo / "skip.txt").write_text("original\n")
+    git(repo, "add", ".gitignore", "assume.txt", "skip.txt")
+    git(repo, "commit", "-m", "fixture")
+    git(repo, "update-index", "--assume-unchanged", "assume.txt")
+    git(repo, "update-index", "--skip-worktree", "skip.txt")
+    (repo / "cache" / "nested").mkdir(parents=True)
+    (repo / "cache" / "first.bin").write_text("one\n")
+    (repo / "cache" / "nested" / "second.bin").write_text("two\n")
+
+    status = git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=traditional",
+    )
+    index = git(repo, "ls-files", "-v")
+
+    assert "!! cache/first.bin" in status
+    assert "!! cache/nested/second.bin" in status
+    assert "h assume.txt" in index
+    assert "S skip.txt" in index
+
+
+def test_sanitized_git_probe_disables_repository_fsmonitor(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    marker = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsmonitor-hook"
+    hook.write_text(f"#!/bin/sh\n: > '{marker}'\nprintf 'token\\n'\n")
+    hook.chmod(0o700)
+    git(repo, "config", "core.fsmonitor", str(hook))
+
+    git(repo, "status", "--porcelain=v1")
+    assert marker.exists(), "fixture must prove repository config can execute"
+    marker.unlink()
+
+    executable = shutil.which("git")
+    assert executable is not None
+    owner_home = tmp_path / "home"
+    owner_home.mkdir()
+    safe_env = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_EXEC_PATH": git(repo, "--exec-path").strip(),
+        "GIT_PAGER": "cat",
+        "HOME": str(owner_home),
+        "LC_ALL": "C",
+        "PATH": str(Path(executable).parent),
+    }
+    git(
+        repo,
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        f"core.hooksPath={os.devnull}",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=traditional",
+        env=safe_env,
+    )
+
+    assert not marker.exists()
 
 
 def test_completion_and_dispatch_skills_carry_workspace_disposition() -> None:
