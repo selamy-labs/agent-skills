@@ -5,16 +5,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 ACK_ENV = "ORCHESTRATE_AGY_PERMISSION_BYPASS_ACK"
 ACK_VALUE = "authorized"
@@ -22,24 +25,44 @@ PROBE_TIMEOUT_SECONDS = 30
 WALL_TIMEOUT_GRACE_SECONDS = 5
 TERMINATION_GRACE_SECONDS = 2
 REQUIRED_FLAGS = (
+    "--input-format",
     "--log-file",
     "--mode",
     "--model",
     "--output-format",
-    "--print",
     "--print-timeout",
     "--sandbox",
 )
+POLL_INTERVAL_SECONDS = 0.05
+
+
+class SupervisorInterrupted(Exception):
+    """Raised by the wrapper's SIGINT/SIGTERM handlers."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"received signal {signum}")
+        self.signum = signum
+
+
+@dataclass(frozen=True)
+class ProcessInfo:
+    parent_pid: int
+    process_group_id: int
+    state: str
 
 
 @dataclass(frozen=True)
 class ProcessResult:
     returncode: int
-    pid: int
-    process_group_id: int
+    pid: int | None
+    process_group_id: int | None
     timed_out: bool
     survivors_harvested: bool
     process_group_alive_after_harvest: bool
+    observed_descendant_pids: list[int]
+    descendants_alive_after_harvest: list[int]
+    interrupted_signal: int | None
+    launch_error: str | None
 
 
 def utc_now() -> str:
@@ -47,9 +70,7 @@ def utc_now() -> str:
 
 
 def open_private(path: Path, mode: str):
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if "b" not in mode:
-        flags |= getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(path, flags, 0o600)
     return os.fdopen(descriptor, mode)
 
@@ -93,24 +114,189 @@ def signal_process_group(process_group_id: int, signum: signal.Signals) -> bool:
     return True
 
 
-def wait_for_process_group_exit(process_group_id: int, timeout_seconds: float) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if not process_group_exists(process_group_id):
-            return True
-        time.sleep(0.05)
-    return not process_group_exists(process_group_id)
-
-
-def harvest_process_group(process_group_id: int) -> bool:
-    if not process_group_exists(process_group_id):
+def signal_process(pid: int, signum: signal.Signals) -> bool:
+    try:
+        os.kill(pid, signum)
+    except ProcessLookupError:
         return False
-    signal_process_group(process_group_id, signal.SIGTERM)
-    if wait_for_process_group_exit(process_group_id, TERMINATION_GRACE_SECONDS):
-        return True
-    signal_process_group(process_group_id, signal.SIGKILL)
-    wait_for_process_group_exit(process_group_id, TERMINATION_GRACE_SECONDS)
     return True
+
+
+def process_snapshot() -> dict[int, ProcessInfo]:
+    ps = shutil.which("ps")
+    if not ps:
+        return {}
+    try:
+        completed = subprocess.run(
+            [ps, "-axo", "pid=,ppid=,pgid=,stat="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    snapshot: dict[int, ProcessInfo] = {}
+    for raw_line in completed.stdout.splitlines():
+        fields = raw_line.split()
+        if len(fields) != 4:
+            continue
+        try:
+            pid, parent_pid, process_group_id = (int(value) for value in fields[:3])
+        except ValueError:
+            continue
+        snapshot[pid] = ProcessInfo(parent_pid, process_group_id, fields[3])
+    return snapshot
+
+
+def descendant_pids(root_pid: int, snapshot: dict[int, ProcessInfo]) -> set[int]:
+    children: dict[int, list[int]] = {}
+    for pid, info in snapshot.items():
+        children.setdefault(info.parent_pid, []).append(pid)
+    descendants: set[int] = set()
+    frontier = [root_pid]
+    while frontier:
+        for child_pid in children.get(frontier.pop(), []):
+            if child_pid not in descendants:
+                descendants.add(child_pid)
+                frontier.append(child_pid)
+    return descendants
+
+
+def live_pids(pids: set[int], snapshot: dict[int, ProcessInfo]) -> set[int]:
+    return {pid for pid in pids if pid in snapshot and not snapshot[pid].state.startswith("Z")}
+
+
+def group_is_alive(process_group_id: int, snapshot: dict[int, ProcessInfo]) -> bool:
+    if snapshot:
+        return any(
+            info.process_group_id == process_group_id and not info.state.startswith("Z") for info in snapshot.values()
+        )
+    return process_group_exists(process_group_id)
+
+
+def harvest_process_tree(
+    root_pid: int,
+    process_group_id: int,
+    observed_descendants: set[int],
+) -> tuple[bool, bool, list[int]]:
+    snapshot = process_snapshot()
+    observed_descendants.update(descendant_pids(root_pid, snapshot))
+    owned_pids = observed_descendants | {root_pid}
+    live_before = live_pids(owned_pids, snapshot)
+    group_alive_before = group_is_alive(process_group_id, snapshot)
+    harvested = bool(live_before or group_alive_before)
+
+    if group_alive_before:
+        signal_process_group(process_group_id, signal.SIGTERM)
+    for pid in live_before:
+        signal_process(pid, signal.SIGTERM)
+
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        snapshot = process_snapshot()
+        observed_descendants.update(descendant_pids(root_pid, snapshot))
+        owned_pids = observed_descendants | {root_pid}
+        alive = live_pids(owned_pids, snapshot)
+        group_alive = group_is_alive(process_group_id, snapshot)
+        if not alive and not group_alive:
+            return harvested, False, []
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    snapshot = process_snapshot()
+    observed_descendants.update(descendant_pids(root_pid, snapshot))
+    owned_pids = observed_descendants | {root_pid}
+    if group_is_alive(process_group_id, snapshot):
+        signal_process_group(process_group_id, signal.SIGKILL)
+    for pid in live_pids(owned_pids, snapshot):
+        signal_process(pid, signal.SIGKILL)
+
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        snapshot = process_snapshot()
+        alive = live_pids(owned_pids, snapshot)
+        group_alive = group_is_alive(process_group_id, snapshot)
+        if not alive and not group_alive:
+            return harvested, False, []
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    snapshot = process_snapshot()
+    alive = sorted(live_pids(owned_pids, snapshot))
+    return harvested, group_is_alive(process_group_id, snapshot), alive
+
+
+@contextmanager
+def termination_signal_handlers() -> Iterator[None]:
+    handled = (signal.SIGINT, signal.SIGTERM)
+    previous = {signum: signal.getsignal(signum) for signum in handled}
+
+    def interrupt(signum: int, _frame: object) -> None:
+        raise SupervisorInterrupted(signum)
+
+    for signum in handled:
+        signal.signal(signum, interrupt)
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def launch_process(
+    command: list[str],
+    cwd: Path,
+    stdin: BinaryIO,
+    stdout: BinaryIO,
+    stderr: BinaryIO,
+) -> tuple[subprocess.Popen[bytes] | None, str | None]:
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+    except OSError as error:
+        return None, f"{type(error).__name__}: {error}"
+    return process, None
+
+
+def monitor_process(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+    observed_descendants: set[int],
+) -> tuple[int, bool, int | None]:
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            snapshot = process_snapshot()
+            observed_descendants.update(descendant_pids(process.pid, snapshot))
+            returncode = process.poll()
+            if returncode is not None:
+                return returncode, False, None
+            if time.monotonic() >= deadline:
+                return 124, True, None
+            time.sleep(POLL_INTERVAL_SECONDS)
+    except SupervisorInterrupted as error:
+        return 128 + error.signum, False, error.signum
+
+
+def launch_error_result(launch_error: str) -> ProcessResult:
+    return ProcessResult(
+        returncode=127,
+        pid=None,
+        process_group_id=None,
+        timed_out=False,
+        survivors_harvested=False,
+        process_group_alive_after_harvest=False,
+        observed_descendant_pids=[],
+        descendants_alive_after_harvest=[],
+        interrupted_signal=None,
+        launch_error=launch_error,
+    )
 
 
 def run_process(
@@ -118,43 +304,50 @@ def run_process(
     cwd: Path,
     stdout_path: Path,
     stderr_path: Path,
-    timeout_seconds: int,
+    timeout_seconds: float,
+    stdin_path: Path | None = None,
     on_start: Callable[[int, int], None] | None = None,
 ) -> ProcessResult:
+    observed_descendants: set[int] = set()
+
     with open_private(stdout_path, "wb") as stdout, open_private(stderr_path, "wb") as stderr:
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout,
-            stderr=stderr,
-            start_new_session=True,
-        )
-        process_group_id = process.pid
-        if on_start:
-            on_start(process.pid, process_group_id)
-
-        timed_out = False
+        stdin = stdin_path.open("rb") if stdin_path else open(os.devnull, "rb")
         try:
-            returncode = process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            signal_process_group(process_group_id, signal.SIGTERM)
+            process, launch_error = launch_process(command, cwd, stdin, stdout, stderr)
+            if not process:
+                return launch_error_result(launch_error or "unknown launch error")
+            if on_start:
+                on_start(process.pid, process.pid)
             try:
-                returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                signal_process_group(process_group_id, signal.SIGKILL)
-                returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
-
-    survivors_harvested = harvest_process_group(process_group_id)
-    group_alive = not wait_for_process_group_exit(process_group_id, TERMINATION_GRACE_SECONDS)
+                returncode, timed_out, interrupted_signal = monitor_process(
+                    process,
+                    timeout_seconds,
+                    observed_descendants,
+                )
+            finally:
+                survivors_harvested, group_alive, alive_descendants = harvest_process_tree(
+                    process.pid,
+                    process.pid,
+                    observed_descendants,
+                )
+                try:
+                    returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    signal_process(process.pid, signal.SIGKILL)
+                    returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
+        finally:
+            stdin.close()
     return ProcessResult(
         returncode=returncode,
         pid=process.pid,
-        process_group_id=process_group_id,
+        process_group_id=process.pid,
         timed_out=timed_out,
         survivors_harvested=survivors_harvested,
         process_group_alive_after_harvest=group_alive,
+        observed_descendant_pids=sorted(observed_descendants),
+        descendants_alive_after_harvest=alive_descendants,
+        interrupted_signal=interrupted_signal,
+        launch_error=None,
     )
 
 
@@ -168,27 +361,52 @@ def advertised_models(models_output: str) -> set[str]:
     return models
 
 
+def terminal_stream_result(stdout_text: str) -> tuple[str | None, dict[str, Any] | None]:
+    if not stdout_text.strip():
+        return "no_output", None
+    result_events: list[dict[str, Any]] = []
+    try:
+        events = [json.loads(line) for line in stdout_text.splitlines()]
+    except json.JSONDecodeError:
+        return "invalid_output", None
+    if any(not isinstance(event, dict) for event in events):
+        return "invalid_output", None
+    for event in events:
+        if event.get("event") == "result" and isinstance(event.get("result"), dict):
+            result_events.append(event["result"])
+    if len(result_events) != 1:
+        return "invalid_output", None
+    return None, result_events[0]
+
+
+def empty_response_classification(stderr_path: Path) -> str:
+    stderr_text = stderr_path.read_text(errors="replace").lower()
+    permission_notice = "permission" in stderr_text and (
+        "cannot prompt" in stderr_text or "auto-denied" in stderr_text or "requires approval" in stderr_text
+    )
+    return "permission_blocked" if permission_notice else "no_output"
+
+
 def classify_result(
     result: ProcessResult,
     stdout_path: Path,
     stderr_path: Path,
 ) -> tuple[str, dict[str, Any] | None]:
+    if result.interrupted_signal:
+        return "interrupted", None
     if result.timed_out:
         return "timed_out", None
-    if result.process_group_alive_after_harvest:
+    if result.process_group_alive_after_harvest or result.descendants_alive_after_harvest:
         return "harvest_failed", None
+    if result.launch_error:
+        return "launch_error", None
     if result.returncode != 0:
         return "cli_error", None
 
     stdout_text = stdout_path.read_text(errors="replace")
-    if not stdout_text.strip():
-        return "no_output", None
-    try:
-        envelope = json.loads(stdout_text)
-    except json.JSONDecodeError:
-        return "invalid_output", None
-    if not isinstance(envelope, dict):
-        return "invalid_output", None
+    stream_error, envelope = terminal_stream_result(stdout_text)
+    if stream_error or not envelope:
+        return stream_error or "invalid_output", None
 
     agy_status = envelope.get("status")
     if agy_status != "SUCCESS":
@@ -196,11 +414,7 @@ def classify_result(
 
     response = envelope.get("response")
     if not isinstance(response, str) or not response.strip():
-        stderr_text = stderr_path.read_text(errors="replace").lower()
-        permission_notice = "permission" in stderr_text and (
-            "cannot prompt" in stderr_text or "auto-denied" in stderr_text or "requires approval" in stderr_text
-        )
-        return ("permission_blocked" if permission_notice else "no_output"), envelope
+        return empty_response_classification(stderr_path), envelope
     return "succeeded", envelope
 
 
@@ -239,6 +453,12 @@ def parse_args() -> argparse.Namespace:
         parser.error(f"prompt is not a file: {args.prompt_file}")
     if not args.agy.is_file() or not os.access(args.agy, os.X_OK):
         parser.error(f"AGY is not executable: {args.agy}")
+    args.cwd = args.cwd.resolve()
+    args.prompt_file = args.prompt_file.resolve()
+    args.agy = args.agy.resolve()
+    args.run_dir = args.run_dir.resolve(strict=False)
+    if args.run_dir.is_relative_to(args.cwd):
+        parser.error(f"run directory must be outside cwd: {args.run_dir}")
     if args.run_dir.exists():
         parser.error(f"run directory already exists: {args.run_dir}")
     return args
@@ -247,27 +467,17 @@ def parse_args() -> argparse.Namespace:
 def probe(
     args: argparse.Namespace,
     run_dir: Path,
-    status: dict[str, object],
     name: str,
     command: list[str],
+    timeout_seconds: float,
 ) -> ProcessResult:
-    result = run_process(
+    return run_process(
         command,
         args.cwd,
         run_dir / f"agy-{name}.stdout",
         run_dir / f"agy-{name}.stderr",
-        PROBE_TIMEOUT_SECONDS,
+        timeout_seconds,
     )
-    if result.timed_out or result.returncode != 0 or result.process_group_alive_after_harvest:
-        status.update(
-            state="finished",
-            classification="capability_probe_failed",
-            failed_probe=name,
-            completed_at=utc_now(),
-            **asdict(result),
-        )
-        write_status(run_dir / "status.json", status)
-    return result
 
 
 def initial_status(args: argparse.Namespace, started_at: str) -> dict[str, object]:
@@ -286,22 +496,68 @@ def initial_status(args: argparse.Namespace, started_at: str) -> dict[str, objec
     }
 
 
-def prepare_command(
+def run_capability_probes(
     args: argparse.Namespace,
     status: dict[str, object],
-    prompt: str,
     started_monotonic: float,
-) -> tuple[list[str] | None, int]:
+    operation_deadline: float,
+) -> int | None:
     probes = (
         ("version", [str(args.agy), "--version"]),
         ("help", [str(args.agy), "--help"]),
         ("models", [str(args.agy), "models"]),
     )
     for name, command in probes:
-        result = probe(args, args.run_dir, status, name, command)
-        if result.timed_out or result.returncode != 0 or result.process_group_alive_after_harvest:
+        remaining = operation_deadline - time.monotonic()
+        if remaining <= 0:
+            status.update(
+                state="finished",
+                classification="timed_out",
+                failed_stage="capability_probes",
+                completed_at=utc_now(),
+                duration_seconds=round(time.monotonic() - started_monotonic, 3),
+            )
+            write_status(args.run_dir / "status.json", status)
+            print(f"AGY run timed out during capability probes; evidence: {args.run_dir}", file=sys.stderr)
+            return 124
+        result = probe(args, args.run_dir, name, command, min(PROBE_TIMEOUT_SECONDS, remaining))
+        failed = (
+            result.timed_out
+            or result.launch_error
+            or result.returncode != 0
+            or result.process_group_alive_after_harvest
+            or result.descendants_alive_after_harvest
+            or result.interrupted_signal
+        )
+        if failed:
+            overall_timeout = result.timed_out and time.monotonic() >= operation_deadline
+            classification = "timed_out" if overall_timeout else "capability_probe_failed"
+            status.update(
+                state="finished",
+                classification=classification,
+                failed_probe=name,
+                completed_at=utc_now(),
+                duration_seconds=round(time.monotonic() - started_monotonic, 3),
+                **asdict(result),
+            )
+            write_status(args.run_dir / "status.json", status)
             print(f"AGY capability probe failed: {name}; evidence: {args.run_dir}", file=sys.stderr)
-            return None, 1
+            if result.interrupted_signal:
+                return 128 + result.interrupted_signal
+            return 124 if classification == "timed_out" else 1
+    return None
+
+
+def prepare_command(
+    args: argparse.Namespace,
+    status: dict[str, object],
+    prompt: str,
+    started_monotonic: float,
+    operation_deadline: float,
+) -> tuple[list[str] | None, int]:
+    probe_exit = run_capability_probes(args, status, started_monotonic, operation_deadline)
+    if probe_exit is not None:
+        return None, probe_exit
 
     help_text = "\n".join(
         (
@@ -329,6 +585,20 @@ def prepare_command(
         print(f"AGY capability mismatch; evidence: {args.run_dir}", file=sys.stderr)
         return None, 2
 
+    remaining = operation_deadline - time.monotonic()
+    if remaining <= 0:
+        status.update(
+            state="finished",
+            classification="timed_out",
+            failed_stage="capability_probes",
+            completed_at=utc_now(),
+            duration_seconds=round(time.monotonic() - started_monotonic, 3),
+        )
+        write_status(args.run_dir / "status.json", status)
+        return None, 124
+
+    agent_timeout_seconds = max(1, math.ceil(remaining))
+    status["agent_timeout_seconds"] = agent_timeout_seconds
     log_path = args.run_dir / "agy.log"
     write_private(log_path, "")
     command = [
@@ -345,19 +615,21 @@ def prepare_command(
         command.append("--dangerously-skip-permissions")
     command.extend(
         (
+            "--input-format",
+            "stream-json",
             "--output-format",
-            "json",
+            "stream-json",
             "--print-timeout",
-            f"{args.timeout_seconds}s",
+            f"{agent_timeout_seconds}s",
             "--log-file",
             str(log_path),
-            "--print",
-            prompt,
         )
     )
+    input_event = {"event": "user", "message": {"content": prompt}}
+    write_private(args.run_dir / "input.ndjson", json.dumps(input_event, separators=(",", ":")) + "\n")
     write_private(
         args.run_dir / "command.json",
-        json.dumps([*command[:-1], "<prompt from prompt.txt>"], indent=2) + "\n",
+        json.dumps(command, indent=2) + "\n",
     )
     return command, 0
 
@@ -367,17 +639,31 @@ def execute_dispatch(
     status: dict[str, object],
     command: list[str],
     started_monotonic: float,
+    operation_deadline: float,
 ) -> int:
     def record_process(pid: int, process_group_id: int) -> None:
         status.update(state="running", pid=pid, process_group_id=process_group_id)
         write_status(args.run_dir / "status.json", status)
+
+    remaining = operation_deadline - time.monotonic()
+    if remaining <= 0:
+        status.update(
+            state="finished",
+            classification="timed_out",
+            failed_stage="before_dispatch",
+            completed_at=utc_now(),
+            duration_seconds=round(time.monotonic() - started_monotonic, 3),
+        )
+        write_status(args.run_dir / "status.json", status)
+        return 124
 
     result = run_process(
         command,
         args.cwd,
         args.run_dir / "stdout.json",
         args.run_dir / "stderr.log",
-        args.timeout_seconds + WALL_TIMEOUT_GRACE_SECONDS,
+        remaining,
+        stdin_path=args.run_dir / "input.ndjson",
         on_start=record_process,
     )
     classification, envelope = classify_result(
@@ -404,6 +690,8 @@ def execute_dispatch(
     print(f"AGY run failed: {classification}; evidence: {args.run_dir}", file=sys.stderr)
     if classification == "timed_out":
         return 124
+    if classification == "interrupted" and result.interrupted_signal:
+        return 128 + result.interrupted_signal
     if classification == "cli_error" and 0 < result.returncode < 126:
         return result.returncode
     return 1
@@ -416,28 +704,57 @@ def main() -> int:
     args.run_dir.mkdir(mode=0o700, parents=True)
     args.run_dir.chmod(0o700)
 
-    prompt = args.prompt_file.read_text()
-    write_private(args.run_dir / "prompt.txt", prompt)
-    if not prompt.strip():
-        write_status(
-            args.run_dir / "status.json",
-            {
-                "schema_version": 1,
-                "state": "finished",
-                "classification": "invalid_prompt",
-                "started_at": started_at,
-                "completed_at": utc_now(),
-            },
-        )
-        print(f"AGY run failed: invalid_prompt; evidence: {args.run_dir}", file=sys.stderr)
-        return 2
-
     status = initial_status(args, started_at)
     write_status(args.run_dir / "status.json", status)
-    command, preparation_exit = prepare_command(args, status, prompt, started_monotonic)
-    if command is None:
-        return preparation_exit
-    return execute_dispatch(args, status, command, started_monotonic)
+    operation_deadline = started_monotonic + args.timeout_seconds
+
+    try:
+        with termination_signal_handlers():
+            prompt = args.prompt_file.read_text()
+            write_private(args.run_dir / "prompt.txt", prompt)
+            if not prompt.strip():
+                status.update(
+                    state="finished",
+                    classification="invalid_prompt",
+                    completed_at=utc_now(),
+                    duration_seconds=round(time.monotonic() - started_monotonic, 3),
+                )
+                write_status(args.run_dir / "status.json", status)
+                print(f"AGY run failed: invalid_prompt; evidence: {args.run_dir}", file=sys.stderr)
+                return 2
+
+            command, preparation_exit = prepare_command(
+                args,
+                status,
+                prompt,
+                started_monotonic,
+                operation_deadline,
+            )
+            if command is None:
+                return preparation_exit
+            return execute_dispatch(args, status, command, started_monotonic, operation_deadline)
+    except SupervisorInterrupted as error:
+        status.update(
+            state="finished",
+            classification="interrupted",
+            interrupted_signal=error.signum,
+            completed_at=utc_now(),
+            duration_seconds=round(time.monotonic() - started_monotonic, 3),
+        )
+        write_status(args.run_dir / "status.json", status)
+        return 128 + error.signum
+    except Exception as error:
+        status.update(
+            state="finished",
+            classification="internal_error",
+            error_type=type(error).__name__,
+            error_message=str(error),
+            completed_at=utc_now(),
+            duration_seconds=round(time.monotonic() - started_monotonic, 3),
+        )
+        write_status(args.run_dir / "status.json", status)
+        print(f"AGY runner failed internally; evidence: {args.run_dir}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

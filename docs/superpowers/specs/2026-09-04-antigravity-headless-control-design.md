@@ -38,14 +38,16 @@ capabilities differ from documentation or from newer releases.
 The executed command always:
 
 1. enables the sandbox;
-2. requests JSON output;
+2. requests streaming JSON input and output;
 3. sets AGY's internal print timeout;
 4. writes AGY's own log inside the evidence directory;
-5. places every option before a final `--print` and its single prompt value.
+5. places every option in argv and sends the single prompt as one NDJSON user
+   event over stdin.
 
-The prompt is read directly from the file and passed as one argument without a
-shell. The runner copies it into the evidence directory with owner-only
-permissions. Prompts must not contain credentials or other secrets.
+The prompt is read directly from the file without a shell. It never appears in
+the child process argv, avoiding process-list exposure and argument-size limits.
+The runner copies it and the exact stdin event into the evidence directory with
+owner-only permissions. Prompts must not contain credentials or other secrets.
 
 ## Permission boundary
 
@@ -63,21 +65,31 @@ enabled even when bypass is authorized.
 ## Evidence and lifecycle
 
 The runner creates the evidence directory rather than overwriting an existing
-one. It records the prompt, capability probes, stdout JSON, stderr, AGY log, and
-an atomically replaced `status.json`. The status includes timestamps, duration,
-process and process-group IDs, requested mode/model/effort, exit code, timeout
-state, terminal classification, conversation ID when available, and whether
-the process group remained alive after harvesting.
+one and rejects any directory inside the worker cwd. It records the prompt,
+stdin event, capability probes, stdout JSON, stderr, AGY log, and an atomically
+replaced `status.json`. The status includes timestamps, duration, process and
+process-group IDs, observed descendant PIDs, requested mode/model/effort, exit
+code, timeout state, terminal classification, conversation ID when available,
+and whether the group or any observed descendant remained alive after
+harvesting.
 
-AGY's internal timeout is backed by a slightly longer wall-clock timeout. On a
-wall timeout, the runner terminates the entire process group, waits a short
-grace period, kills survivors, and verifies that the group is gone.
+One operation deadline covers all capability probes and the AGY turn. AGY gets
+the remaining operation budget as its internal timeout, backed by one short
+wall-clock grace period for cleanup. On normal completion, timeout, or wrapper
+interruption, the runner terminates the process group and every descendant it
+observed (including a child that started a new session), escalates to `SIGKILL`,
+and reports known survivors. A process that deliberately double-forks and
+detaches before the supervisor observes it is outside this portable
+standard-library boundary; such workloads require a separately verified OS
+container, service manager, or disposable machine boundary.
 
 The runner exits nonzero for capability-probe failure, an unadvertised model or
 flag, timeout, nonzero AGY exit, empty stdout, malformed JSON, non-`SUCCESS`
-status, or an empty response. An empty response accompanied by AGY's headless
-permission notice is classified as `permission_blocked`; other empty responses
-are `no_output`. Stderr remains evidence even when AGY exits zero.
+status, or an empty response. Spawn failures, wrapper interruption, and internal
+wrapper exceptions also produce terminal evidence instead of leaving a false
+`running` status. An empty response accompanied by AGY's headless permission
+notice is classified as `permission_blocked`; other empty responses are
+`no_output`. Stderr remains evidence even when AGY exits zero.
 
 ## Skill workflow
 
@@ -96,12 +108,16 @@ silently translate flags or treat a fallback worker's narrative as acceptance.
 
 Focused tests use fake AGY executables and assert:
 
-- exact command construction and multiline prompt transport;
+- exact command construction and multiline stdin prompt transport without argv
+  exposure;
 - capability and model discovery artifacts;
 - rejection of the observed zero-exit, `SUCCESS`, empty-response permission
   failure;
 - rejection of nonzero, malformed, empty, and non-success output;
-- process-group termination and harvesting after timeout;
+- process-group and observed-descendant harvesting after timeout or SIGTERM;
+- a shared overall deadline across capability probes and dispatch;
+- terminal evidence for process-launch failure;
+- rejection of evidence directories inside the worker cwd;
 - rejection of blanket permission bypass without the acknowledgement gate.
 
 The full repository CI command set remains the pre-push gate. A bounded live

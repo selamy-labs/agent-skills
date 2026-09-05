@@ -4,18 +4,18 @@
 
 **Goal:** Add a bounded, evidence-producing headless runner to the existing `orchestrate-agy` skill and reject silent permission/no-output failures.
 
-**Architecture:** A Python 3.11 standard-library script probes the live AGY executable, validates its advertised model and flags, then runs one sandboxed JSON print turn in a fresh process group. It streams evidence to owner-only files, atomically updates a status envelope, and harvests the process group on every terminal path.
+**Architecture:** A Python 3.11 standard-library script probes the live AGY executable, validates its advertised model and flags, then sends one sandboxed NDJSON turn over stdin in a fresh process group. It streams evidence to owner-only files, atomically updates a status envelope, and harvests the group plus observed descendants on every terminal path.
 
 **Tech Stack:** Python 3.11 standard library, pytest, existing skill Markdown and OpenAI metadata.
 
 ## Global Constraints
 
 - Extend `orchestrate-agy`; do not create a duplicate skill or generalize unrelated CLI skills.
-- Require absolute paths, a new evidence directory, an explicit model, `plan|accept-edits`, and a positive timeout.
-- Always use `--sandbox`, JSON output, AGY's log file, an internal print timeout, and a slightly longer wall timeout.
+- Require absolute paths, a new evidence directory outside the worker cwd, an explicit model, `plan|accept-edits`, and a positive timeout.
+- Always use `--sandbox`, streaming JSON input/output, AGY's log file, one shared operation timeout, and a slightly longer cleanup grace.
 - Prefer scoped AGY permission rules; blanket bypass requires a runner flag plus `ORCHESTRATE_AGY_PERMISSION_BYPASS_ACK=authorized`.
 - Treat a zero-exit `SUCCESS` envelope with an empty response as failure and preserve stderr.
-- Use no third-party runtime dependencies and expose no credentials in command/status artifacts.
+- Use no third-party runtime dependencies and expose neither credentials nor the prompt in process argv.
 
 ---
 
@@ -27,11 +27,11 @@
 
 **Interfaces:**
 - Consumes: `run_headless.py --run-dir PATH --cwd PATH --prompt-file PATH --agy PATH --timeout-seconds INT --mode {plan,accept-edits} --model SLUG [--effort {low,medium,high}] [--allow-all-permissions]`
-- Produces: exit code `0` only for a non-empty `SUCCESS` response; `status.json`, `prompt.txt`, `command.json`, `agy-version.*`, `agy-help.*`, `agy-models.*`, `stdout.json`, `stderr.log`, and `agy.log` in the new run directory.
+- Produces: exit code `0` only for a non-empty `SUCCESS` response; `status.json`, `prompt.txt`, `input.ndjson`, `command.json`, `agy-version.*`, `agy-help.*`, `agy-models.*`, `stdout.json`, `stderr.log`, and `agy.log` in the new run directory.
 
 - [ ] **Step 1: Write the fake-CLI test fixture and command-construction test**
 
-  Create a fake executable that handles `--version`, `--help`, and `models`, then records the real-run argv and emits a configurable JSON envelope. Assert that a multiline shell-sensitive prompt is the final value after `--print`, every option precedes it, sandbox/JSON/timeout/log flags are present, the exact mode/model/effort are present, and discovery files plus a successful status are durable.
+  Create a fake executable that handles `--version`, `--help`, and `models`, then records the real-run argv, reads one NDJSON user event from stdin, and emits a configurable result event. Assert that a multiline shell-sensitive prompt is absent from argv and intact in stdin, sandbox/stream/timeout/log flags are present, the exact mode/model/effort are present, and discovery files plus a successful status are durable.
 
   ```python
   result = subprocess.run(
@@ -52,7 +52,8 @@
       text=True,
   )
   assert result.returncode == 0
-  assert json.loads(argv_path.read_text())[-2:] == ["--print", prompt.read_text()]
+  assert prompt.read_text() not in json.loads(argv_path.read_text())
+  assert json.loads((run_dir / "input.ndjson").read_text())["message"]["content"] == prompt.read_text()
   assert json.loads((run_dir / "status.json").read_text())["classification"] == "succeeded"
   ```
 
@@ -64,7 +65,7 @@
 
 - [ ] **Step 3: Add failure-mode tests**
 
-  Add separate named cases for: zero-exit `SUCCESS` plus empty response and permission stderr; nonzero exit; empty stdout; malformed JSON; non-success AGY status; unavailable model; timeout with a child process in the same process group; and `--allow-all-permissions` without the acknowledgement environment variable. Each test asserts a nonzero wrapper exit and the exact final `classification` where a run directory is created.
+  Add separate named cases for: zero-exit `SUCCESS` plus empty response and permission stderr; nonzero exit; empty stdout; malformed JSON; non-success AGY status; unavailable model; timeout with a child process in the same process group; SIGTERM while a worker is active; a descendant that starts a new session; a launch error; probes sharing the overall deadline; evidence nested under the worker cwd; and `--allow-all-permissions` without the acknowledgement environment variable. Each test asserts a nonzero wrapper exit and the exact final `classification` where a run directory is created.
 
   ```python
   status = json.loads((run_dir / "status.json").read_text())
@@ -76,48 +77,46 @@
 - [ ] **Step 4: Implement the minimal runner**
 
   Implement a frozen `ProcessResult` dataclass with `returncode`, `pid`,
-  `process_group_id`, `timed_out`, `survivors_harvested`, and
+  `process_group_id`, `timed_out`, interruption/launch error state,
+  observed-descendant state, `survivors_harvested`, and
   `process_group_alive_after_harvest` fields. Add `run_process`,
   `write_status`, `advertised_models`, and `classify_result` functions with the
   signatures used by the tests.
 
-  The process launch and timeout boundary must follow this shape:
+  Launch the child in a new session, poll its descendant tree while applying a
+  shared absolute deadline, and install SIGINT/SIGTERM handling around the
+  supervised operation. Feed the owner-only `input.ndjson` file to stdin:
 
   ```python
   process = subprocess.Popen(
       command,
       cwd=cwd,
-      stdin=subprocess.DEVNULL,
+      stdin=input_file,
       stdout=stdout_file,
       stderr=stderr_file,
       start_new_session=True,
   )
-  try:
-      returncode = process.wait(timeout=timeout_seconds)
-  except subprocess.TimeoutExpired:
-      timed_out = True
-      os.killpg(process.pid, signal.SIGTERM)
-      try:
-          returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
-      except subprocess.TimeoutExpired:
-          os.killpg(process.pid, signal.SIGKILL)
-          returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
+  while process.poll() is None and time.monotonic() < deadline:
+      observed_descendants.update(descendant_pids(process.pid, process_snapshot()))
+      time.sleep(POLL_INTERVAL_SECONDS)
   ```
 
-  After the parent exits, probe the process group and harvest any survivors
-  with the same TERM/KILL sequence. `write_status` must write mode `0600` to a
+  On normal exit, timeout, interruption, or an exception after launch, harvest
+  the process group and observed descendants with a TERM/KILL sequence.
+  `write_status` must write mode `0600` to a
   sibling temporary file and replace `status.json` atomically.
   `advertised_models` must return the first whitespace-delimited field from
   each nonblank model-list line except progress lines. `classify_result` must
   prioritize timeout, nonzero exit, empty stdout, malformed JSON,
   non-`SUCCESS`, permission-blocked empty response, and other empty response
-  in that order.
+  in that order. Process launch and unexpected wrapper errors must produce
+  terminal classifications rather than stale running evidence.
 
 - [ ] **Step 5: Run focused tests and verify GREEN**
 
   Run: `python -m pytest -q tests/test_orchestrate_agy_headless.py`
 
-  Expected: all headless-runner tests pass; timeout cases leave no live process group.
+  Expected: all headless-runner tests pass; lifecycle cases leave no live process group or observed descendant.
 
 - [ ] **Step 6: Run shared orchestration regressions**
 

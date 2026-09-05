@@ -58,7 +58,7 @@ Count work as dispatched only when the verifier finds the unique start and end m
 
 ## Run headlessly
 
-Use `scripts/run_headless.py` for one bounded turn. Give it a new absolute evidence directory outside any cleanup boundary that might disappear before review. The runner probes current capabilities, validates the exact model, enables the sandbox, requests JSON, configures AGY's internal timeout and log, then places `--print` and its single file-loaded prompt value last.
+Use `scripts/run_headless.py` for one bounded turn. Give it a new absolute evidence directory outside the worker cwd and outside any cleanup boundary that might disappear before review. The runner probes current capabilities, validates the exact model, enables the sandbox, requests streaming JSON, configures AGY's internal timeout and log, then sends one file-loaded user event over stdin. The prompt never appears in process argv.
 
 ```bash
 scripts/run_headless.py \
@@ -72,14 +72,15 @@ scripts/run_headless.py \
   --effort high
 ```
 
-The runner writes owner-only prompt, command, version, help, model, stdout, stderr, AGY log, and atomic `status.json` artifacts. The command artifact replaces the prompt value with a pointer to `prompt.txt`; inspect both when prompt transport matters. While running, status records the PID and process group. AGY's timeout is backed by a slightly longer wall limit; after timeout or normal exit, the runner terminates and checks the whole process group so child processes are not mistaken for a finished session.
+The runner writes owner-only prompt, stdin event, command, version, help, model, stdout, stderr, AGY log, and atomic `status.json` artifacts. Inspect `prompt.txt`, `input.ndjson`, and `command.json` together when prompt transport matters. While running, status records the PID and process group. One operation deadline covers the probes and AGY turn; AGY receives the remaining budget, backed by a short wall grace for cleanup. On normal exit, timeout, or SIGINT/SIGTERM, the runner terminates the process group and every descendant PID it observed, including a child that starts a new session, then records any known survivor.
 
-Exit `0` means AGY returned a JSON `SUCCESS` envelope with a non-empty response and no surviving process group. Treat every other classification as undelivered:
+Exit `0` means AGY returned exactly one streaming JSON `result` event with a `SUCCESS` envelope and non-empty response, with no surviving process group or observed descendant. Treat every other classification as undelivered:
 
 - `permission_blocked`: AGY exited zero with `SUCCESS` but returned an empty response alongside a headless permission notice;
 - `no_output` or `invalid_output`: the response cannot prove a completed turn;
 - `agy_status_*` or `cli_error`: AGY reported or exited with failure;
-- `timed_out` or `harvest_failed`: the bounded process did not terminate cleanly;
+- `timed_out`, `interrupted`, or `harvest_failed`: the bounded process did not terminate cleanly;
+- `launch_error` or `internal_error`: the worker or wrapper failed before producing a valid terminal result;
 - `capability_probe_failed` or `capability_mismatch`: the executable, flags, or selected model were not proven.
 
 Do not retry an empty response with blanket approval. Add the narrow `action(target)` rule the task needs, or switch to the interactive path. Only after explicit authorization for all tool calls in an externally isolated worktree may you add `--allow-all-permissions` and set `ORCHESTRATE_AGY_PERMISSION_BYPASS_ACK=authorized`; the runner then supplies `--dangerously-skip-permissions` while retaining the sandbox, timeout, and evidence boundaries. The acknowledgement records intent but does not create authority.
@@ -94,7 +95,7 @@ Classify every observation explicitly:
 - **trust/auth-blocked:** setup or login prevents work;
 - **dead:** the pane or process exited.
 
-Respond to safe in-scope choices, repair trust/auth under the intended identity, or restart from the recorded lane. Preserve the conversation ID and use the current `--conversation` or `--continue` semantics from `agy --help` when resuming. Never infer liveness from tmux session existence alone. After delivery or failure, capture the final pane/process state, terminate the owned tmux session or process group, and verify that no worker survives.
+Respond to safe in-scope choices, repair trust/auth under the intended identity, or restart from the recorded lane. Preserve the conversation ID and use the current `--conversation` or `--continue` semantics from `agy --help` when resuming. Never infer liveness from tmux session existence alone. After delivery or failure, capture the final pane/process state, terminate the owned tmux session or process group, and verify that no known worker survives. Portable PID tracking cannot prove containment of a process that deliberately double-forks and detaches before observation. If the authorized task may daemonize or launch external services, add a separately verified OS container, service manager, or disposable-machine boundary and clean that boundary explicitly.
 
 If AGY is unavailable, its capability probe fails, or the intended model or authority cannot be proven, report the exact blocker. Use another worker-control skill only when that fallback is separately authorized; reselect its model, reasoning, sandbox, and permission flags from its own current help rather than translating AGY flags. A fallback worker's report still requires the same independent artifact checks.
 
