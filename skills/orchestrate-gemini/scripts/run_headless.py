@@ -1270,7 +1270,6 @@ def prepare_attempt(args: argparse.Namespace, deadline: float, status: dict[str,
         goal.auth_type,
     )
     policy_digest, durable_policy = validate_policy(args.policy_file, args.run_dir, gemini_home)
-    sandbox_executable = probe_sandbox_provider(args, environment, deadline)
     version, resolved_executable = probe_capabilities(args, environment, deadline)
     status.update(
         {
@@ -1280,7 +1279,6 @@ def prepare_attempt(args: argparse.Namespace, deadline: float, status: dict[str,
             "gemini_executable": str(args.gemini),
             "gemini_executable_resolved": str(resolved_executable),
             "policy_sha256": policy_digest,
-            "sandbox_executable": sandbox_executable,
             "runtime": {
                 "environment_names": sorted(environment),
                 "gemini_home": environment["GEMINI_CLI_HOME"],
@@ -1290,6 +1288,8 @@ def prepare_attempt(args: argparse.Namespace, deadline: float, status: dict[str,
             },
         }
     )
+    sandbox_executable = probe_sandbox_provider(args, environment, deadline)
+    status["sandbox_executable"] = sandbox_executable
     lease_payload = {
         "attempt": attempt,
         "goal_id": goal.goal_id,
