@@ -97,6 +97,16 @@ def write_status(path: Path, status: dict[str, object]) -> None:
             pass
 
 
+def process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def signal_process_group(process_group_id: int, signum: signal.Signals) -> bool:
     try:
         os.killpg(process_group_id, signum)
@@ -193,6 +203,14 @@ def group_is_alive(
     )
 
 
+def owned_group_is_alive(process_group_id: int, snapshot: dict[int, ProcessInfo]) -> bool:
+    if snapshot:
+        return any(
+            info.process_group_id == process_group_id and not info.state.startswith("Z") for info in snapshot.values()
+        )
+    return process_group_exists(process_group_id)
+
+
 def harvest_process_tree(
     root_pid: int,
     process_group_id: int,
@@ -201,11 +219,9 @@ def harvest_process_tree(
     snapshot = process_snapshot()
     remember_process_tree(root_pid, snapshot, tracked_processes)
     live_before = live_pids(tracked_processes, snapshot)
-    group_alive_before = group_is_alive(process_group_id, snapshot, tracked_processes)
-    harvested = bool(live_before or group_alive_before)
+    group_signaled = signal_process_group(process_group_id, signal.SIGTERM)
+    harvested = bool(live_before or group_signaled)
 
-    if group_alive_before:
-        signal_process_group(process_group_id, signal.SIGTERM)
     for pid in live_before:
         signal_process(pid, signal.SIGTERM)
 
@@ -214,14 +230,14 @@ def harvest_process_tree(
         snapshot = process_snapshot()
         remember_process_tree(root_pid, snapshot, tracked_processes)
         alive = live_pids(tracked_processes, snapshot)
-        group_alive = group_is_alive(process_group_id, snapshot, tracked_processes)
+        group_alive = owned_group_is_alive(process_group_id, snapshot)
         if not alive and not group_alive:
             return harvested, False, []
         time.sleep(POLL_INTERVAL_SECONDS)
 
     snapshot = process_snapshot()
     remember_process_tree(root_pid, snapshot, tracked_processes)
-    if group_is_alive(process_group_id, snapshot, tracked_processes):
+    if owned_group_is_alive(process_group_id, snapshot):
         signal_process_group(process_group_id, signal.SIGKILL)
     for pid in live_pids(tracked_processes, snapshot):
         signal_process(pid, signal.SIGKILL)
@@ -230,14 +246,14 @@ def harvest_process_tree(
     while time.monotonic() < deadline:
         snapshot = process_snapshot()
         alive = live_pids(tracked_processes, snapshot)
-        group_alive = group_is_alive(process_group_id, snapshot, tracked_processes)
+        group_alive = owned_group_is_alive(process_group_id, snapshot)
         if not alive and not group_alive:
             return harvested, False, []
         time.sleep(POLL_INTERVAL_SECONDS)
 
     snapshot = process_snapshot()
     alive = sorted(live_pids(tracked_processes, snapshot))
-    return harvested, group_is_alive(process_group_id, snapshot, tracked_processes), alive
+    return harvested, owned_group_is_alive(process_group_id, snapshot), alive
 
 
 @contextmanager

@@ -102,9 +102,10 @@
   ```
 
   On normal exit, timeout, interruption, or an exception after launch, harvest
-  the process group and observed descendant identities (PID plus start time)
-  with a TERM/KILL sequence. Ignore repeated termination signals until cleanup
-  finishes, and never signal a stale PID whose start time changed.
+  the owned process group unconditionally and observed detached descendant
+  identities (PID plus start time) with a TERM/KILL sequence. Group cleanup must
+  not depend on process inventory. Ignore repeated termination signals until
+  cleanup finishes, and never signal a stale PID whose start time changed.
   `write_status` must write mode `0600` to a
   sibling temporary file and replace `status.json` atomically.
   `advertised_models` must return the first whitespace-delimited field from

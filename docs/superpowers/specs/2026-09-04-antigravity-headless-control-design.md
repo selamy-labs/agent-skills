@@ -76,9 +76,9 @@ harvesting.
 One operation deadline covers all capability probes and the AGY turn. AGY gets
 the remaining operation budget as its internal timeout, backed by one short
 wall-clock grace period for cleanup. On normal completion, timeout, or wrapper
-interruption, the runner terminates the process group and every descendant
-identity it observed (PID plus process start time, including a child that
-started a new session), escalates to `SIGKILL`, and reports known survivors.
+interruption, the runner terminates its owned process group even when process
+inventory is unavailable, plus every detached descendant identity it observed
+(PID plus process start time), escalates to `SIGKILL`, and reports known survivors.
 The start-time check prevents a reused PID from being signaled, and repeated
 termination signals are ignored until cleanup finishes. A process that deliberately double-forks and
 detaches before the supervisor observes it is outside this portable
@@ -118,6 +118,7 @@ Focused tests use fake AGY executables and assert:
 - rejection of nonzero, malformed, empty, and non-success output;
 - process-group and observed-descendant harvesting after timeout or SIGTERM;
 - callback-failure cleanup, repeated-signal cleanup, and PID-reuse rejection;
+- owned process-group cleanup when process inventory is unavailable;
 - a shared overall deadline across capability probes and dispatch;
 - terminal evidence for process-launch failure;
 - rejection of evidence directories inside the worker cwd;
