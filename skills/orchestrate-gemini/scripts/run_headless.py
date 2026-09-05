@@ -581,15 +581,12 @@ def validate_policy(path: Path, run_dir: Path, gemini_home: Path) -> tuple[str, 
 
 def build_system_settings(provider: str, image: str, auth_type: str) -> bytes:
     settings = {
-        "admin": {
-            "extensions": {"enabled": False},
-            "mcp": {"enabled": False},
-            "skills": {"enabled": False},
-        },
         "advanced": {"ignoreLocalEnv": True},
         "billing": {"overageStrategy": "never"},
         "general": {"enableAutoUpdate": False},
         "hooksConfig": {"enabled": False},
+        "mcp": {"serverCommand": ""},
+        "mcpServers": {},
         "security": {
             "disableAlwaysAllow": True,
             "disableYoloMode": True,
@@ -597,8 +594,11 @@ def build_system_settings(provider: str, image: str, auth_type: str) -> bytes:
             "environmentVariableRedaction": {"enabled": True},
             "folderTrust": {"enabled": True},
         },
+        "skills": {"enabled": False},
         "telemetry": {"enabled": False},
         "tools": {
+            "callCommand": "",
+            "discoveryCommand": "",
             "sandbox": {
                 "command": provider,
                 "enabled": True,
@@ -1437,6 +1437,19 @@ def git_output(
     return result.stdout
 
 
+def reject_workspace_runtime_config(cwd: Path) -> None:
+    try:
+        (cwd / ".gemini").lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise PreflightError("unsafe_workspace_config", "cannot prove workspace Gemini config absence") from error
+    raise PreflightError(
+        "unsafe_workspace_config",
+        "workspace .gemini configuration is unsupported because it may start unreviewed processes",
+    )
+
+
 def reject_repository_attributes(cwd: Path, common_dir: Path, deadline: float) -> None:
     def walk_error(error: OSError) -> None:
         raise PreflightError("unsafe_git_attributes", "cannot prove repository attribute safety") from error
@@ -1449,6 +1462,13 @@ def reject_repository_attributes(cwd: Path, common_dir: Path, deadline: float) -
                 "unsafe_git_attributes",
                 "repository .gitattributes files are unsupported because host Git filters may execute code",
             )
+    tracked = git_output(cwd, "ls-files", "-z", text=False, deadline=deadline)
+    assert isinstance(tracked, bytes)
+    if any(path.rsplit(b"/", 1)[-1] == b".gitattributes" for path in tracked.split(b"\0") if path):
+        raise PreflightError(
+            "unsafe_git_attributes",
+            "indexed .gitattributes files are unsupported because host Git filters may execute code",
+        )
     try:
         (common_dir / "info" / "attributes").lstat()
     except FileNotFoundError:
@@ -1471,6 +1491,7 @@ def inspect_git(cwd: Path, goal: Goal, resume_requested: bool = False, deadline:
     common = Path(common_raw).resolve()
     if not path_is_within(common, cwd.resolve()):
         raise PreflightError("shared_git_dir", "Git common directory is outside the checkout")
+    reject_workspace_runtime_config(cwd)
     reject_repository_attributes(cwd, common, deadline if deadline is not None else time.monotonic() + 10)
     status_bytes = git_output(
         cwd,
@@ -2101,6 +2122,7 @@ def verify_and_record_checkout(
     validate_goal_writable_paths(args.cwd, prepared.goal, deadline, allow_missing=True)
     if git_metadata_snapshot(Path(prepared.git_state.common_dir), deadline) != prepared.git_metadata_before:
         raise PreflightError("git_metadata_violation", "worker changed read-only Git control metadata")
+    reject_workspace_runtime_config(args.cwd)
     reject_repository_attributes(args.cwd, Path(prepared.git_state.common_dir), deadline)
     filesystem_after_worker = filesystem_snapshot(args.cwd, deadline)
     filesystem_changes = enforce_filesystem_scope(
@@ -2136,6 +2158,7 @@ def verify_and_record_checkout(
     validate_goal_writable_paths(args.cwd, prepared.goal, deadline, allow_missing=True)
     if git_metadata_snapshot(Path(prepared.git_state.common_dir), deadline) != prepared.git_metadata_before:
         raise PreflightError("git_metadata_violation", "verification changed Git control metadata")
+    reject_workspace_runtime_config(args.cwd)
     reject_repository_attributes(args.cwd, Path(prepared.git_state.common_dir), deadline)
     status.update(
         {

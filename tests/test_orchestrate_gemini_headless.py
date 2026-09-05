@@ -705,7 +705,7 @@ def test_preflight_rejects_a_clean_hard_link_into_an_allowed_path(tmp_path: Path
     assert _status(fixture, "attempt-001")["classification"] == "unsafe_writable_path"
 
 
-def test_preflight_rejects_git_attributes_before_a_filter_can_execute(tmp_path: Path) -> None:
+def test_preflight_rejects_index_only_git_attributes_before_a_filter_can_execute(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     repo = Path(fixture["repo"])
     marker = tmp_path / "host-filter-ran"
@@ -717,9 +717,13 @@ def test_preflight_rejects_git_attributes_before_a_filter_can_execute(tmp_path: 
     _run(["git", "config", "filter.pwn.clean", str(script)], repo)
     _run(["git", "add", ".gitattributes", "data.txt", "src/filter.sh"], repo)
     _run(["git", "commit", "-qm", "filtered fixture"], repo)
-    script.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+    _run(["git", "update-index", "--skip-worktree", ".gitattributes"], repo)
+    (repo / ".gitattributes").unlink()
+    script.write_text(f"#!/bin/sh\ntouch {marker}\nprintf 'fixture\\n'\n")
+    (repo / "data.txt").write_text("model-controlled change\n")
     goal = json.loads(Path(fixture["goal"]).read_text())
     goal["base_sha"] = _run(["git", "rev-parse", "HEAD"], repo)
+    goal["allowed_paths"].append("data.txt")
     _write_private(Path(fixture["goal"]), json.dumps(goal))
     marker.unlink(missing_ok=True)
 
@@ -728,6 +732,35 @@ def test_preflight_rejects_git_attributes_before_a_filter_can_execute(tmp_path: 
     assert result.returncode != 0
     assert _status(fixture, "attempt-001")["classification"] == "unsafe_git_attributes"
     assert not marker.exists()
+
+
+def test_preflight_rejects_workspace_commands_before_gemini_starts(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    repo = Path(fixture["repo"])
+    workspace_settings = repo / ".gemini" / "settings.json"
+    workspace_settings.parent.mkdir()
+    workspace_settings.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"host-process": {"command": "/bin/sh", "args": ["-c", "exit 99"]}},
+                "tools": {
+                    "callCommand": "/bin/sh -c 'exit 98'",
+                    "discoveryCommand": "/bin/sh -c 'exit 97'",
+                },
+            }
+        )
+    )
+    _run(["git", "add", ".gemini/settings.json"], repo)
+    _run(["git", "commit", "-qm", "workspace startup commands"], repo)
+    goal = json.loads(Path(fixture["goal"]).read_text())
+    goal["base_sha"] = _run(["git", "rev-parse", "HEAD"], repo)
+    _write_private(Path(fixture["goal"]), json.dumps(goal))
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "unsafe_workspace_config"
+    assert not Path(fixture["gemini"]).with_name("gemini-invocations.jsonl").exists()
 
 
 def test_writable_tree_rejects_special_files(tmp_path: Path) -> None:
@@ -810,7 +843,7 @@ def test_preflight_builds_an_isolated_gemini_runtime(tmp_path: Path) -> None:
     assert "--admin-policy" in (run_dir / "gemini-help.stdout").read_text()
     settings_path = Path(fixture["state"]) / "gemini-home" / ".gemini" / "system-settings.json"
     settings = json.loads(settings_path.read_text())
-    assert settings["admin"]["extensions"]["enabled"] is False
+    assert "admin" not in settings
     assert settings["security"]["disableYoloMode"] is True
     assert settings["security"]["environmentVariableRedaction"]["enabled"] is True
     assert settings["advanced"]["ignoreLocalEnv"] is True
@@ -824,11 +857,14 @@ def test_preflight_builds_an_isolated_gemini_runtime(tmp_path: Path) -> None:
     assert all(record["sandbox"] == "docker" for record in records)
     assert all(record["sandbox_flags"] != "--privileged" for record in records)
     assert all(record["sandbox_mounts"] is None for record in records)
-    assert settings["admin"]["mcp"]["enabled"] is False
-    assert settings["admin"]["skills"]["enabled"] is False
+    assert settings["mcp"] == {"serverCommand": ""}
+    assert settings["mcpServers"] == {}
+    assert settings["skills"]["enabled"] is False
     assert settings["hooksConfig"]["enabled"] is False
     assert settings["billing"]["overageStrategy"] == "never"
     assert settings["tools"]["sandbox"]["networkAccess"] is True
+    assert settings["tools"]["callCommand"] == ""
+    assert settings["tools"]["discoveryCommand"] == ""
     trusted = json.loads((settings_path.parent / "trustedFolders.json").read_text())
     assert trusted == {str(Path(fixture["repo"]).resolve()): "TRUST_FOLDER"}
 

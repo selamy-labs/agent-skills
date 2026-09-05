@@ -150,9 +150,10 @@
 
   Run version/help probes under the one attempt deadline. Create system settings
   that disable auto-update, YOLO, permanent approvals, raw project env loading,
-  extensions through `admin.extensions.enabled = false`, and telemetry; enable
-  environment redaction; and fix the selected sandbox provider. Add `-e none`
-  to the fixed CLI arguments. Construct a minimal child environment from an explicit
+  executable discovery/call commands, skills, hooks, and telemetry; empty MCP
+  configuration; enable environment redaction; reject workspace-root `.gemini`
+  configuration; and fix the selected sandbox provider. Add `-e none` to the
+  fixed CLI arguments. Construct a minimal child environment from an explicit
   safe-name allowlist and record names only. Reject reserved environment input
   rather than merging it.
 

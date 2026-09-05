@@ -138,10 +138,15 @@ The worker receives an isolated `HOME`, Gemini home, system-settings path, and
 temp directory below the lane state directory. Validation uses no network;
 live execution uses only the internal proxy network. The
 runner trusts only the already verified checkout and writes system overrides
-that disable auto-update, YOLO, permanent approvals, extension loading, MCP
-servers, skills, and hooks; enable environment-variable redaction and folder
-trust; ignore project `.env` files; and require the selected sandbox provider. The private temp directory
+that disable auto-update, YOLO, permanent approvals, startup discovery/call
+commands, skills, and hooks; empty MCP configuration; enable
+environment-variable redaction and folder trust; ignore project `.env` files;
+and require the selected sandbox provider. The fixed CLI command selects no
+extensions. The private temp directory
 prevents Gemini's container sandbox from mounting a shared host temp tree.
+The runner rejects a workspace-root `.gemini` tree before any worker starts,
+eliminating project MCP servers, executable discovery settings, hooks, and
+skills. This is required because 0.51.0 ignores file-based `admin` controls.
 
 Gemini 0.51.0 reads non-TTY stdin in the outer process and injects that content
 as an inner `--prompt` argument before launching its container sandbox. Sending
@@ -153,8 +158,7 @@ expands the reference inside the sandbox; the full directive never enters argv.
 
 The runner rejects inherited sandbox mounts, sandbox flags, raw-output flags,
 and `--skip-trust`. It supplies a fixed container-hardening flag set, disables
-all extensions with both the system `admin.extensions.enabled` override and
-Gemini's documented `-e none` selector, passes only the staged prompt reference,
+all extensions with Gemini's documented `-e none` selector, passes only the staged prompt reference,
 requests `stream-json`, uses a non-YOLO approval mode, and passes the reviewed
 policy as a supplemental admin policy. The policy must default-deny all tools
 and narrowly allow only the goal's required operations. It cannot allow

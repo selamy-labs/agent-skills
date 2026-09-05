@@ -44,8 +44,9 @@ process, account, checkout, or supervisor.
 Prefer `plan` for read-only investigation. Use `default` or `auto_edit` only
 when the immutable goal authorizes edits and the private checkout plus policy
 contain them. The runner rejects model aliases, YOLO, extension loading,
-inherited sandbox mounts, shared Git metadata, repository attribute files, and
-every process-execution tool allow. Repository attributes are unsupported
+inherited sandbox mounts, shared Git metadata, a workspace-root `.gemini`
+configuration tree, repository attribute files, and every process-execution
+tool allow. Repository attributes are unsupported
 because host Git may execute model-controlled clean or process filters.
 
 ## Run a preflight
@@ -70,9 +71,10 @@ Preflight acquires a non-blocking `flock` lease, persists the canonical goal and
 digest, proves the exact clean Git base, validates the default-deny policy,
 creates an isolated Gemini home and temp directory, proves the selected
 container service and digest-pinned image are available, trusts only the
-verified checkout, isolates `HOME`, disables extensions, MCP, skills, hooks,
-and credit overage, installs fixed container hardening, and requires exactly
-Gemini CLI 0.51.0. It never starts a generated turn.
+verified checkout, isolates `HOME`, empties startup discovery/call commands and
+MCP configuration, disables extensions, skills, hooks, and credit overage,
+installs fixed container hardening, and requires exactly Gemini CLI 0.51.0. It
+never starts a generated turn.
 
 The policy passed with `--admin-policy` is supplemental in Gemini CLI 0.51.0.
 The runner stops if a standard system admin-policy directory would supersede
