@@ -77,7 +77,8 @@ One operation deadline covers all capability probes and the AGY turn. AGY gets
 the remaining operation budget as its internal timeout, backed by one short
 absolute wall-clock grace deadline for cleanup. Every process-inventory call is
 capped to the time remaining, and no further inventory probe begins after its
-phase deadline. On normal completion, timeout, or wrapper
+phase deadline. Cleanup starts with at most one short grace window, even when
+completion or interruption occurs long before the operation deadline. On normal completion, timeout, or wrapper
 interruption, the runner terminates and kernel-checks its owned process group
 without trusting complete process inventory, plus every detached descendant identity it observed
 (PID plus process start time), escalates to `SIGKILL`, and reports known survivors.
@@ -128,6 +129,7 @@ Focused tests use fake AGY executables and assert:
 - SIGKILL escalation with a nonempty but incomplete process inventory;
 - tri-state group reporting that rejects ambiguous `EPERM` as a harvest failure;
 - a hanging process-inventory command that cannot exceed the wall deadline;
+- early interruption that cannot consume the unused operation budget;
 - a shared overall deadline across capability probes and dispatch;
 - terminal evidence for process-launch failure;
 - rejection of evidence directories inside the worker cwd;

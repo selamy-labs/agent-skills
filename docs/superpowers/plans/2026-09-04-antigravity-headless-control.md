@@ -110,7 +110,9 @@
   zombie-only group's `EPERM` as absent, treat ambiguous `EPERM` as a harvest
   failure, and never signal a stale PID whose start time changed. Use one
   absolute cleanup deadline, cap every process-inventory subprocess to the
-  remaining time, and start no new inventory probe after the deadline.
+  remaining time, and start no new inventory probe after the deadline. Cap an
+  early completion or interruption to one short cleanup grace rather than the
+  unused operation budget.
   `write_status` must write mode `0600` to a
   sibling temporary file and replace `status.json` atomically.
   `advertised_models` must return the first whitespace-delimited field from

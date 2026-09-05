@@ -372,6 +372,34 @@ def test_run_process_harvests_when_on_start_callback_raises(tmp_path: Path) -> N
         _kill_known_pids(known_pids)
 
 
+def test_early_interruption_uses_only_the_short_cleanup_grace(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    runner.WALL_TIMEOUT_GRACE_SECONDS = 0.3
+    runner.TERMINATION_GRACE_SECONDS = 0.1
+    runner.process_snapshot = lambda _timeout_seconds=2: {}
+    known_pids: set[int] = set()
+
+    def interrupt_after_start(pid: int, _process_group_id: int) -> None:
+        known_pids.add(pid)
+        raise runner.SupervisorInterrupted(signal.SIGINT)
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(runner.SupervisorInterrupted):
+            runner.run_process(
+                ["/bin/sleep", "60"],
+                tmp_path,
+                tmp_path / "stdout.log",
+                tmp_path / "stderr.log",
+                1.5,
+                on_start=interrupt_after_start,
+            )
+        assert time.monotonic() - started < 0.7
+        assert all(not _pid_is_running(pid) for pid in known_pids)
+    finally:
+        _kill_known_pids(known_pids)
+
+
 def test_process_identity_rejects_a_reused_pid() -> None:
     runner = _load_runner_module()
     tracked_processes = {123: "Mon Jan  1 00:00:00 2024"}

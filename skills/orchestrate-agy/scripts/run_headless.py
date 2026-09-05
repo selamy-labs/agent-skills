@@ -367,7 +367,7 @@ def run_process(
 ) -> ProcessResult:
     tracked_processes: dict[int, str] = {}
     process_deadline = time.monotonic() + timeout_seconds
-    cleanup_deadline = process_deadline + WALL_TIMEOUT_GRACE_SECONDS
+    overall_wall_deadline = process_deadline + WALL_TIMEOUT_GRACE_SECONDS
 
     with open_private(stdout_path, "wb") as stdout, open_private(stderr_path, "wb") as stderr:
         stdin = stdin_path.open("rb") if stdin_path else open(os.devnull, "rb")
@@ -384,6 +384,10 @@ def run_process(
                     tracked_processes,
                 )
             finally:
+                cleanup_deadline = min(
+                    overall_wall_deadline,
+                    time.monotonic() + WALL_TIMEOUT_GRACE_SECONDS,
+                )
                 survivors_harvested, group_state, alive_descendants = harvest_process_tree(
                     process.pid,
                     process.pid,
