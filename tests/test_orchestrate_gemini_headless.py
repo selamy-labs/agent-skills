@@ -11,6 +11,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = REPO_ROOT / "skills" / "orchestrate-gemini" / "scripts" / "run_headless.py"
@@ -643,6 +646,27 @@ def test_preflight_accepts_an_owner_controlled_gemini_launcher_symlink(tmp_path:
 
     assert result.returncode == 0, result.stderr
     assert _status(fixture, "attempt-001")["gemini_executable_resolved"] == str(target)
+
+
+def test_group_write_is_allowed_only_for_a_user_private_primary_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    executable = tmp_path / "gemini"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o775)
+    private_user = SimpleNamespace(pw_name="lane-user", pw_gid=os.getgid())
+    monkeypatch.setattr(runner.pwd, "getpwuid", lambda _uid: private_user)
+    monkeypatch.setattr(runner.pwd, "getpwall", lambda: [private_user])
+    monkeypatch.setattr(runner.grp, "getgrgid", lambda _gid: SimpleNamespace(gr_mem=[]))
+
+    assert runner.resolve_controlled_executable(executable, "Gemini", "failure") == executable
+
+    shared_user = SimpleNamespace(pw_name="other-user", pw_gid=os.getgid())
+    monkeypatch.setattr(runner.pwd, "getpwall", lambda: [private_user, shared_user])
+    with pytest.raises(runner.PreflightError):
+        runner.resolve_controlled_executable(executable, "Gemini", "failure")
 
 
 def test_runner_resumes_only_the_exact_prior_session(tmp_path: Path) -> None:

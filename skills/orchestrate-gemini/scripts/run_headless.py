@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -399,10 +401,18 @@ def resolve_controlled_executable(path: Path, label: str, classification: str) -
     allowed_owners = {0, os.getuid()}
     if link_metadata.st_uid not in allowed_owners or target_metadata.st_uid not in allowed_owners:
         raise PreflightError(classification, f"{label} executable must be owned by the lane user or root")
-    if not resolved.is_file() or target_metadata.st_mode & 0o022 or not os.access(resolved, os.X_OK):
+    group_writable = bool(target_metadata.st_mode & 0o020)
+    private_primary_group = False
+    if group_writable and target_metadata.st_uid == os.getuid() and target_metadata.st_gid == os.getgid():
+        current_name = pwd.getpwuid(os.getuid()).pw_name
+        primary_users = {entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == target_metadata.st_gid}
+        listed_members = set(grp.getgrgid(target_metadata.st_gid).gr_mem)
+        private_primary_group = primary_users <= {current_name} and listed_members <= {current_name}
+    unsafe_permissions = bool(target_metadata.st_mode & 0o002) or (group_writable and not private_primary_group)
+    if not resolved.is_file() or unsafe_permissions or not os.access(resolved, os.X_OK):
         raise PreflightError(
             classification,
-            f"{label} executable target must be regular, executable, and not writable by other users",
+            f"{label} executable target must be regular, executable, and not writable by another user or group",
         )
     return resolved
 
@@ -542,6 +552,7 @@ def run_probe(
     deadline: float,
     stdout_path: Path,
     stderr_path: Path,
+    probe_label: str = "Gemini",
 ) -> str:
     try:
         result = subprocess.run(
@@ -553,13 +564,13 @@ def run_probe(
             timeout=remaining_seconds(deadline),
         )
     except subprocess.TimeoutExpired as error:
-        raise PreflightError("timed_out", f"capability probe timed out: {' '.join(arguments)}") from error
+        raise PreflightError("timed_out", f"{probe_label} probe timed out: {' '.join(arguments)}") from error
     except OSError as error:
-        raise PreflightError("capability_probe_failed", f"cannot launch Gemini: {error}") from error
+        raise PreflightError("capability_probe_failed", f"cannot launch {probe_label}: {error}") from error
     write_private(stdout_path, result.stdout)
     write_private(stderr_path, result.stderr)
     if result.returncode != 0:
-        raise PreflightError("capability_probe_failed", f"Gemini probe exited {result.returncode}")
+        raise PreflightError("capability_probe_failed", f"{probe_label} probe exited {result.returncode}")
     return result.stdout
 
 
@@ -586,6 +597,7 @@ def probe_sandbox_provider(
             deadline,
             args.run_dir / "sandbox-provider.stdout",
             args.run_dir / "sandbox-provider.stderr",
+            f"{args.sandbox_provider} sandbox",
         )
         if args.sandbox_provider == "runsc":
             docker_path = shutil.which("docker")
@@ -599,6 +611,7 @@ def probe_sandbox_provider(
                 deadline,
                 args.run_dir / "sandbox-docker.stdout",
                 args.run_dir / "sandbox-docker.stderr",
+                "Docker sandbox",
             )
     except PreflightError as error:
         raise PreflightError("sandbox_unavailable", str(error)) from error
