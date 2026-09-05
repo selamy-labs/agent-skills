@@ -72,14 +72,14 @@ scripts/run_headless.py \
   --effort high
 ```
 
-The runner writes owner-only prompt, stdin event, command, version, help, model, stdout, stderr, AGY log, and atomic `status.json` artifacts. Inspect `prompt.txt`, `input.ndjson`, and `command.json` together when prompt transport matters. While running, status records the PID and process group. One operation deadline covers the probes and AGY turn; AGY receives the remaining budget, backed by a short wall grace for cleanup. On normal exit, timeout, or SIGINT/SIGTERM, the runner always terminates the process group, even if process inventory is unavailable, and separately terminates every detached descendant identity (PID plus start time) it observed. It then records any known survivor. Repeated termination signals are ignored until this cleanup finishes.
+The runner writes owner-only prompt, stdin event, command, version, help, model, stdout, stderr, AGY log, and atomic `status.json` artifacts. Inspect `prompt.txt`, `input.ndjson`, and `command.json` together when prompt transport matters. While running, status records the PID and process group. One operation deadline covers the probes and AGY turn; AGY receives the remaining budget, backed by a short wall grace for cleanup. On normal exit, timeout, or SIGINT/SIGTERM, the runner always terminates and kernel-checks the owned process group without trusting process inventory, and separately terminates every detached descendant identity (PID plus start time) it observed. It then records any known survivor. Repeated termination signals are ignored until this cleanup finishes.
 
 Exit `0` means AGY returned exactly one streaming JSON `result` event with a `SUCCESS` envelope and non-empty response, with no surviving process group or observed descendant. Treat every other classification as undelivered:
 
 - `permission_blocked`: AGY exited zero with `SUCCESS` but returned an empty response alongside a headless permission notice;
 - `no_output` or `invalid_output`: the response cannot prove a completed turn;
 - `agy_status_*` or `cli_error`: AGY reported or exited with failure;
-- `timed_out`, `interrupted`, or `harvest_failed`: the bounded process did not terminate cleanly;
+- `timed_out`, `interrupted`, or `harvest_failed`: the bounded process did not terminate cleanly; ambiguous `EPERM` group probes are conservatively `harvest_failed` unless the process inventory proves the group is zombie-only;
 - `launch_error` or `internal_error`: the worker or wrapper failed before producing a valid terminal result;
 - `capability_probe_failed` or `capability_mismatch`: the executable, flags, or selected model were not proven.
 

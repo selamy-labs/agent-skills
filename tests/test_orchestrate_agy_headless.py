@@ -438,7 +438,94 @@ def test_run_process_times_out_cleanly_without_process_listing(tmp_path: Path) -
             0.2,
         )
         assert result.timed_out is True
-        assert result.process_group_alive_after_harvest is False
+        assert result.process_group_state_after_harvest in {"absent", "unknown"}
+        assert result.process_group_alive_after_harvest is (result.process_group_state_after_harvest == "unknown")
+        child_pid = int(child_pid_path.read_text())
+        known_pids.add(child_pid)
+        assert not _pid_is_running(child_pid)
+    finally:
+        _kill_known_pids(known_pids)
+
+
+def test_permission_denied_group_probe_is_unknown_unless_snapshot_proves_zombies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+
+    def deny_probe(_process_group_id: int, _signum: int) -> None:
+        raise PermissionError("injected EPERM")
+
+    monkeypatch.setattr(runner.os, "killpg", deny_probe)
+    unrelated = {
+        456: runner.ProcessInfo(1, 456, "S", "Mon Jan  1 00:00:00 2024"),
+    }
+    zombies = {
+        123: runner.ProcessInfo(1, 123, "Z", "Mon Jan  1 00:00:00 2024"),
+    }
+
+    assert runner.process_group_state(123, unrelated) == "unknown"
+    assert runner.process_group_state(123, {}) == "unknown"
+    assert runner.process_group_state(123, zombies) == "absent"
+
+
+def test_unknown_group_state_is_a_harvest_failure(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    result = runner.ProcessResult(
+        returncode=-9,
+        pid=123,
+        process_group_id=123,
+        timed_out=True,
+        survivors_harvested=True,
+        process_group_alive_after_harvest=True,
+        process_group_state_after_harvest="unknown",
+        observed_descendant_pids=[],
+        descendants_alive_after_harvest=[],
+        interrupted_signal=None,
+        launch_error=None,
+    )
+
+    classification, envelope = runner.classify_result(
+        result,
+        tmp_path / "unused.stdout",
+        tmp_path / "unused.stderr",
+    )
+
+    assert classification == "harvest_failed"
+    assert envelope is None
+
+
+def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    child_pid_path = tmp_path / "child.pid"
+    known_pids: set[int] = set()
+    child_script = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+    parent_script = (
+        "import pathlib, signal, subprocess, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}]); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "time.sleep(60)"
+    )
+    unrelated_snapshot = {
+        999_999: runner.ProcessInfo(
+            parent_pid=1,
+            process_group_id=999_999,
+            state="S",
+            started_at="Mon Jan  1 00:00:00 2024",
+        )
+    }
+    runner.process_snapshot = lambda: unrelated_snapshot
+
+    try:
+        result = runner.run_process(
+            [sys.executable, "-c", parent_script, str(child_pid_path)],
+            tmp_path,
+            tmp_path / "stdout.log",
+            tmp_path / "stderr.log",
+            0.2,
+        )
+        assert result.timed_out is True
+        assert result.process_group_state_after_harvest in {"absent", "unknown"}
         child_pid = int(child_pid_path.read_text())
         known_pids.add(child_pid)
         assert not _pid_is_running(child_pid)

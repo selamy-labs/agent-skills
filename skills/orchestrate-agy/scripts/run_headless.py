@@ -60,6 +60,7 @@ class ProcessResult:
     timed_out: bool
     survivors_harvested: bool
     process_group_alive_after_harvest: bool
+    process_group_state_after_harvest: str
     observed_descendant_pids: list[int]
     descendants_alive_after_harvest: list[int]
     interrupted_signal: int | None
@@ -97,14 +98,17 @@ def write_status(path: Path, status: dict[str, object]) -> None:
             pass
 
 
-def process_group_exists(process_group_id: int) -> bool:
+def process_group_state(process_group_id: int, snapshot: dict[int, ProcessInfo]) -> str:
     try:
         os.killpg(process_group_id, 0)
     except ProcessLookupError:
-        return False
+        return "absent"
     except PermissionError:
-        return False
-    return True
+        group_members = [info for info in snapshot.values() if info.process_group_id == process_group_id]
+        if group_members and all(info.state.startswith("Z") for info in group_members):
+            return "absent"
+        return "unknown"
+    return "alive"
 
 
 def signal_process_group(process_group_id: int, signum: signal.Signals) -> bool:
@@ -203,19 +207,11 @@ def group_is_alive(
     )
 
 
-def owned_group_is_alive(process_group_id: int, snapshot: dict[int, ProcessInfo]) -> bool:
-    if snapshot:
-        return any(
-            info.process_group_id == process_group_id and not info.state.startswith("Z") for info in snapshot.values()
-        )
-    return process_group_exists(process_group_id)
-
-
 def harvest_process_tree(
     root_pid: int,
     process_group_id: int,
     tracked_processes: dict[int, str],
-) -> tuple[bool, bool, list[int]]:
+) -> tuple[bool, str, list[int]]:
     snapshot = process_snapshot()
     remember_process_tree(root_pid, snapshot, tracked_processes)
     live_before = live_pids(tracked_processes, snapshot)
@@ -230,14 +226,14 @@ def harvest_process_tree(
         snapshot = process_snapshot()
         remember_process_tree(root_pid, snapshot, tracked_processes)
         alive = live_pids(tracked_processes, snapshot)
-        group_alive = owned_group_is_alive(process_group_id, snapshot)
-        if not alive and not group_alive:
-            return harvested, False, []
+        group_state = process_group_state(process_group_id, snapshot)
+        if not alive and group_state == "absent":
+            return harvested, "absent", []
         time.sleep(POLL_INTERVAL_SECONDS)
 
     snapshot = process_snapshot()
     remember_process_tree(root_pid, snapshot, tracked_processes)
-    if owned_group_is_alive(process_group_id, snapshot):
+    if process_group_state(process_group_id, snapshot) != "absent":
         signal_process_group(process_group_id, signal.SIGKILL)
     for pid in live_pids(tracked_processes, snapshot):
         signal_process(pid, signal.SIGKILL)
@@ -246,14 +242,14 @@ def harvest_process_tree(
     while time.monotonic() < deadline:
         snapshot = process_snapshot()
         alive = live_pids(tracked_processes, snapshot)
-        group_alive = owned_group_is_alive(process_group_id, snapshot)
-        if not alive and not group_alive:
-            return harvested, False, []
+        group_state = process_group_state(process_group_id, snapshot)
+        if not alive and group_state == "absent":
+            return harvested, "absent", []
         time.sleep(POLL_INTERVAL_SECONDS)
 
     snapshot = process_snapshot()
     alive = sorted(live_pids(tracked_processes, snapshot))
-    return harvested, owned_group_is_alive(process_group_id, snapshot), alive
+    return harvested, process_group_state(process_group_id, snapshot), alive
 
 
 @contextmanager
@@ -324,6 +320,7 @@ def launch_error_result(launch_error: str) -> ProcessResult:
         timed_out=False,
         survivors_harvested=False,
         process_group_alive_after_harvest=False,
+        process_group_state_after_harvest="absent",
         observed_descendant_pids=[],
         descendants_alive_after_harvest=[],
         interrupted_signal=None,
@@ -357,7 +354,7 @@ def run_process(
                     tracked_processes,
                 )
             finally:
-                survivors_harvested, group_alive, alive_descendants = harvest_process_tree(
+                survivors_harvested, group_state, alive_descendants = harvest_process_tree(
                     process.pid,
                     process.pid,
                     tracked_processes,
@@ -375,7 +372,8 @@ def run_process(
         process_group_id=process.pid,
         timed_out=timed_out,
         survivors_harvested=survivors_harvested,
-        process_group_alive_after_harvest=group_alive,
+        process_group_alive_after_harvest=group_state != "absent",
+        process_group_state_after_harvest=group_state,
         observed_descendant_pids=sorted(pid for pid in tracked_processes if pid != process.pid),
         descendants_alive_after_harvest=alive_descendants,
         interrupted_signal=interrupted_signal,
@@ -424,12 +422,12 @@ def classify_result(
     stdout_path: Path,
     stderr_path: Path,
 ) -> tuple[str, dict[str, Any] | None]:
+    if result.process_group_state_after_harvest != "absent" or result.descendants_alive_after_harvest:
+        return "harvest_failed", None
     if result.interrupted_signal:
         return "interrupted", None
     if result.timed_out:
         return "timed_out", None
-    if result.process_group_alive_after_harvest or result.descendants_alive_after_harvest:
-        return "harvest_failed", None
     if result.launch_error:
         return "launch_error", None
     if result.returncode != 0:

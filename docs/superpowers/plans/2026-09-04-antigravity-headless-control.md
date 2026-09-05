@@ -104,9 +104,11 @@
   On normal exit, timeout, interruption, or an exception after launch, harvest
   the owned process group unconditionally and observed detached descendant
   identities (PID plus start time) with a TERM/KILL sequence. Group cleanup must
-  not depend on process inventory. Ignore repeated termination signals until
-  cleanup finishes, treat an owned zombie-only group's `EPERM` as
-  non-signalable, and never signal a stale PID whose start time changed.
+  use kernel group probes and must not trust process inventory, including a
+  nonempty but partial snapshot. Ignore repeated termination signals until
+  cleanup finishes, record group state as `absent|alive|unknown`, prove a
+  zombie-only group's `EPERM` as absent, treat ambiguous `EPERM` as a harvest
+  failure, and never signal a stale PID whose start time changed.
   `write_status` must write mode `0600` to a
   sibling temporary file and replace `status.json` atomically.
   `advertised_models` must return the first whitespace-delimited field from
