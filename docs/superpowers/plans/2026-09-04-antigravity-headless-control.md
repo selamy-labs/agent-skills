@@ -121,10 +121,11 @@
   sibling temporary file and replace `status.json` atomically.
   `advertised_models` must return the first whitespace-delimited field from
   each nonblank model-list line except progress lines. `classify_result` must
-  prioritize timeout, nonzero exit, empty stdout, malformed JSON,
-  non-`SUCCESS`, permission-blocked empty response, and other empty response
-  in that order. Process launch and unexpected wrapper errors must produce
-  terminal classifications rather than stale running evidence.
+  prioritize incomplete harvesting before interruption, timeout, launch error,
+  nonzero exit, malformed output, non-`SUCCESS`, permission-blocked empty
+  response, and other empty response. Capability probes must apply that same
+  harvest-completeness predicate. Process launch and unexpected wrapper errors
+  must produce terminal classifications rather than stale running evidence.
 
 - [ ] **Step 5: Run focused tests and verify GREEN**
 

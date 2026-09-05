@@ -486,12 +486,16 @@ def empty_response_classification(stderr_path: Path) -> str:
     return "permission_blocked" if permission_notice else "no_output"
 
 
+def harvest_is_complete(result: ProcessResult) -> bool:
+    return result.process_group_state_after_harvest == "absent" and result.descendant_state_after_harvest == "absent"
+
+
 def classify_result(
     result: ProcessResult,
     stdout_path: Path,
     stderr_path: Path,
 ) -> tuple[str, dict[str, Any] | None]:
-    if result.process_group_state_after_harvest != "absent" or result.descendant_state_after_harvest != "absent":
+    if not harvest_is_complete(result):
         return "harvest_failed", None
     if result.interrupted_signal:
         return "interrupted", None
@@ -624,8 +628,7 @@ def run_capability_probes(
             result.timed_out
             or result.launch_error
             or result.returncode != 0
-            or result.process_group_alive_after_harvest
-            or result.descendants_alive_after_harvest
+            or not harvest_is_complete(result)
             or result.interrupted_signal
         )
         if failed:

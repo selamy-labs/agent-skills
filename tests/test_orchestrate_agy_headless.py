@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -600,6 +600,43 @@ def test_unknown_group_state_is_a_harvest_failure(tmp_path: Path) -> None:
 
     assert classification == "harvest_failed"
     assert envelope is None
+
+
+def test_capability_probe_rejects_unknown_descendant_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    run_dir = tmp_path / "evidence"
+    run_dir.mkdir()
+    result = runner.ProcessResult(
+        returncode=0,
+        pid=123,
+        process_group_id=123,
+        timed_out=False,
+        survivors_harvested=True,
+        process_group_alive_after_harvest=False,
+        process_group_state_after_harvest="absent",
+        descendant_state_after_harvest="unknown",
+        observed_descendant_pids=[456],
+        descendants_alive_after_harvest=[],
+        interrupted_signal=None,
+        launch_error=None,
+    )
+    monkeypatch.setattr(runner, "probe", lambda *_args: result)
+    started = time.monotonic()
+
+    exit_code = runner.run_capability_probes(
+        SimpleNamespace(run_dir=run_dir, cwd=tmp_path, agy=Path("/fake/agy")),
+        {},
+        started,
+        started + 5,
+    )
+
+    assert exit_code == 1
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["classification"] == "capability_probe_failed"
+    assert status["descendant_state_after_harvest"] == "unknown"
 
 
 def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_path: Path) -> None:

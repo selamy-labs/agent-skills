@@ -99,7 +99,8 @@ The runner exits nonzero for capability-probe failure, an unadvertised model or
 flag, timeout, nonzero AGY exit, empty stdout, malformed JSON, non-`SUCCESS`
 status, or an empty response. Spawn failures, wrapper interruption, and internal
 wrapper exceptions also produce terminal evidence instead of leaving a false
-`running` status. An empty response accompanied by AGY's headless permission
+`running` status. Capability probes and dispatch both reject any group or
+descendant harvest state other than `absent`. An empty response accompanied by AGY's headless permission
 notice is classified as `permission_blocked`; other empty responses are
 `no_output`. Stderr remains evidence even when AGY exits zero.
 
@@ -139,6 +140,8 @@ Focused tests use fake AGY executables and assert:
   an `unknown` harvest failure rather than false success;
 - an observed same-group child that calls `setsid()` between inventory and the
   group probe and is still directly harvested by identity;
+- a capability probe with unknown descendant state that is rejected rather
+  than accepted because its known-survivor list is empty;
 - a shared overall deadline across capability probes and dispatch;
 - terminal evidence for process-launch failure;
 - rejection of evidence directories inside the worker cwd;
