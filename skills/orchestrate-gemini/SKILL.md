@@ -1,6 +1,6 @@
 ---
 name: orchestrate-gemini
-description: Safely control Google Gemini CLI (including installations used beside Antigravity) on a local or remote host with private checkouts, immutable goals, least-privilege policy, explicit sandboxing, durable leases/evidence, restart-safe exact-session resume, and system-of-record verification. Use for bounded Gemini CLI delegation, jump-box operation, auth or quota routing, interactive tmux recovery, and non-generating installation validation.
+description: Safely control Google Gemini CLI on local or remote hosts with private checkouts, immutable goals, least-privilege sandbox policy, durable leases and evidence, restart-safe resume, and system-of-record verification. Use for bounded delegation, jump-box operation, auth or quota routing, tmux recovery, and non-generating validation.
 ---
 
 # Orchestrate Gemini CLI
