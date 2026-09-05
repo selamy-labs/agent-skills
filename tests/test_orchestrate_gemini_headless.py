@@ -558,6 +558,34 @@ def test_preflight_rejects_escaping_allowed_paths(tmp_path: Path) -> None:
     assert _status(fixture, "attempt-001")["classification"] == "invalid_goal"
 
 
+def test_preflight_never_makes_git_control_metadata_writable(tmp_path: Path) -> None:
+    direct_case = tmp_path / "direct"
+    direct_case.mkdir()
+    direct = _fixture(direct_case, allowed_paths=[".git"])
+
+    result = _invoke(direct, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(direct, "attempt-001")["classification"] == "invalid_goal"
+
+    symlink_case = tmp_path / "symlink"
+    symlink_case.mkdir()
+    linked = _fixture(symlink_case)
+    repo = Path(linked["repo"])
+    (repo / "metadata-link").symlink_to(".git")
+    _run(["git", "add", "metadata-link"], repo)
+    _run(["git", "commit", "-qm", "tracked metadata link"], repo)
+    goal = json.loads(Path(linked["goal"]).read_text())
+    goal["base_sha"] = _run(["git", "rev-parse", "HEAD"], repo)
+    goal["allowed_paths"] = ["metadata-link"]
+    _write_private(Path(linked["goal"]), json.dumps(goal))
+
+    result = _invoke(linked, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(linked, "attempt-001")["classification"] == "invalid_goal"
+
+
 def test_preflight_requires_the_exact_clean_base(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     (Path(fixture["repo"]) / "README.md").write_text("dirty\n")

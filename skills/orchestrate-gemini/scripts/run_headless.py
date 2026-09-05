@@ -187,6 +187,8 @@ def normalized_allowed_path(raw: object) -> str:
     path = PurePosixPath(trimmed)
     if any(part in {"", ".", ".."} for part in path.parts) or path.as_posix() != trimmed:
         raise ValueError("allowed paths must not escape or normalize differently")
+    if path.parts[0] == ".git":
+        raise ValueError("allowed paths must not include Git control metadata")
     return trimmed
 
 
@@ -759,10 +761,13 @@ def configure_provider_guard(
     guard = guard_dir / ("docker" if args.sandbox_provider == "runsc" else args.sandbox_provider)
     persist_exact_executable(guard, guard_content)
     allowed_paths: list[str] = []
+    common_dir = Path(git_state.common_dir).resolve()
     for relative in goal.allowed_paths:
         candidate = (args.cwd / relative).resolve()
         if not path_is_within(candidate, args.cwd.resolve()) or not candidate.exists():
             raise PreflightError("invalid_goal", f"allowed path must already exist inside the checkout: {relative}")
+        if candidate == common_dir or path_is_within(candidate, common_dir):
+            raise PreflightError("invalid_goal", f"allowed path resolves into Git control metadata: {relative}")
         allowed_paths.append(str(candidate))
     environment.update(
         {
