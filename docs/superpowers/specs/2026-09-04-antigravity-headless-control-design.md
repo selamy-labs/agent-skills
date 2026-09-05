@@ -77,16 +77,18 @@ the remaining operation budget as its internal timeout, backed by one short
 absolute wall-clock grace deadline for cleanup. Every process-inventory call is
 capped to the time remaining, and no further inventory probe begins after its
 phase deadline. Cleanup starts with at most one short grace window, even when
-completion or interruption occurs long before the operation deadline. On normal completion, timeout, or wrapper
-interruption, the runner terminates and kernel-checks its owned process group
-without trusting complete process inventory, plus every detached descendant identity it observed
-(PID plus process start time), escalates to `SIGKILL`, and reports known survivors.
+completion or interruption occurs long before the operation deadline. On normal
+completion, timeout, or wrapper interruption, the runner terminates and
+kernel-checks its owned process group without trusting complete process
+inventory. It also checks every observed descendant identity (PID plus process
+start time) against its current process group, including a child that changes
+groups after observation, escalates to `SIGKILL`, and reports known survivors.
 The start-time check prevents a reused PID from being signaled, and repeated
 termination signals are ignored until cleanup finishes. Process-group state is
 recorded as `absent`, `alive`, or `unknown`; ambiguous permission errors are a
-conservative harvest failure unless inventory proves the group is zombie-only.
-A previously observed detached identity is also `unknown` and rejected when
-inventory becomes incomplete before absence can be proved.
+conservative harvest failure unless a complete inventory proves the group is
+zombie-only. A previously observed descendant identity is also `unknown` and
+rejected when an incomplete inventory omits it before absence can be proved.
 A process that deliberately double-forks and
 detaches before the supervisor observes it is outside this portable
 standard-library boundary; such workloads require a separately verified OS
@@ -126,13 +128,16 @@ Focused tests use fake AGY executables and assert:
 - process-group and observed-descendant harvesting after timeout or SIGTERM;
 - callback-failure cleanup, repeated-signal cleanup, and PID-reuse rejection;
 - normal-exit and timeout process-group cleanup when process inventory is
-  unavailable, including zombie-only `EPERM` handling;
+  unavailable, including complete-versus-incomplete zombie-only `EPERM`
+  handling;
 - SIGKILL escalation with a nonempty but incomplete process inventory;
 - tri-state group reporting that rejects ambiguous `EPERM` as a harvest failure;
 - a hanging process-inventory command that cannot exceed the wall deadline;
 - early interruption that cannot consume the unused operation budget;
 - an observed detached descendant whose cleanup inventory disappears, forcing
   an `unknown` harvest failure rather than false success;
+- an observed same-group child that calls `setsid()` before root exit and is
+  still identity-checked and harvested from its new group;
 - a shared overall deadline across capability probes and dispatch;
 - terminal evidence for process-launch failure;
 - rejection of evidence directories inside the worker cwd;

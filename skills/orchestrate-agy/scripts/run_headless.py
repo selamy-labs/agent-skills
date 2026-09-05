@@ -55,7 +55,6 @@ class ProcessInfo:
 @dataclass(frozen=True)
 class ProcessIdentity:
     started_at: str
-    process_group_id: int
 
 
 @dataclass(frozen=True)
@@ -111,14 +110,14 @@ def write_status(path: Path, status: dict[str, object]) -> None:
             pass
 
 
-def process_group_state(process_group_id: int, snapshot: dict[int, ProcessInfo]) -> str:
+def process_group_state(process_group_id: int, inventory: ProcessInventory) -> str:
     try:
         os.killpg(process_group_id, 0)
     except ProcessLookupError:
         return "absent"
     except PermissionError:
-        group_members = [info for info in snapshot.values() if info.process_group_id == process_group_id]
-        if group_members and all(info.state.startswith("Z") for info in group_members):
+        group_members = [info for info in inventory.processes.values() if info.process_group_id == process_group_id]
+        if inventory.complete and group_members and all(info.state.startswith("Z") for info in group_members):
             return "absent"
         return "unknown"
     return "alive"
@@ -203,10 +202,10 @@ def remember_process_tree(
     known_root = tracked_processes.get(root_pid)
     if known_root and known_root.started_at != root_info.started_at:
         return
-    tracked_processes[root_pid] = ProcessIdentity(root_info.started_at, root_info.process_group_id)
+    tracked_processes[root_pid] = ProcessIdentity(root_info.started_at)
     for pid in descendant_pids(root_pid, snapshot):
         info = snapshot[pid]
-        tracked_processes[pid] = ProcessIdentity(info.started_at, info.process_group_id)
+        tracked_processes[pid] = ProcessIdentity(info.started_at)
 
 
 def live_pids(tracked_processes: dict[int, ProcessIdentity], snapshot: dict[int, ProcessInfo]) -> set[int]:
@@ -234,19 +233,27 @@ def group_is_alive(
 
 
 def detached_process_state(
+    root_pid: int,
     process_group_id: int,
     tracked_processes: dict[int, ProcessIdentity],
     inventory: ProcessInventory,
 ) -> tuple[str, list[int]]:
-    detached = {
-        pid: identity for pid, identity in tracked_processes.items() if identity.process_group_id != process_group_id
-    }
-    if not detached:
-        return "absent", []
-    alive = sorted(live_pids(detached, inventory.processes))
+    alive: list[int] = []
+    identity_unknown = False
+    for pid, identity in tracked_processes.items():
+        if pid == root_pid:
+            continue
+        info = inventory.processes.get(pid)
+        if info is None:
+            identity_unknown = identity_unknown or not inventory.complete
+            continue
+        if info.started_at != identity.started_at or info.state.startswith("Z"):
+            continue
+        if info.process_group_id != process_group_id:
+            alive.append(pid)
     if alive:
-        return "alive", alive
-    return ("absent" if inventory.complete else "unknown"), []
+        return "alive", sorted(alive)
+    return ("unknown" if identity_unknown else "absent"), []
 
 
 def wait_for_harvest(
@@ -257,8 +264,13 @@ def wait_for_harvest(
     inventory: ProcessInventory,
 ) -> tuple[str, str, list[int], ProcessInventory]:
     while True:
-        descendant_state, alive = detached_process_state(process_group_id, tracked_processes, inventory)
-        group_state = process_group_state(process_group_id, inventory.processes)
+        descendant_state, alive = detached_process_state(
+            root_pid,
+            process_group_id,
+            tracked_processes,
+            inventory,
+        )
+        group_state = process_group_state(process_group_id, inventory)
         if descendant_state == "absent" and group_state == "absent":
             return group_state, descendant_state, alive, inventory
         remaining = deadline - time.monotonic()
@@ -282,7 +294,12 @@ def harvest_process_tree(
     term_deadline = min(time.monotonic() + TERMINATION_GRACE_SECONDS, cleanup_deadline)
     inventory = snapshot_before(term_deadline) or ProcessInventory({}, False)
     remember_process_tree(root_pid, inventory.processes, tracked_processes)
-    descendant_state, live_before = detached_process_state(process_group_id, tracked_processes, inventory)
+    descendant_state, live_before = detached_process_state(
+        root_pid,
+        process_group_id,
+        tracked_processes,
+        inventory,
+    )
     harvested = bool(live_before or group_signaled)
 
     for pid in live_before:

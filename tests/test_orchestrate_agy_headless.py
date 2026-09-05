@@ -402,7 +402,7 @@ def test_early_interruption_uses_only_the_short_cleanup_grace(tmp_path: Path) ->
 
 def test_process_identity_rejects_a_reused_pid() -> None:
     runner = _load_runner_module()
-    tracked_processes = {123: runner.ProcessIdentity("Mon Jan  1 00:00:00 2024", 123)}
+    tracked_processes = {123: runner.ProcessIdentity("Mon Jan  1 00:00:00 2024")}
     snapshot = {
         123: runner.ProcessInfo(
             parent_pid=1,
@@ -414,6 +414,27 @@ def test_process_identity_rejects_a_reused_pid() -> None:
 
     assert runner.live_pids(tracked_processes, snapshot) == set()
     assert not runner.group_is_alive(123, snapshot, tracked_processes)
+
+
+def test_missing_tracked_descendant_is_unknown_with_incomplete_inventory() -> None:
+    runner = _load_runner_module()
+    tracked_processes = {
+        123: runner.ProcessIdentity("Mon Jan  1 00:00:00 2024"),
+        456: runner.ProcessIdentity("Mon Jan  1 00:00:01 2024"),
+    }
+
+    assert runner.detached_process_state(
+        123,
+        123,
+        tracked_processes,
+        runner.ProcessInventory({}, False),
+    ) == ("unknown", [])
+    assert runner.detached_process_state(
+        123,
+        123,
+        tracked_processes,
+        runner.ProcessInventory({}, True),
+    ) == ("absent", [])
 
 
 def test_run_process_harvests_owned_group_when_process_listing_fails(tmp_path: Path) -> None:
@@ -491,9 +512,10 @@ def test_permission_denied_group_probe_is_unknown_unless_snapshot_proves_zombies
         123: runner.ProcessInfo(1, 123, "Z", "Mon Jan  1 00:00:00 2024"),
     }
 
-    assert runner.process_group_state(123, unrelated) == "unknown"
-    assert runner.process_group_state(123, {}) == "unknown"
-    assert runner.process_group_state(123, zombies) == "absent"
+    assert runner.process_group_state(123, runner.ProcessInventory(unrelated, False)) == "unknown"
+    assert runner.process_group_state(123, runner.ProcessInventory({}, False)) == "unknown"
+    assert runner.process_group_state(123, runner.ProcessInventory(zombies, False)) == "unknown"
+    assert runner.process_group_state(123, runner.ProcessInventory(zombies, True)) == "absent"
 
 
 def test_unknown_group_state_is_a_harvest_failure(tmp_path: Path) -> None:
@@ -609,6 +631,55 @@ def test_detached_descendant_is_unknown_when_cleanup_inventory_disappears(tmp_pa
         )
         assert classification == "harvest_failed"
         assert _pid_is_running(child_pid)
+    finally:
+        _kill_known_pids(known_pids)
+
+
+def test_run_process_harvests_tracked_child_that_changes_process_groups(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    child_pid_path = tmp_path / "child.pid"
+    ready_path = tmp_path / "child.ready"
+    release_path = tmp_path / "child.release"
+    detached_path = tmp_path / "child.detached"
+    known_pids: set[int] = set()
+    child_script = (
+        "import os, pathlib, sys, time; "
+        "ready, release, detached = map(pathlib.Path, sys.argv[1:]); "
+        "ready.write_text('ready'); "
+        "\nwhile not release.exists(): time.sleep(0.01); "
+        "\nos.setsid(); detached.write_text('detached'); time.sleep(60)"
+    )
+    parent_script = (
+        "import pathlib, subprocess, sys, time; "
+        f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}, *sys.argv[2:]]); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "ready, release, detached = map(pathlib.Path, sys.argv[2:]); "
+        "\nwhile not ready.exists(): time.sleep(0.01); "
+        "\ntime.sleep(0.3); release.write_text('release'); "
+        "\nwhile not detached.exists(): time.sleep(0.01)"
+    )
+
+    try:
+        result = runner.run_process(
+            [
+                sys.executable,
+                "-c",
+                parent_script,
+                str(child_pid_path),
+                str(ready_path),
+                str(release_path),
+                str(detached_path),
+            ],
+            tmp_path,
+            tmp_path / "stdout.log",
+            tmp_path / "stderr.log",
+            5,
+        )
+        child_pid = int(child_pid_path.read_text())
+        known_pids.add(child_pid)
+        assert child_pid in result.observed_descendant_pids
+        assert result.descendant_state_after_harvest == "absent"
+        assert not _pid_is_running(child_pid)
     finally:
         _kill_known_pids(known_pids)
 
