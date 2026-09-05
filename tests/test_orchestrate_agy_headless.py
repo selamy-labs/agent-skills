@@ -412,29 +412,86 @@ def test_process_identity_rejects_a_reused_pid() -> None:
         )
     }
 
-    assert runner.live_pids(tracked_processes, snapshot) == set()
-    assert not runner.group_is_alive(123, snapshot, tracked_processes)
+    assert runner.tracked_descendant_state(
+        999,
+        tracked_processes,
+        runner.ProcessInventory(snapshot, True),
+    ) == ("absent", [])
 
 
-def test_missing_tracked_descendant_is_unknown_with_incomplete_inventory() -> None:
+def test_tracked_descendant_state_is_independent_of_process_group() -> None:
     runner = _load_runner_module()
     tracked_processes = {
         123: runner.ProcessIdentity("Mon Jan  1 00:00:00 2024"),
         456: runner.ProcessIdentity("Mon Jan  1 00:00:01 2024"),
     }
+    same_group_alive = runner.ProcessInventory(
+        {
+            456: runner.ProcessInfo(
+                parent_pid=123,
+                process_group_id=123,
+                state="S",
+                started_at="Mon Jan  1 00:00:01 2024",
+            )
+        },
+        True,
+    )
 
-    assert runner.detached_process_state(
+    assert runner.tracked_descendant_state(
         123,
+        tracked_processes,
+        same_group_alive,
+    ) == ("alive", [456])
+    assert runner.tracked_descendant_state(
         123,
         tracked_processes,
         runner.ProcessInventory({}, False),
     ) == ("unknown", [])
-    assert runner.detached_process_state(
-        123,
+    assert runner.tracked_descendant_state(
         123,
         tracked_processes,
         runner.ProcessInventory({}, True),
     ) == ("absent", [])
+
+
+def test_harvest_directly_signals_a_tracked_same_group_descendant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    inventory = runner.ProcessInventory(
+        {
+            123: runner.ProcessInfo(1, 123, "S", "Mon Jan  1 00:00:00 2024"),
+            456: runner.ProcessInfo(123, 123, "S", "Mon Jan  1 00:00:01 2024"),
+        },
+        True,
+    )
+    tracked_processes = {
+        123: runner.ProcessIdentity("Mon Jan  1 00:00:00 2024"),
+        456: runner.ProcessIdentity("Mon Jan  1 00:00:01 2024"),
+    }
+    process_signals: list[tuple[int, signal.Signals]] = []
+
+    monkeypatch.setattr(runner, "snapshot_before", lambda _deadline: inventory)
+    monkeypatch.setattr(runner, "signal_process_group", lambda _pgid, _signum: False)
+    monkeypatch.setattr(
+        runner,
+        "signal_process",
+        lambda pid, signum: process_signals.append((pid, signum)) or True,
+    )
+    monkeypatch.setattr(
+        runner,
+        "wait_for_harvest",
+        lambda *_args: ("absent", "absent", [], inventory),
+    )
+
+    runner.harvest_process_tree(
+        123,
+        123,
+        tracked_processes,
+        time.monotonic() + 1,
+    )
+
+    assert (456, signal.SIGTERM) in process_signals
 
 
 def test_run_process_harvests_owned_group_when_process_listing_fails(tmp_path: Path) -> None:
@@ -635,7 +692,10 @@ def test_detached_descendant_is_unknown_when_cleanup_inventory_disappears(tmp_pa
         _kill_known_pids(known_pids)
 
 
-def test_run_process_harvests_tracked_child_that_changes_process_groups(tmp_path: Path) -> None:
+def test_run_process_harvests_tracked_child_across_group_probe_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runner = _load_runner_module()
     child_pid_path = tmp_path / "child.pid"
     ready_path = tmp_path / "child.ready"
@@ -643,8 +703,9 @@ def test_run_process_harvests_tracked_child_that_changes_process_groups(tmp_path
     detached_path = tmp_path / "child.detached"
     known_pids: set[int] = set()
     child_script = (
-        "import os, pathlib, sys, time; "
+        "import os, pathlib, signal, sys, time; "
         "ready, release, detached = map(pathlib.Path, sys.argv[1:]); "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         "ready.write_text('ready'); "
         "\nwhile not release.exists(): time.sleep(0.01); "
         "\nos.setsid(); detached.write_text('detached'); time.sleep(60)"
@@ -653,11 +714,22 @@ def test_run_process_harvests_tracked_child_that_changes_process_groups(tmp_path
         "import pathlib, subprocess, sys, time; "
         f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}, *sys.argv[2:]]); "
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-        "ready, release, detached = map(pathlib.Path, sys.argv[2:]); "
+        "ready = pathlib.Path(sys.argv[2]); "
         "\nwhile not ready.exists(): time.sleep(0.01); "
-        "\ntime.sleep(0.3); release.write_text('release'); "
-        "\nwhile not detached.exists(): time.sleep(0.01)"
+        "\ntime.sleep(0.3)"
     )
+    original_killpg = runner.os.killpg
+
+    def release_child_before_group_probe(process_group_id: int, signum: int) -> None:
+        if signum == 0 and child_pid_path.exists() and not release_path.exists():
+            release_path.write_text("release")
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and not detached_path.exists():
+                time.sleep(0.01)
+            assert detached_path.exists(), "child did not change process groups"
+        original_killpg(process_group_id, signum)
+
+    monkeypatch.setattr(runner.os, "killpg", release_child_before_group_probe)
 
     try:
         result = runner.run_process(

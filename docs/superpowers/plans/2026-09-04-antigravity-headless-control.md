@@ -102,17 +102,17 @@
   ```
 
   On normal exit, timeout, interruption, or an exception after launch, harvest
-  the owned process group unconditionally and observed detached descendant
-  identities (PID plus start time) with a TERM/KILL sequence. Group cleanup must
+  the owned process group unconditionally and every observed descendant
+  identity (PID plus start time) directly with a TERM/KILL sequence. Group cleanup must
   use kernel group probes and must not trust process inventory, including a
   nonempty but partial snapshot. Ignore repeated termination signals until
   cleanup finishes, record group state as `absent|alive|unknown`, prove a
   zombie-only group's `EPERM` as absent only from a complete inventory, treat
   ambiguous `EPERM` as a harvest failure, and never signal a stale PID whose
-  start time changed. Re-evaluate every tracked descendant's current process
-  group so a child observed before `setsid()` remains tracked. Reject descendant
-  state as unknown if incomplete inventory omits an observed identity before
-  absence is proved. Use one
+  start time changed. Verify every tracked descendant independently of process
+  group so a child racing `setsid()` against a group probe remains covered.
+  Reject descendant state as unknown if incomplete inventory omits an observed
+  identity before absence is proved. Use one
   absolute cleanup deadline, cap every process-inventory subprocess to the
   remaining time, and start no new inventory probe after the deadline. Cap an
   early completion or interruption to one short cleanup grace rather than the

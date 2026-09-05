@@ -70,7 +70,7 @@ stdin event, capability probes, stdout JSON, stderr, AGY log, and an atomically
 replaced `status.json`. The status includes timestamps, duration, process and
 process-group IDs, observed descendant PIDs, requested mode/model/effort, exit
 code, timeout state, terminal classification, conversation ID when available,
-and tri-state group and detached-descendant outcomes after harvesting.
+and tri-state group and observed-descendant outcomes after harvesting.
 
 One operation deadline covers all capability probes and the AGY turn. AGY gets
 the remaining operation budget as its internal timeout, backed by one short
@@ -80,9 +80,10 @@ phase deadline. Cleanup starts with at most one short grace window, even when
 completion or interruption occurs long before the operation deadline. On normal
 completion, timeout, or wrapper interruption, the runner terminates and
 kernel-checks its owned process group without trusting complete process
-inventory. It also checks every observed descendant identity (PID plus process
-start time) against its current process group, including a child that changes
-groups after observation, escalates to `SIGKILL`, and reports known survivors.
+inventory. It also directly signals and checks every observed descendant
+identity (PID plus process start time) regardless of its current process group,
+including a child that races `setsid()` against cleanup, escalates to `SIGKILL`,
+and reports known survivors.
 The start-time check prevents a reused PID from being signaled, and repeated
 termination signals are ignored until cleanup finishes. Process-group state is
 recorded as `absent`, `alive`, or `unknown`; ambiguous permission errors are a
@@ -136,8 +137,8 @@ Focused tests use fake AGY executables and assert:
 - early interruption that cannot consume the unused operation budget;
 - an observed detached descendant whose cleanup inventory disappears, forcing
   an `unknown` harvest failure rather than false success;
-- an observed same-group child that calls `setsid()` before root exit and is
-  still identity-checked and harvested from its new group;
+- an observed same-group child that calls `setsid()` between inventory and the
+  group probe and is still directly harvested by identity;
 - a shared overall deadline across capability probes and dispatch;
 - terminal evidence for process-launch failure;
 - rejection of evidence directories inside the worker cwd;

@@ -208,33 +208,8 @@ def remember_process_tree(
         tracked_processes[pid] = ProcessIdentity(info.started_at)
 
 
-def live_pids(tracked_processes: dict[int, ProcessIdentity], snapshot: dict[int, ProcessInfo]) -> set[int]:
-    return {
-        pid
-        for pid, identity in tracked_processes.items()
-        if pid in snapshot
-        and snapshot[pid].started_at == identity.started_at
-        and not snapshot[pid].state.startswith("Z")
-    }
-
-
-def group_is_alive(
-    process_group_id: int,
-    snapshot: dict[int, ProcessInfo],
-    tracked_processes: dict[int, ProcessIdentity],
-) -> bool:
-    return any(
-        pid in snapshot
-        and snapshot[pid].started_at == identity.started_at
-        and snapshot[pid].process_group_id == process_group_id
-        and not snapshot[pid].state.startswith("Z")
-        for pid, identity in tracked_processes.items()
-    )
-
-
-def detached_process_state(
+def tracked_descendant_state(
     root_pid: int,
-    process_group_id: int,
     tracked_processes: dict[int, ProcessIdentity],
     inventory: ProcessInventory,
 ) -> tuple[str, list[int]]:
@@ -249,8 +224,7 @@ def detached_process_state(
             continue
         if info.started_at != identity.started_at or info.state.startswith("Z"):
             continue
-        if info.process_group_id != process_group_id:
-            alive.append(pid)
+        alive.append(pid)
     if alive:
         return "alive", sorted(alive)
     return ("unknown" if identity_unknown else "absent"), []
@@ -262,14 +236,16 @@ def wait_for_harvest(
     tracked_processes: dict[int, ProcessIdentity],
     deadline: float,
     inventory: ProcessInventory,
+    descendant_signal: signal.Signals,
 ) -> tuple[str, str, list[int], ProcessInventory]:
     while True:
-        descendant_state, alive = detached_process_state(
+        descendant_state, alive = tracked_descendant_state(
             root_pid,
-            process_group_id,
             tracked_processes,
             inventory,
         )
+        for pid in alive:
+            signal_process(pid, descendant_signal)
         group_state = process_group_state(process_group_id, inventory)
         if descendant_state == "absent" and group_state == "absent":
             return group_state, descendant_state, alive, inventory
@@ -294,9 +270,8 @@ def harvest_process_tree(
     term_deadline = min(time.monotonic() + TERMINATION_GRACE_SECONDS, cleanup_deadline)
     inventory = snapshot_before(term_deadline) or ProcessInventory({}, False)
     remember_process_tree(root_pid, inventory.processes, tracked_processes)
-    descendant_state, live_before = detached_process_state(
+    descendant_state, live_before = tracked_descendant_state(
         root_pid,
-        process_group_id,
         tracked_processes,
         inventory,
     )
@@ -311,6 +286,7 @@ def harvest_process_tree(
         tracked_processes,
         term_deadline,
         inventory,
+        signal.SIGTERM,
     )
     if group_state == "absent" and descendant_state == "absent":
         return harvested, group_state, descendant_state, alive
@@ -326,6 +302,7 @@ def harvest_process_tree(
         tracked_processes,
         cleanup_deadline,
         inventory,
+        signal.SIGKILL,
     )
     return harvested, group_state, descendant_state, alive
 
