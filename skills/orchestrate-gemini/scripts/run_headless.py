@@ -35,6 +35,7 @@ GOAL_KEYS = {
     "stop_conditions",
     "max_attempts",
     "auth_type",
+    "credential_identity",
     "allow_paid_generation",
     "sandbox_image",
 }
@@ -48,6 +49,7 @@ AUTH_TYPES = {
 GOAL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 IMAGE_PATTERN = re.compile(r"[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}\Z")
+CREDENTIAL_IDENTITY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}\Z")
 SUPPORTED_GEMINI_VERSION = "0.51.0"
 REQUIRED_FLAGS = (
     "--model",
@@ -105,6 +107,7 @@ class Goal:
     stop_conditions: tuple[str, ...]
     max_attempts: int
     auth_type: str
+    credential_identity: str
     allow_paid_generation: bool
     sandbox_image: str
 
@@ -248,6 +251,10 @@ def parse_goal(path: Path) -> Goal:
             raise ValueError("max_attempts must be a positive integer")
         if raw["auth_type"] not in AUTH_TYPES:
             raise ValueError("auth_type is unsupported")
+        if not isinstance(raw["credential_identity"], str) or not CREDENTIAL_IDENTITY_PATTERN.fullmatch(
+            raw["credential_identity"]
+        ):
+            raise ValueError("credential_identity must be a non-secret reviewed identity")
         if not isinstance(allow_paid, bool):
             raise ValueError("allow_paid_generation must be boolean")
         if not isinstance(raw["sandbox_image"], str) or not IMAGE_PATTERN.fullmatch(raw["sandbox_image"]):
@@ -264,6 +271,7 @@ def parse_goal(path: Path) -> Goal:
         stop_conditions=stop_conditions,
         max_attempts=max_attempts,
         auth_type=raw["auth_type"],
+        credential_identity=raw["credential_identity"].strip(),
         allow_paid_generation=allow_paid,
         sandbox_image=raw["sandbox_image"],
     )
@@ -534,6 +542,14 @@ def validate_policy_rules(rules: list[dict[str, object]]) -> None:
         policy_priority(rule)
         if rule.get("decision") == "allow" and not is_narrow_allow(rule, deny_priority):
             raise PreflightError("invalid_policy", "every allow must be narrow and above the catch-all deny")
+        if rule.get("decision") == "allow" and any(
+            name.lower() == "shelltool" or name.lower().startswith("run_shell_command")
+            for name in policy_tool_names(rule)
+        ):
+            raise PreflightError(
+                "invalid_policy",
+                "process-execution tools are forbidden because the worker carries billing credentials",
+            )
     if not any(is_narrow_allow(rule, deny_priority) for rule in rules):
         raise PreflightError("invalid_policy", "policy requires a narrow allow above the catch-all deny")
 
@@ -738,6 +754,60 @@ def lane_label(state_dir: Path) -> str:
     return hashlib.sha256(str(state_dir.resolve()).encode()).hexdigest()
 
 
+def inspect_writable_path(path: Path, deadline: float) -> os.stat_result:
+    if time.monotonic() >= deadline:
+        raise PreflightError("timed_out", "writable-tree inspection exceeded the attempt deadline")
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise PreflightError(
+            "unsafe_writable_path",
+            f"cannot safely inspect allowed writable path: {path}",
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode):
+        raise PreflightError("unsafe_writable_path", f"allowed writable tree contains a symlink: {path}")
+    if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+        raise PreflightError("unsafe_writable_path", f"allowed writable file has multiple hard links: {path}")
+    if not stat.S_ISREG(metadata.st_mode) and not stat.S_ISDIR(metadata.st_mode):
+        raise PreflightError("unsafe_writable_path", f"allowed writable tree contains a special file: {path}")
+    return metadata
+
+
+def validate_writable_tree(root: Path, deadline: float, allow_missing: bool = False) -> None:
+    try:
+        root_metadata = root.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return
+        raise PreflightError("invalid_goal", f"allowed path must already exist: {root}") from None
+    except OSError as error:
+        raise PreflightError("unsafe_writable_path", f"cannot safely inspect allowed writable path: {root}") from error
+    root_metadata = inspect_writable_path(root, deadline)
+    if stat.S_ISDIR(root_metadata.st_mode):
+
+        def walk_error(error: OSError) -> None:
+            raise PreflightError("unsafe_writable_path", f"cannot safely walk allowed writable tree: {root}") from error
+
+        for current_root, directories, files in os.walk(
+            root,
+            topdown=True,
+            onerror=walk_error,
+            followlinks=False,
+        ):
+            current = Path(current_root)
+            inspect_writable_path(current, deadline)
+            for name in directories + files:
+                inspect_writable_path(current / name, deadline)
+    final_metadata = inspect_writable_path(root, deadline)
+    if (root_metadata.st_dev, root_metadata.st_ino) != (final_metadata.st_dev, final_metadata.st_ino):
+        raise PreflightError("unsafe_writable_path", f"allowed writable root changed during inspection: {root}")
+
+
+def validate_goal_writable_paths(cwd: Path, goal: Goal, deadline: float, allow_missing: bool = False) -> None:
+    for relative in goal.allowed_paths:
+        validate_writable_tree(cwd / relative, deadline, allow_missing)
+
+
 def configure_provider_guard(
     environment: dict[str, str],
     args: argparse.Namespace,
@@ -746,6 +816,7 @@ def configure_provider_guard(
     provider: Path,
     label: str,
     live_mode: bool,
+    deadline: float,
 ) -> None:
     helper_source = Path(__file__).with_name("provider_guard.py")
     proxy_source = Path(__file__).with_name("api_egress_proxy.mjs")
@@ -763,7 +834,9 @@ def configure_provider_guard(
     allowed_paths: list[str] = []
     common_dir = Path(git_state.common_dir).resolve()
     for relative in goal.allowed_paths:
-        candidate = (args.cwd / relative).resolve()
+        source = args.cwd / relative
+        validate_writable_tree(source, deadline)
+        candidate = source.resolve()
         if not path_is_within(candidate, args.cwd.resolve()) or not candidate.exists():
             raise PreflightError("invalid_goal", f"allowed path must already exist inside the checkout: {relative}")
         if candidate == common_dir or path_is_within(candidate, common_dir):
@@ -781,16 +854,20 @@ def configure_provider_guard(
             "PATH": f"{guard_dir}:{environment.get('PATH', '')}",
         }
     )
-    protected_mounts = [
-        git_state.common_dir,
-        str(Path(environment["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])),
-        str(Path(environment["GEMINI_CLI_HOME"]) / ".gemini" / "settings.json"),
-        str(Path(environment["GEMINI_CLI_HOME"]) / ".gemini" / "trustedFolders.json"),
-        str(Path(environment["GEMINI_CLI_HOME"]) / ".gemini" / "control-policy.toml"),
+    settings_dir = Path(environment["GEMINI_CLI_HOME"]) / ".gemini"
+    protected_settings = [
+        Path(environment["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]),
+        settings_dir / "settings.json",
+        settings_dir / "trustedFolders.json",
+        settings_dir / "control-policy.toml",
     ]
-    if any("," in mount for mount in protected_mounts):
+    protected_mounts = [(Path(git_state.common_dir), Path(git_state.common_dir))]
+    protected_mounts.extend((path, path) for path in protected_settings)
+    container_settings = Path("/") / "home" / "node" / ".gemini"
+    protected_mounts.extend((path, container_settings / path.name) for path in protected_settings)
+    if any("," in str(path) for mount in protected_mounts for path in mount):
         raise PreflightError("invalid_path", "control paths containing commas are unsupported")
-    environment["SANDBOX_MOUNTS"] = ",".join(f"{mount}:{mount}:ro" for mount in protected_mounts)
+    environment["SANDBOX_MOUNTS"] = ",".join(f"{source}:{target}:ro" for source, target in protected_mounts)
     if live_mode:
         proxy_dir = Path(git_state.common_dir) / "orchestrate-gemini"
         proxy_dir.mkdir(mode=0o700, exist_ok=True)
@@ -885,11 +962,11 @@ def remove_stale_runtime_containers(provider: Path, cwd: Path, deadline: float) 
 
 
 @contextmanager
-def global_execution_lease() -> Iterator[None]:
-    runtime_root = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/orchestrate-gemini-{os.getuid()}"))
+def global_execution_lease() -> Iterator[int]:
+    runtime_root = Path(f"/tmp/orchestrate-gemini-{os.getuid()}")
     runtime_root.mkdir(mode=0o700, exist_ok=True)
-    metadata = runtime_root.stat()
-    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+    metadata = runtime_root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
         raise PreflightError("transport_lock_invalid", "global runtime lock directory must be owner-only")
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(runtime_root / "gemini-v0.51-execution.lock", flags, 0o600)
@@ -899,7 +976,7 @@ def global_execution_lease() -> Iterator[None]:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise PreflightError("transport_locked", "another Gemini v0.51 container execution is active") from error
-        yield
+        yield lock.fileno()
 
 
 def probe_capabilities(args: argparse.Namespace, environment: dict[str, str], deadline: float) -> tuple[str, Path]:
@@ -1230,6 +1307,7 @@ def run_process(
     timeout_seconds: float,
     on_start: Callable[[int, int], None] | None = None,
     on_heartbeat: Callable[[], None] | None = None,
+    inherited_lock_fds: tuple[int, ...] = (),
 ) -> ProcessResult:
     tracked_processes: dict[int, ProcessIdentity] = {}
     process_deadline = time.monotonic() + timeout_seconds
@@ -1244,6 +1322,7 @@ def run_process(
                 stdout=stdout,
                 stderr=stderr,
                 start_new_session=True,
+                pass_fds=inherited_lock_fds,
             )
         except OSError as error:
             return launch_error_result(f"{type(error).__name__}: {error}")
@@ -1338,6 +1417,8 @@ def git_output(
                 f"core.hooksPath={os.devnull}",
                 "-c",
                 "core.fsmonitor=false",
+                "-c",
+                f"core.attributesFile={os.devnull}",
                 "-C",
                 str(cwd),
                 *arguments,
@@ -1356,6 +1437,30 @@ def git_output(
     return result.stdout
 
 
+def reject_repository_attributes(cwd: Path, common_dir: Path, deadline: float) -> None:
+    def walk_error(error: OSError) -> None:
+        raise PreflightError("unsafe_git_attributes", "cannot prove repository attribute safety") from error
+
+    for current_root, directories, files in os.walk(cwd, topdown=True, onerror=walk_error, followlinks=False):
+        if time.monotonic() >= deadline:
+            raise PreflightError("timed_out", "repository attribute inspection exceeded the attempt deadline")
+        if ".gitattributes" in directories or ".gitattributes" in files:
+            raise PreflightError(
+                "unsafe_git_attributes",
+                "repository .gitattributes files are unsupported because host Git filters may execute code",
+            )
+    try:
+        (common_dir / "info" / "attributes").lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise PreflightError("unsafe_git_attributes", "cannot prove Git info/attributes absence") from error
+    raise PreflightError(
+        "unsafe_git_attributes",
+        "Git info/attributes is unsupported because host Git filters may execute code",
+    )
+
+
 def inspect_git(cwd: Path, goal: Goal, resume_requested: bool = False, deadline: float | None = None) -> GitState:
     if not cwd.is_dir():
         raise PreflightError("git_invalid", "checkout directory is missing")
@@ -1366,6 +1471,7 @@ def inspect_git(cwd: Path, goal: Goal, resume_requested: bool = False, deadline:
     common = Path(common_raw).resolve()
     if not path_is_within(common, cwd.resolve()):
         raise PreflightError("shared_git_dir", "Git common directory is outside the checkout")
+    reject_repository_attributes(cwd, common, deadline if deadline is not None else time.monotonic() + 10)
     status_bytes = git_output(
         cwd,
         "status",
@@ -1459,11 +1565,13 @@ def execution_request_digest(
 ) -> str:
     payload = {
         "approval_mode": args.approval_mode,
+        "credential_identity": prepared.goal.credential_identity,
         "gemini_executable": str(prepared.gemini_executable),
         "gemini_version": status.get("gemini_version"),
         "goal_sha256": prepared.goal_digest,
         "model": args.model,
         "policy_sha256": status.get("policy_sha256"),
+        "prompt_sha256": hashlib.sha256(prepared.prompt_content).hexdigest(),
         "sandbox_image": prepared.goal.sandbox_image,
         "validation_fixture_sha256": validation_fixture_digest,
     }
@@ -1926,7 +2034,6 @@ def prepare_attempt(args: argparse.Namespace, deadline: float, status: dict[str,
     )
     sandbox_executable = Path(probe_sandbox_provider(args, environment, deadline))
     label = lane_label(args.state_dir)
-    recovered_containers = remove_owned_containers(sandbox_executable, label, args.cwd, deadline)
     (args.state_dir / "runtime-secret.env").unlink(missing_ok=True)
     attest_sandbox_image(sandbox_executable, goal.sandbox_image, args.cwd, deadline)
     environment["SANDBOX_FLAGS"] = (
@@ -1942,9 +2049,9 @@ def prepare_attempt(args: argparse.Namespace, deadline: float, status: dict[str,
         sandbox_executable,
         label,
         live_mode,
+        deadline,
     )
     status["sandbox_executable"] = str(sandbox_executable)
-    status["recovered_container_ids"] = recovered_containers
     status["sandbox_image"] = goal.sandbox_image
     lease_payload = {
         "attempt": attempt,
@@ -1991,8 +2098,10 @@ def verify_and_record_checkout(
     deadline: float,
     status: dict[str, Any],
 ) -> None:
+    validate_goal_writable_paths(args.cwd, prepared.goal, deadline, allow_missing=True)
     if git_metadata_snapshot(Path(prepared.git_state.common_dir), deadline) != prepared.git_metadata_before:
         raise PreflightError("git_metadata_violation", "worker changed read-only Git control metadata")
+    reject_repository_attributes(args.cwd, Path(prepared.git_state.common_dir), deadline)
     filesystem_after_worker = filesystem_snapshot(args.cwd, deadline)
     filesystem_changes = enforce_filesystem_scope(
         prepared.filesystem_before,
@@ -2024,8 +2133,10 @@ def verify_and_record_checkout(
         args.run_dir,
         "filesystem-changes-after-verification.json",
     )
+    validate_goal_writable_paths(args.cwd, prepared.goal, deadline, allow_missing=True)
     if git_metadata_snapshot(Path(prepared.git_state.common_dir), deadline) != prepared.git_metadata_before:
         raise PreflightError("git_metadata_violation", "verification changed Git control metadata")
+    reject_repository_attributes(args.cwd, Path(prepared.git_state.common_dir), deadline)
     status.update(
         {
             "changed_paths": paths,
@@ -2046,8 +2157,11 @@ def execute_attempt(
     deadline: float,
     status_path: Path,
     status: dict[str, Any],
+    inherited_lock_fds: tuple[int, ...],
 ) -> int:
     validation = prepare_validation_responses(args, prepared)
+    status["credential_identity"] = prepared.goal.credential_identity
+    status["prompt_sha256"] = hashlib.sha256(prepared.prompt_content).hexdigest()
     validation_responses = validation[0] if validation else None
     if validation:
         status["validation_fixture_sha256"] = validation[1]
@@ -2129,6 +2243,7 @@ def execute_attempt(
             remaining_seconds(deadline),
             on_start=worker_started,
             on_heartbeat=output_advanced,
+            inherited_lock_fds=inherited_lock_fds,
         )
     finally:
         staged_prompt.unlink(missing_ok=True)
@@ -2157,12 +2272,13 @@ def run_locked_attempt(
     deadline: float,
     status_path: Path,
     status: dict[str, Any],
+    lane_lock_fd: int,
 ) -> int:
     try:
         prepared = prepare_attempt(args, deadline, status)
         if args.preflight_only:
             return finish_status(status_path, status, "preflight_succeeded")
-        with global_execution_lease():
+        with global_execution_lease() as global_lock_fd:
             stale = remove_stale_runtime_containers(
                 prepared.sandbox_executable,
                 args.cwd,
@@ -2171,7 +2287,14 @@ def run_locked_attempt(
             if stale:
                 status["globally_recovered_container_ids"] = stale
                 write_atomic_private(status_path, status)
-            return execute_attempt(args, prepared, deadline, status_path, status)
+            return execute_attempt(
+                args,
+                prepared,
+                deadline,
+                status_path,
+                status,
+                (lane_lock_fd, global_lock_fd),
+            )
     except PreflightError as error:
         if hasattr(error, "changed_paths"):
             status["changed_paths"] = error.changed_paths
@@ -2215,7 +2338,7 @@ def main() -> int:
                     write_atomic_private(status_path, status)
             except PreflightError as error:
                 return finish_status(status_path, status, error.classification, str(error))
-            return run_locked_attempt(args, deadline, status_path, status)
+            return run_locked_attempt(args, deadline, status_path, status, lease.fileno())
 
 
 if __name__ == "__main__":

@@ -39,7 +39,8 @@
   Create a valid goal fixture with schema version `1`, a stable ID/objective,
   the temporary repository's exact 40-character `HEAD`, normalized allowed
   prefixes, argv-based verification commands with positive timeouts, non-empty
-  stop conditions, `max_attempts`, `auth_type`, and `allow_paid_generation`.
+  stop conditions, `max_attempts`, `auth_type`, non-secret
+  `credential_identity`, and `allow_paid_generation`.
   Add separate tests that reject missing fields, unknown fields, empty strings,
   duplicate or escaping paths, shell-string verification commands, non-positive
   budgets, and malformed SHAs.
@@ -142,6 +143,8 @@
   does not prove those routes;
   `--preflight-only` never needs this acknowledgement because it cannot issue a
   model request.
+  Reject every `run_shell_command`/`ShellTool` allow because a sandbox child
+  could inspect the parent worker's credential environment.
 
 - [ ] **Step 4: Implement capability, runtime, policy, and billing checks**
 

@@ -20,6 +20,7 @@
   ],
   "max_attempts": 3,
   "auth_type": "gemini-api-key",
+  "credential_identity": "replace-with-reviewed-non-secret-quota-owner-id",
   "allow_paid_generation": false,
   "sandbox_image": "registry.example/gemini-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 }

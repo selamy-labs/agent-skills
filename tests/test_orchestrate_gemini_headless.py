@@ -167,6 +167,7 @@ def _goal(base_sha: str, **overrides: object) -> dict[str, object]:
         "stop_conditions": ["scope would expand", "credentials are unavailable"],
         "max_attempts": 3,
         "auth_type": "gemini-api-key",
+        "credential_identity": "fixture-billing-project",
         "allow_paid_generation": True,
         "sandbox_image": "example.invalid/gemini-sandbox@sha256:" + "a" * 64,
     }
@@ -427,6 +428,88 @@ def test_provider_guard_rewrites_upstream_runtime_boundaries(
     assert secret_safe[secret_safe.index("--env-file") + 1] == str(credential)
 
 
+def test_provider_guard_accepts_the_exact_v051_settings_remap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = _load_provider_guard_module()
+    workspace = tmp_path / "checkout"
+    state = tmp_path / "state"
+    settings = state / "gemini-home" / ".gemini"
+    temporary = state / "tmp"
+    git_dir = workspace / ".git"
+    allowed = workspace / "src"
+    for directory in (settings, temporary, git_dir, allowed):
+        directory.mkdir(parents=True, exist_ok=True)
+    protected = settings / "system-settings.json"
+    protected.write_text("{}\n")
+    image = "example.invalid/gemini-sandbox@sha256:" + "a" * 64
+    values = {
+        "ORCHESTRATE_GEMINI_PROVIDER_REAL": "/usr/bin/false",
+        "ORCHESTRATE_GEMINI_WORKSPACE": str(workspace),
+        "ORCHESTRATE_GEMINI_STATE_DIR": str(state),
+        "ORCHESTRATE_GEMINI_SANDBOX_IMAGE": image,
+        "ORCHESTRATE_GEMINI_CONTAINER_LABEL": "io.selamy.orchestrate-gemini.lane=test",
+        "ORCHESTRATE_GEMINI_ALLOWED_PATHS": json.dumps([str(allowed)]),
+        "ORCHESTRATE_GEMINI_LIVE_MODE": "1",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    # Gemini CLI v0.51.0 constructs this settings/home/tmp mount shape in
+    # packages/cli/src/utils/sandbox.ts before adding the image and command.
+    rewritten = guard.guarded_run(
+        [
+            "run",
+            "-i",
+            "--rm",
+            "--init",
+            "--workdir",
+            str(workspace),
+            "--entrypoint",
+            "",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=256",
+            "--add-host",
+            "host.docker.internal:host-gateway",
+            "--volume",
+            f"{workspace}:{workspace}",
+            "--volume",
+            f"{settings}:/home/node/.gemini",
+            "--volume",
+            f"{settings}:{settings}",
+            "--volume",
+            f"{temporary}:{temporary}",
+            "--volume",
+            f"{git_dir}:{git_dir}:ro",
+            "--volume",
+            f"{protected}:{protected}:ro",
+            "--volume",
+            f"{protected}:/home/node/.gemini/system-settings.json:ro",
+            "--env",
+            "HTTPS_PROXY=http://gemini-cli-sandbox-proxy:8877",
+            "--network",
+            "gemini-cli-sandbox",
+            "--name",
+            "gemini-sandbox-image-random",
+            "--hostname",
+            "gemini-sandbox-image-random",
+            image,
+            "gemini",
+        ]
+    )
+
+    assert f"{settings}:/home/node/.gemini" in rewritten
+    assert f"{settings}:{settings}" in rewritten
+    assert f"{temporary}:{temporary}" in rewritten
+    assert f"{workspace}:{workspace}:ro" in rewritten
+    assert f"{git_dir}:{git_dir}:ro" in rewritten
+    assert f"{protected}:/home/node/.gemini/system-settings.json:ro" in rewritten
+    assert f"{allowed}:{allowed}:rw" in rewritten
+
+
 def test_provider_guard_binds_proxy_readiness_port_to_loopback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -551,6 +634,15 @@ def test_preflight_requires_an_owner_only_goal_source(tmp_path: Path) -> None:
     assert _status(fixture, "attempt-001")["classification"] == "invalid_goal"
 
 
+def test_preflight_requires_a_reviewed_non_secret_credential_identity(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, credential_identity="")
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "invalid_goal"
+
+
 def test_preflight_rejects_an_exhausted_attempt_budget(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, max_attempts=1)
     assert _invoke(fixture, "attempt-001").returncode == 0
@@ -595,7 +687,59 @@ def test_preflight_never_makes_git_control_metadata_writable(tmp_path: Path) -> 
     result = _invoke(linked, "attempt-001")
 
     assert result.returncode != 0
-    assert _status(linked, "attempt-001")["classification"] == "invalid_goal"
+    assert _status(linked, "attempt-001")["classification"] == "unsafe_writable_path"
+
+
+def test_preflight_rejects_a_clean_hard_link_into_an_allowed_path(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    repo = Path(fixture["repo"])
+    external = tmp_path / "active-checkout-file"
+    external.write_text((repo / "README.md").read_text())
+    (repo / "README.md").unlink()
+    os.link(external, repo / "README.md")
+    assert _run(["git", "status", "--porcelain"], repo) == ""
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "unsafe_writable_path"
+
+
+def test_preflight_rejects_git_attributes_before_a_filter_can_execute(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    repo = Path(fixture["repo"])
+    marker = tmp_path / "host-filter-ran"
+    script = repo / "src" / "filter.sh"
+    script.write_text("#!/bin/sh\ncat\n")
+    script.chmod(0o755)
+    (repo / ".gitattributes").write_text("*.txt filter=pwn\n")
+    (repo / "data.txt").write_text("fixture\n")
+    _run(["git", "config", "filter.pwn.clean", str(script)], repo)
+    _run(["git", "add", ".gitattributes", "data.txt", "src/filter.sh"], repo)
+    _run(["git", "commit", "-qm", "filtered fixture"], repo)
+    script.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+    goal = json.loads(Path(fixture["goal"]).read_text())
+    goal["base_sha"] = _run(["git", "rev-parse", "HEAD"], repo)
+    _write_private(Path(fixture["goal"]), json.dumps(goal))
+    marker.unlink(missing_ok=True)
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "unsafe_git_attributes"
+    assert not marker.exists()
+
+
+def test_writable_tree_rejects_special_files(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    os.mkfifo(allowed / "bridge")
+
+    with pytest.raises(runner.PreflightError) as raised:
+        runner.validate_writable_tree(allowed, time.monotonic() + 2)
+
+    assert raised.value.classification == "unsafe_writable_path"
 
 
 def test_preflight_requires_the_exact_clean_base(tmp_path: Path) -> None:
@@ -782,6 +926,20 @@ def test_preflight_rejects_non_narrow_or_boolean_priority_policy(tmp_path: Path,
     assert _status(fixture, "attempt-001")["classification"] == "invalid_policy"
 
 
+def test_preflight_forbids_all_process_execution_tool_allows(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _write_private(
+        Path(fixture["policy"]),
+        '[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 1\n\n'
+        '[[rule]]\ntoolName = "run_shell_command"\ndecision = "allow"\npriority = 100\n',
+    )
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "invalid_policy"
+
+
 def test_runner_requires_the_prompt_source_to_be_owner_only(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     Path(fixture["prompt"]).chmod(0o644)
@@ -817,7 +975,11 @@ def test_runner_keeps_prompt_content_out_of_process_arguments(tmp_path: Path) ->
     assert status["classification"] == "succeeded"
     assert status["session_id"] == "session-test"
     assert status["reported_model"] == "gemini-test-model"
+    assert status["credential_identity"] == "fixture-billing-project"
+    assert status["prompt_sha256"] == hashlib.sha256(Path(fixture["prompt"]).read_bytes()).hexdigest()
     assert invocations[-1]["api_key"] == "__ORCHESTRATE_GEMINI_RUNTIME_SECRET__"
+    assert ":/home/node/.gemini/system-settings.json:ro" in invocations[-1]["sandbox_mounts"]
+    assert ":/home/node/.gemini/control-policy.toml:ro" in invocations[-1]["sandbox_mounts"]
     run_dir = Path(fixture["state"]) / "runs" / "attempt-001"
     assert "test-fixture-secret" not in "".join(
         path.read_text(errors="replace") for path in run_dir.iterdir() if path.is_file()
@@ -1082,6 +1244,38 @@ def test_runner_rejects_resume_when_the_model_or_terminal_outcome_differs(tmp_pa
     assert _status(failure_fixture, "attempt-002")["classification"] == "invalid_resume"
 
 
+def test_runner_rejects_resume_when_prompt_content_differs(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    assert _invoke(fixture, "attempt-001", preflight=False).returncode == 0
+    prior_run = Path(fixture["state"]) / "runs" / "attempt-001"
+    _write_private(Path(fixture["prompt"]), "A different reviewed instruction.\n")
+
+    result = _invoke(fixture, "attempt-002", preflight=False, resume_from=prior_run)
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-002")["classification"] == "invalid_resume"
+
+
+def test_execution_request_digest_binds_credential_identity() -> None:
+    runner = _load_runner_module()
+    args = SimpleNamespace(approval_mode="plan", model="gemini-test-model")
+    status = {"gemini_version": "0.51.0", "policy_sha256": "policy"}
+
+    def prepared(identity: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            credential_identity=identity,
+            gemini_executable=Path("/controlled/gemini"),
+            goal=SimpleNamespace(credential_identity=identity, sandbox_image="image@sha256:digest"),
+            goal_digest="same-goal-digest-for-regression",
+            prompt_content=b"same prompt",
+        )
+
+    first = runner.execution_request_digest(args, prepared("billing-project-a"), status, None)
+    second = runner.execution_request_digest(args, prepared("billing-project-b"), status, None)
+
+    assert first != second
+
+
 def test_validation_sessions_cannot_be_resumed(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     responses = tmp_path / "responses.json"
@@ -1225,12 +1419,94 @@ def test_restart_reconciles_a_stale_worker_identity(tmp_path: Path) -> None:
         worker.wait(timeout=3)
 
 
-def test_global_v051_execution_lease_is_nonblocking() -> None:
+def test_global_v051_execution_lease_is_nonblocking_across_runtime_environments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runner = _load_runner_module()
-    with runner.global_execution_lease(), pytest.raises(runner.PreflightError) as raised:
-        with runner.global_execution_lease():
-            pass
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime-a"))
+    with runner.global_execution_lease():
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime-b"))
+        with pytest.raises(runner.PreflightError) as raised:
+            with runner.global_execution_lease():
+                pass
     assert raised.value.classification == "transport_locked"
+
+
+def test_launched_worker_inherits_lease_before_identity_is_recorded(tmp_path: Path) -> None:
+    lock_path = tmp_path / "launch-window.lock"
+    child_path = tmp_path / "worker.pid"
+    supervisor_code = """
+import fcntl
+import importlib.util
+import os
+from pathlib import Path
+import sys
+import time
+
+module_path, workdir, lock_name, child_name = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("launch_window_runner", module_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+lock = open(lock_name, "a+")
+fcntl.flock(lock, fcntl.LOCK_EX)
+
+def pause_before_identity(pid, _process_group_id):
+    Path(child_name).write_text(str(pid))
+    time.sleep(60)
+
+module.run_process(
+    ["/bin/sleep", "60"],
+    Path(workdir),
+    dict(os.environ),
+    Path(workdir) / "worker.stdout",
+    Path(workdir) / "worker.stderr",
+    60,
+    on_start=pause_before_identity,
+    inherited_lock_fds=(lock.fileno(),),
+)
+"""
+    supervisor = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            supervisor_code,
+            str(RUNNER),
+            str(tmp_path),
+            str(lock_path),
+            str(child_path),
+        ]
+    )
+    worker_pid: int | None = None
+    contender = None
+    try:
+        _wait_for(child_path)
+        worker_pid = int(child_path.read_text())
+        supervisor.kill()
+        supervisor.wait(timeout=3)
+        contender = lock_path.open("r+")
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        os.killpg(worker_pid, signal.SIGKILL)
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise AssertionError("worker did not release inherited lease") from None
+                time.sleep(0.02)
+    finally:
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+        if worker_pid is not None and _pid_is_running(worker_pid):
+            os.killpg(worker_pid, signal.SIGKILL)
+        if contender is not None:
+            contender.close()
 
 
 def test_run_process_harvests_when_start_callback_raises(tmp_path: Path) -> None:

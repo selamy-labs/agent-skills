@@ -22,6 +22,13 @@ FORBIDDEN_FLAGS = {"--privileged", "--cap-add", "--device", "--pid", "--ipc", "-
 MAIN_NETWORK = "gemini-cli-sandbox"
 PROXY_NETWORK = "gemini-cli-sandbox-proxy"
 LOOPBACK = ".".join(("127", "0", "0", "1"))
+CONTAINER_SETTINGS_DIR = Path("/") / "home" / "node" / ".gemini"
+PROTECTED_SETTINGS_FILES = {
+    "control-policy.toml",
+    "settings.json",
+    "system-settings.json",
+    "trustedFolders.json",
+}
 
 
 def fail(message: str) -> NoReturn:
@@ -47,7 +54,7 @@ def private_config() -> tuple[Path, Path, Path, str, str, list[Path], bool]:
     return real, workspace, state, image, label, allowed, live_value == "1"
 
 
-def mount_source(specification: str) -> Path:
+def mount_source(specification: str, state: Path) -> Path:
     fields = specification.split(":")
     if len(fields) not in {1, 2, 3}:
         fail("malformed bind mount")
@@ -56,7 +63,15 @@ def mount_source(specification: str) -> Path:
     if not source.startswith("/") or not target.startswith("/"):
         fail("relative and named mounts are forbidden")
     resolved = Path(source).resolve()
-    if Path(target) != resolved:
+    settings = state / "gemini-home" / ".gemini"
+    target_path = Path(target)
+    settings_remap = resolved == settings and target_path == CONTAINER_SETTINGS_DIR
+    protected_file_remap = (
+        resolved.parent == settings
+        and resolved.name in PROTECTED_SETTINGS_FILES
+        and target_path == CONTAINER_SETTINGS_DIR / resolved.name
+    )
+    if target_path != resolved and not settings_remap and not protected_file_remap:
         fail("bind-mount source and target must be identical absolute paths")
     return resolved
 
@@ -86,7 +101,7 @@ def rewrite_pair(
             fail("published ports are forbidden")
         return [item, f"{LOOPBACK}:8877:8877"]
     if item in {"-v", "--volume"}:
-        source = mount_source(value)
+        source = mount_source(value, state)
         if source != workspace and workspace not in source.parents and state not in source.parents:
             fail(f"mount source is outside the lane: {source}")
         writable_runtime_mounts = {state / "tmp", state / "gemini-home" / ".gemini"}

@@ -21,10 +21,10 @@ alias the distinct Antigravity CLI (`agy`); use `orchestrate-agy` for that tool.
    not dispatch in an active product checkout or a linked Git worktree with
    shared metadata. Pin the exact clean base SHA and give one lane one writer.
 4. Put the objective, already-existing allowed paths, immutable verification argv, stop
-   conditions, attempt budget, auth type, and paid-generation policy in a goal
-   JSON file. Start from `references/goal.example.json`; replace every example
-   value before dispatch. Pin the container image by `image@sha256` digest in
-   the same goal.
+   conditions, attempt budget, auth type, reviewed non-secret
+   `credential_identity`, and paid-generation policy in a goal JSON file. Start
+   from `references/goal.example.json`; replace every example value before
+   dispatch. Pin the container image by `image@sha256` digest in the same goal.
 5. Create the lane state directory outside the checkout with mode `0700`. Store
    the prompt and a task-specific default-deny policy as owner-only files.
 
@@ -44,7 +44,9 @@ process, account, checkout, or supervisor.
 Prefer `plan` for read-only investigation. Use `default` or `auto_edit` only
 when the immutable goal authorizes edits and the private checkout plus policy
 contain them. The runner rejects model aliases, YOLO, extension loading,
-inherited sandbox mounts, shared Git metadata, and unreviewed shell strings.
+inherited sandbox mounts, shared Git metadata, repository attribute files, and
+every process-execution tool allow. Repository attributes are unsupported
+because host Git may execute model-controlled clean or process filters.
 
 ## Run a preflight
 
@@ -98,7 +100,10 @@ model, and a session ID.
 The provider guard labels every Gemini and verifier container, removes the
 upstream host-gateway mapping, binds proxy readiness to loopback, makes the
 checkout root and Git metadata read-only, and remounts only declared paths
-writable. It also requires Gemini's fixed worker network to be internal,
+writable. Before and after execution it rejects symlinks, multiply-linked
+regular files, and special files anywhere in those writable trees so a declared
+path cannot bridge into another checkout or host resource. It also requires
+Gemini's fixed worker network to be internal,
 requires the fixed proxy network to be external, and rejects every unexpected
 network operation or attachment. After harvest, the runner checks sanitized Git state and a full
 filesystem snapshot, including ignored paths. Any Git metadata change fails.
@@ -113,7 +118,12 @@ owner-only file containing `GEMINI_API_KEY=<value>` via
 `--credential-env-file`; never export it. The outer CLI receives a non-secret
 placeholder, and the provider guard replaces that placeholder with a runtime
 `--env-file` path. The ephemeral copy is removed on every terminal path after
-container reconciliation. Any real key in runtime argv is rejected.
+container reconciliation. Any real key in runtime argv is rejected. Record a
+reviewed, non-secret quota-owner or billing-project identifier as
+`credential_identity`; do not put a key value or a secret-derived hash there.
+The policy must not allow `run_shell_command` or its legacy alias: a same-user
+child process could read the credential from the Gemini parent's process
+environment and issue unaccounted paid requests.
 
 Live model transport crosses an internal container network through the bundled
 CONNECT proxy, which permits only `generativelanguage.googleapis.com:443`.
@@ -174,8 +184,10 @@ still sitting in the composer is not proof of dispatch.
 Each attempt uses a new direct child of `STATE_DIR/runs` and reuses the lane's
 immutable goal. Before dispatch, the runner reconciles a stale worker using its
 PID, process group, and start-time identity and removes daemon-owned containers
-carrying the lane/UID labels. The kernel lane lock and v0.51 global execution
-lock prevent replacement dispatch until reconciliation completes. Resume only
+carrying the lane/UID labels. The kernel lane lock and canonical per-UID v0.51
+global execution lock are inherited by the worker at process creation, closing
+the launch-before-identity crash window and preventing replacement dispatch
+until the worker exits. Resume only
 by naming a terminal prior run:
 
 ```bash
@@ -185,8 +197,9 @@ skills/orchestrate-gemini/scripts/run_headless.py \
 ```
 
 The runner accepts only a prior `succeeded` delivery with the same immutable
-execution-request digest and checkout identity, then forwards that run's exact
-session ID with `--resume`. Validation and failed runs are not resumable. It
+execution-request digest—including the prompt digest and reviewed credential
+identity—and checkout identity, then forwards that run's exact session ID with
+`--resume`. Validation and failed runs are not resumable. It
 never uses `latest`. Do not
 resume after scope expansion, goal change, ambiguous process cleanup, identity
 change, or attempt-budget exhaustion; create a newly reviewed goal instead.

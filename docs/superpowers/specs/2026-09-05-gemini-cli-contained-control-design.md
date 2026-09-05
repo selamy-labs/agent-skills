@@ -87,6 +87,7 @@ Every headless lane requires an immutable JSON goal file with this shape:
   "stop_conditions": ["scope would expand", "credentials are unavailable"],
   "max_attempts": 3,
   "auth_type": "gemini-api-key",
+  "credential_identity": "reviewed-non-secret-quota-owner-id",
   "allow_paid_generation": false,
   "sandbox_image": "registry.example/sandbox@sha256:64-lowercase-hex-digits"
 }
@@ -96,9 +97,11 @@ Paths are repository-relative, normalized prefixes without `..`, absolute
 components, or shell syntax. Verification commands are non-empty argv arrays
 executed without a shell and have positive individual deadlines. The objective,
 stop conditions, exact base, allowed paths, verification commands, attempt
-budget, billing policy, and digest-pinned sandbox image are requirements, not
+budget, reviewed non-secret credential identity, billing policy, and
+digest-pinned sandbox image are requirements, not
 optional annotations. Allowed paths must already exist so the runtime can mount
-only those paths writable over a read-only checkout root.
+only those paths writable over a read-only checkout root. Their trees cannot
+contain symlinks, multiply-linked regular files, or special files.
 
 On the first attempt, the runner copies the goal to the lane state directory
 with mode `0600` and records its SHA-256 digest. Later attempts must present the
@@ -120,13 +123,15 @@ held kernel lock is audit history, not ownership.
 Before launch, the runner verifies:
 
 1. the checkout is a Git repository whose resolved common Git directory is
-   inside the checkout, excluding linked worktrees and shared repositories;
-2. `HEAD` equals the goal's exact base SHA and the worktree is clean;
-3. the live executable's version/help advertise stdin headless operation,
+    inside the checkout, excluding linked worktrees and shared repositories;
+2. repository attribute files are absent, so host Git cannot invoke configured
+   clean, process, or diff drivers;
+3. `HEAD` equals the goal's exact base SHA and the worktree is clean;
+4. the live executable's version/help advertise stdin headless operation,
    `--output-format`, `--model`, `--approval-mode`, `--sandbox`, and
    `--admin-policy`;
-4. an explicit Docker, Podman, or gVisor provider exists;
-5. the supplemental policy is a regular owner-controlled file and no standard
+5. an explicit Docker, Podman, or gVisor provider exists;
+6. the supplemental policy is a regular owner-controlled file and no standard
    admin policy directory would cause Gemini to ignore it.
 
 The worker receives an isolated `HOME`, Gemini home, system-settings path, and
@@ -152,26 +157,31 @@ all extensions with both the system `admin.extensions.enabled` override and
 Gemini's documented `-e none` selector, passes only the staged prompt reference,
 requests `stream-json`, uses a non-YOLO approval mode, and passes the reviewed
 policy as a supplemental admin policy. The policy must default-deny all tools
-and narrowly allow only the goal's required operations.
+and narrowly allow only the goal's required operations. It cannot allow
+`run_shell_command` or the legacy `ShellTool` alias because a child process
+could read the Gemini parent's billing credential from the process namespace.
 
 An owner-only provider guard removes the upstream host-gateway mapping, binds
 the proxy readiness port to loopback, labels every container, rewrites the
 checkout root and Git metadata read-only, and remounts only goal paths writable.
 It attests that Gemini's fixed worker network is internal, that the fixed proxy
 network is external, and rejects unexpected network creates, connections, or
-container attachments. This prevents a pre-existing network with the right
-name from silently restoring worker egress.
+worker network selections. A pre-existing network with the right name must
+still match the required internal/external isolation mode.
 OS isolation protects the checkout boundary even if policy or model judgment is
 wrong; policy remains the least-privilege tool boundary inside that checkout.
 
 Live authentication is restricted to a paid Gemini API key because consumer
 OAuth service is discontinued and other enterprise routes are not proven by this v0.51
-runner. The key arrives in one owner-only env file. Gemini's outer process gets
-only a placeholder; the provider guard replaces it with `--env-file`, keeping
-the real key out of process argv and evidence. Its lane-local runtime copy is
-removed after container reconciliation on every terminal path. The bundled CONNECT proxy permits
+runner. The key arrives in one owner-only env file. The host-side Gemini process
+gets only a placeholder; the provider guard replaces it with `--env-file` for
+the sandboxed Gemini worker, keeping the real key out of process argv and
+evidence. Process-execution tools are forbidden so the worker cannot expose that
+environment to a model-directed child. Its lane-local runtime copy is removed
+after container reconciliation on every terminal path. The bundled CONNECT proxy permits
 only `generativelanguage.googleapis.com:443`. The supervisor must still prove
-quota ownership and explicit paid-generation authorization. `--preflight-only`
+quota ownership, record its reviewed non-secret identity in the immutable goal,
+and require explicit paid-generation authorization. `--preflight-only`
 performs every non-generating check without contacting a model.
 
 ## Execution, evidence, and acceptance
