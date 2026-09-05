@@ -9,8 +9,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
+import tomllib
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -37,6 +40,20 @@ AUTH_TYPES = {
 }
 GOAL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+REQUIRED_FLAGS = (
+    "--model",
+    "--output-format",
+    "--approval-mode",
+    "--sandbox",
+    "--admin-policy",
+    "--extensions",
+    "--resume",
+)
+SANDBOX_FLAGS = "--read-only --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=256"
+STANDARD_ADMIN_POLICY_DIRS = (
+    Path("/etc/gemini-cli/policies"),
+    Path("/Library/Application Support/GeminiCli/policies"),
+)
 
 
 class PreflightError(Exception):
@@ -205,6 +222,18 @@ def write_atomic_private(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
+def persist_exact_private(path: Path, content: bytes, classification: str) -> None:
+    if not path.exists():
+        write_private(path, content)
+        return
+    try:
+        existing = path.read_bytes()
+    except OSError as error:
+        raise PreflightError(classification, f"cannot read durable file: {error}") from error
+    if existing != content:
+        raise PreflightError(classification, f"durable file changed: {path.name}")
+
+
 def path_is_within(child: Path, parent: Path) -> bool:
     try:
         child.relative_to(parent)
@@ -283,6 +312,185 @@ def persist_goal(state_dir: Path, goal: Goal) -> str:
     return digest
 
 
+def ensure_owner_controlled_file(path: Path, classification: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise PreflightError(classification, f"cannot inspect {path.name}: {error}") from error
+    if path.is_symlink() or not path.is_file():
+        raise PreflightError(classification, f"{path.name} must be a regular file")
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+        raise PreflightError(classification, f"{path.name} must be owner-controlled and not writable by others")
+
+
+def policy_tool_names(rule: dict[str, object]) -> set[str]:
+    names = rule.get("toolName")
+    if isinstance(names, str):
+        return {names}
+    if isinstance(names, list) and all(isinstance(name, str) for name in names):
+        return set(names)
+    return set()
+
+
+def validate_policy(path: Path, run_dir: Path) -> str:
+    ensure_owner_controlled_file(path, "invalid_policy")
+    try:
+        content = path.read_bytes()
+        parsed = tomllib.loads(content.decode())
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise PreflightError("invalid_policy", f"cannot parse policy TOML: {error}") from error
+    rules = parsed.get("rule")
+    if not isinstance(rules, list) or not rules or not all(isinstance(rule, dict) for rule in rules):
+        raise PreflightError("invalid_policy", "policy must contain [[rule]] tables")
+    deny_priorities = [
+        rule.get("priority", 0) for rule in rules if rule.get("decision") == "deny" and "*" in policy_tool_names(rule)
+    ]
+    if not deny_priorities or not all(isinstance(priority, int) for priority in deny_priorities):
+        raise PreflightError("invalid_policy", "policy requires an integer-priority catch-all deny")
+    deny_priority = max(deny_priorities)
+    narrow_allow = any(
+        rule.get("decision") == "allow"
+        and "*" not in policy_tool_names(rule)
+        and bool(policy_tool_names(rule) or rule.get("mcpName"))
+        and isinstance(rule.get("priority", 0), int)
+        and int(rule.get("priority", 0)) > deny_priority
+        for rule in rules
+    )
+    if not narrow_allow:
+        raise PreflightError("invalid_policy", "policy requires a narrow allow above the catch-all deny")
+    for standard_dir in STANDARD_ADMIN_POLICY_DIRS:
+        try:
+            if standard_dir.is_dir() and any(standard_dir.glob("*.toml")):
+                raise PreflightError(
+                    "policy_conflict",
+                    "a standard admin policy directory would supersede the supplemental policy",
+                )
+        except PermissionError as error:
+            raise PreflightError("policy_conflict", "cannot prove standard admin policy absence") from error
+    write_private(run_dir / "policy.toml", content)
+    return hashlib.sha256(content).hexdigest()
+
+
+def build_system_settings(provider: str) -> bytes:
+    settings = {
+        "admin": {"extensions": {"enabled": False}},
+        "advanced": {"ignoreLocalEnv": True},
+        "general": {"enableAutoUpdate": False},
+        "security": {
+            "disableAlwaysAllow": True,
+            "disableYoloMode": True,
+            "enablePermanentToolApproval": False,
+            "environmentVariableRedaction": {"enabled": True},
+            "folderTrust": {"enabled": True},
+        },
+        "telemetry": {"enabled": False},
+        "tools": {
+            "sandbox": {
+                "command": provider,
+                "enabled": True,
+                "networkAccess": True,
+            },
+        },
+    }
+    return (json.dumps(settings, indent=2, sort_keys=True) + "\n").encode()
+
+
+def prepare_runtime(state_dir: Path, provider: str) -> tuple[dict[str, str], Path]:
+    if shutil.which(provider) is None:
+        raise PreflightError("sandbox_unavailable", f"sandbox provider is unavailable: {provider}")
+    if provider == "runsc" and shutil.which("docker") is None:
+        raise PreflightError("sandbox_unavailable", "runsc requires Docker")
+    gemini_home = state_dir / "gemini-home"
+    tmp_dir = state_dir / "tmp"
+    gemini_home.mkdir(mode=0o700, exist_ok=True)
+    tmp_dir.mkdir(mode=0o700, exist_ok=True)
+    for directory in (gemini_home, tmp_dir):
+        if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
+            raise PreflightError("invalid_path", f"{directory.name} must be owner-only")
+    system_settings = state_dir / "system-settings.json"
+    persist_exact_private(system_settings, build_system_settings(provider), "runtime_mismatch")
+    inherited = os.environ
+    environment = {
+        key: inherited[key]
+        for key in ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TERM", "TZ")
+        if inherited.get(key)
+    }
+    environment.update(
+        {
+            "GEMINI_CLI_HOME": str(gemini_home),
+            "GEMINI_CLI_SYSTEM_SETTINGS_PATH": str(system_settings),
+            "GEMINI_SANDBOX": provider,
+            "SANDBOX_FLAGS": SANDBOX_FLAGS,
+            "TMPDIR": str(tmp_dir),
+        }
+    )
+    return environment, system_settings
+
+
+def remaining_seconds(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise PreflightError("timed_out", "operation deadline expired")
+    return remaining
+
+
+def run_probe(
+    executable: Path,
+    arguments: list[str],
+    cwd: Path,
+    environment: dict[str, str],
+    deadline: float,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> str:
+    try:
+        result = subprocess.run(
+            [str(executable), *arguments],
+            cwd=cwd,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=remaining_seconds(deadline),
+        )
+    except subprocess.TimeoutExpired as error:
+        raise PreflightError("timed_out", f"capability probe timed out: {' '.join(arguments)}") from error
+    except OSError as error:
+        raise PreflightError("capability_probe_failed", f"cannot launch Gemini: {error}") from error
+    write_private(stdout_path, result.stdout)
+    write_private(stderr_path, result.stderr)
+    if result.returncode != 0:
+        raise PreflightError("capability_probe_failed", f"Gemini probe exited {result.returncode}")
+    return result.stdout
+
+
+def probe_capabilities(args: argparse.Namespace, environment: dict[str, str], deadline: float) -> str:
+    ensure_owner_controlled_file(args.gemini, "capability_probe_failed")
+    version = run_probe(
+        args.gemini,
+        ["--version"],
+        args.cwd,
+        environment,
+        deadline,
+        args.run_dir / "gemini-version.stdout",
+        args.run_dir / "gemini-version.stderr",
+    ).strip()
+    help_text = run_probe(
+        args.gemini,
+        ["--help"],
+        args.cwd,
+        environment,
+        deadline,
+        args.run_dir / "gemini-help.stdout",
+        args.run_dir / "gemini-help.stderr",
+    )
+    missing = [flag for flag in REQUIRED_FLAGS if flag not in help_text]
+    if missing:
+        raise PreflightError("capability_mismatch", f"Gemini help lacks required flags: {', '.join(missing)}")
+    if not version:
+        raise PreflightError("capability_mismatch", "Gemini version output is empty")
+    return version
+
+
 def prior_attempt_count(state_dir: Path, current_run: Path) -> int:
     runs = state_dir / "runs"
     count = 0
@@ -333,6 +541,7 @@ def inspect_git(cwd: Path, goal: Goal) -> GitState:
 
 def main() -> int:
     args = parse_args()
+    deadline = time.monotonic() + args.timeout_seconds
     try:
         prepare_run_directory(args.run_dir, args.state_dir, args.cwd)
     except (FileExistsError, OSError, PreflightError) as error:
@@ -359,7 +568,24 @@ def main() -> int:
                 raise PreflightError("attempt_exhausted", "goal attempt budget is exhausted")
             digest = persist_goal(args.state_dir, goal)
             git_state = inspect_git(args.cwd, goal)
-            status.update({"goal_sha256": digest, "git_before": asdict(git_state)})
+            policy_digest = validate_policy(args.policy_file, args.run_dir)
+            environment, system_settings = prepare_runtime(args.state_dir, args.sandbox_provider)
+            version = probe_capabilities(args, environment, deadline)
+            status.update(
+                {
+                    "goal_sha256": digest,
+                    "git_before": asdict(git_state),
+                    "gemini_version": version,
+                    "policy_sha256": policy_digest,
+                    "runtime": {
+                        "environment_names": sorted(environment),
+                        "gemini_home": environment["GEMINI_CLI_HOME"],
+                        "sandbox_provider": args.sandbox_provider,
+                        "system_settings": str(system_settings),
+                        "tmpdir": environment["TMPDIR"],
+                    },
+                }
+            )
             write_atomic_private(
                 args.state_dir / "lease.json",
                 {

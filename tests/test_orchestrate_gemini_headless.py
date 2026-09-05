@@ -35,9 +35,21 @@ def _write_private(path: Path, text: str) -> None:
 
 def _fake_gemini(path: Path) -> Path:
     executable = path / "gemini"
+    log = path / "gemini-invocations.jsonl"
     executable.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys\n"
+        "import json, os, pathlib, sys\n"
+        "record = {\n"
+        "    'argv': sys.argv[1:],\n"
+        "    'gemini_home': os.environ.get('GEMINI_CLI_HOME'),\n"
+        "    'system_settings': os.environ.get('GEMINI_CLI_SYSTEM_SETTINGS_PATH'),\n"
+        "    'tmpdir': os.environ.get('TMPDIR'),\n"
+        "    'sandbox': os.environ.get('GEMINI_SANDBOX'),\n"
+        "    'sandbox_flags': os.environ.get('SANDBOX_FLAGS'),\n"
+        "    'sandbox_mounts': os.environ.get('SANDBOX_MOUNTS'),\n"
+        "}\n"
+        f"with pathlib.Path({str(log)!r}).open('a') as output:\n"
+        "    output.write(json.dumps(record) + '\\n')\n"
         "if '--version' in sys.argv:\n"
         "    print('0.51.0')\n"
         "elif '--help' in sys.argv:\n"
@@ -114,6 +126,7 @@ def _invoke(
     *,
     goal_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
+    provider: str = "docker",
 ) -> subprocess.CompletedProcess[str]:
     run_dir = Path(fixture["state"]) / "runs" / run_name
     command = [
@@ -134,7 +147,7 @@ def _invoke(
         "--gemini",
         str(fixture["gemini"]),
         "--sandbox-provider",
-        "docker",
+        provider,
         "--timeout-seconds",
         "5",
         "--preflight-only",
@@ -241,3 +254,79 @@ def test_preflight_rejects_state_nested_under_the_checkout(tmp_path: Path) -> No
     assert result.returncode != 0
     assert "invalid_path" in result.stderr
     assert not (nested / "runs" / "attempt-001").exists()
+
+
+def test_preflight_builds_an_isolated_gemini_runtime(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    log = tmp_path / "gemini-invocations.jsonl"
+
+    result = _invoke(
+        fixture,
+        "attempt-001",
+        extra_env={
+            "SANDBOX_FLAGS": "--privileged",
+            "SANDBOX_MOUNTS": "/:/host:rw",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    run_dir = Path(fixture["state"]) / "runs" / "attempt-001"
+    assert (run_dir / "gemini-version.stdout").read_text().strip() == "0.51.0"
+    assert "--admin-policy" in (run_dir / "gemini-help.stdout").read_text()
+    settings_path = Path(fixture["state"]) / "system-settings.json"
+    settings = json.loads(settings_path.read_text())
+    assert settings["admin"]["extensions"]["enabled"] is False
+    assert settings["security"]["disableYoloMode"] is True
+    assert settings["security"]["environmentVariableRedaction"]["enabled"] is True
+    assert settings["advanced"]["ignoreLocalEnv"] is True
+    assert settings["tools"]["sandbox"]["command"] == "docker"
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert records
+    assert all(record["gemini_home"] == str(Path(fixture["state"]) / "gemini-home") for record in records)
+    assert all(record["tmpdir"] == str(Path(fixture["state"]) / "tmp") for record in records)
+    assert all(record["sandbox"] == "docker" for record in records)
+    assert all(record["sandbox_flags"] != "--privileged" for record in records)
+    assert all(record["sandbox_mounts"] is None for record in records)
+
+
+def test_preflight_rejects_a_missing_required_gemini_flag(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    gemini = Path(fixture["gemini"])
+    gemini.write_text(gemini.read_text().replace(" --admin-policy", ""))
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "capability_mismatch"
+
+
+def test_preflight_rejects_an_unavailable_sandbox_provider(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _invoke(fixture, "attempt-001", provider="runsc")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "sandbox_unavailable"
+
+
+def test_preflight_rejects_a_policy_without_default_deny(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _write_private(
+        Path(fixture["policy"]),
+        '[[rule]]\ntoolName = "read_file"\ndecision = "allow"\npriority = 100\n',
+    )
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "invalid_policy"
+
+
+def test_preflight_rejects_a_group_writable_policy(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    Path(fixture["policy"]).chmod(0o660)
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "invalid_policy"
