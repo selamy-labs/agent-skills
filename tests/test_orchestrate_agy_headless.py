@@ -417,6 +417,35 @@ def test_run_process_harvests_owned_group_when_process_listing_fails(tmp_path: P
         _kill_known_pids(known_pids)
 
 
+def test_run_process_times_out_cleanly_without_process_listing(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    child_pid_path = tmp_path / "child.pid"
+    known_pids: set[int] = set()
+    script = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen(['/bin/sleep', '60']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "time.sleep(60)"
+    )
+    runner.process_snapshot = lambda: {}
+
+    try:
+        result = runner.run_process(
+            [sys.executable, "-c", script, str(child_pid_path)],
+            tmp_path,
+            tmp_path / "stdout.log",
+            tmp_path / "stderr.log",
+            0.2,
+        )
+        assert result.timed_out is True
+        assert result.process_group_alive_after_harvest is False
+        child_pid = int(child_pid_path.read_text())
+        known_pids.add(child_pid)
+        assert not _pid_is_running(child_pid)
+    finally:
+        _kill_known_pids(known_pids)
+
+
 def test_runner_records_sigint_during_capability_probe_as_interrupted(tmp_path: Path) -> None:
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("bounded task\n")

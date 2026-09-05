@@ -118,7 +118,8 @@ Focused tests use fake AGY executables and assert:
 - rejection of nonzero, malformed, empty, and non-success output;
 - process-group and observed-descendant harvesting after timeout or SIGTERM;
 - callback-failure cleanup, repeated-signal cleanup, and PID-reuse rejection;
-- owned process-group cleanup when process inventory is unavailable;
+- normal-exit and timeout process-group cleanup when process inventory is
+  unavailable, including zombie-only `EPERM` handling;
 - a shared overall deadline across capability probes and dispatch;
 - terminal evidence for process-launch failure;
 - rejection of evidence directories inside the worker cwd;

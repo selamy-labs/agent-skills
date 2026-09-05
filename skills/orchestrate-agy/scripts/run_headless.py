@@ -103,14 +103,14 @@ def process_group_exists(process_group_id: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        return False
     return True
 
 
 def signal_process_group(process_group_id: int, signum: signal.Signals) -> bool:
     try:
         os.killpg(process_group_id, signum)
-    except ProcessLookupError:
+    except (PermissionError, ProcessLookupError):
         return False
     return True
 
@@ -118,7 +118,7 @@ def signal_process_group(process_group_id: int, signum: signal.Signals) -> bool:
 def signal_process(pid: int, signum: signal.Signals) -> bool:
     try:
         os.kill(pid, signum)
-    except ProcessLookupError:
+    except (PermissionError, ProcessLookupError):
         return False
     return True
 
