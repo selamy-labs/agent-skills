@@ -317,8 +317,11 @@ def harvest_process_tree(
 def termination_signal_handlers() -> Iterator[None]:
     handled = (signal.SIGINT, signal.SIGTERM)
     previous = {signum: signal.getsignal(signum) for signum in handled}
+    interrupted = False
 
     def interrupt(signum: int, _frame: object) -> None:
+        nonlocal interrupted
+        interrupted = True
         for handled_signum in handled:
             signal.signal(handled_signum, signal.SIG_IGN)
         raise SupervisorInterrupted(signum)
@@ -328,8 +331,9 @@ def termination_signal_handlers() -> Iterator[None]:
     try:
         yield
     finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+        if not interrupted:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
 
 
 def launch_process(
