@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import signal
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -199,6 +201,14 @@ def _kill_test_process_tree(process: subprocess.Popen[str], known_pids: set[int]
         process.wait(timeout=2)
 
 
+def _kill_known_pids(pids: set[int]) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def _pid_is_running(pid: int) -> bool:
     result = subprocess.run(
         ["ps", "-o", "stat=", "-p", str(pid)],
@@ -209,6 +219,15 @@ def _pid_is_running(pid: int) -> bool:
     )
     state = result.stdout.strip()
     return bool(state) and not state.startswith("Z")
+
+
+def _load_runner_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("orchestrate_agy_run_headless", RUNNER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _status(run_dir: Path) -> dict[str, object]:
@@ -284,39 +303,138 @@ def test_runner_rejects_a_model_missing_from_live_discovery(tmp_path: Path) -> N
 
 def test_runner_harvests_the_process_group_after_wall_timeout(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "child.pid"
-    result, run_dir, _, _ = _run_runner(
-        tmp_path,
-        behavior="timeout",
-        timeout_seconds=1,
-        extra_env={"FAKE_AGY_CHILD_PID": str(child_pid_path)},
-    )
+    known_pids: set[int] = set()
+    try:
+        result, run_dir, _, _ = _run_runner(
+            tmp_path,
+            behavior="timeout",
+            timeout_seconds=1,
+            extra_env={"FAKE_AGY_CHILD_PID": str(child_pid_path)},
+        )
 
-    assert result.returncode == 124
-    status = _status(run_dir)
-    assert status["classification"] == "timed_out"
-    assert status["process_group_alive_after_harvest"] is False
-    deadline = time.monotonic() + 2
-    child_pid = int(child_pid_path.read_text())
-    while time.monotonic() < deadline:
-        if not _pid_is_running(child_pid):
-            break
-        time.sleep(0.05)
-    else:
-        pytest.fail(f"child process {child_pid} survived timeout harvesting")
+        assert result.returncode == 124
+        status = _status(run_dir)
+        assert status["classification"] == "timed_out"
+        assert status["process_group_alive_after_harvest"] is False
+        deadline = time.monotonic() + 2
+        child_pid = int(child_pid_path.read_text())
+        known_pids.add(child_pid)
+        while time.monotonic() < deadline:
+            if not _pid_is_running(child_pid):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail(f"child process {child_pid} survived timeout harvesting")
+    finally:
+        _kill_known_pids(known_pids)
 
 
 def test_runner_harvests_a_descendant_that_starts_a_new_session(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "child.pid"
-    result, run_dir, _, _ = _run_runner(
-        tmp_path,
-        behavior="escape",
-        extra_env={"FAKE_AGY_CHILD_PID": str(child_pid_path)},
-    )
+    known_pids: set[int] = set()
+    try:
+        result, run_dir, _, _ = _run_runner(
+            tmp_path,
+            behavior="escape",
+            extra_env={"FAKE_AGY_CHILD_PID": str(child_pid_path)},
+        )
 
-    assert result.returncode == 0, result.stderr
-    child_pid = int(child_pid_path.read_text())
-    assert child_pid in _status(run_dir)["observed_descendant_pids"]
-    assert not _pid_is_running(child_pid)
+        assert result.returncode == 0, result.stderr
+        child_pid = int(child_pid_path.read_text())
+        known_pids.add(child_pid)
+        assert child_pid in _status(run_dir)["observed_descendant_pids"]
+        assert not _pid_is_running(child_pid)
+    finally:
+        _kill_known_pids(known_pids)
+
+
+def test_run_process_harvests_when_on_start_callback_raises(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    known_pids: set[int] = set()
+
+    def fail_after_start(pid: int, _process_group_id: int) -> None:
+        known_pids.add(pid)
+        raise RuntimeError("injected status-write failure")
+
+    try:
+        with pytest.raises(RuntimeError, match="injected status-write failure"):
+            runner.run_process(
+                ["/bin/sleep", "60"],
+                tmp_path,
+                tmp_path / "stdout.log",
+                tmp_path / "stderr.log",
+                5,
+                on_start=fail_after_start,
+            )
+        assert known_pids
+        assert all(not _pid_is_running(pid) for pid in known_pids)
+    finally:
+        _kill_known_pids(known_pids)
+
+
+def test_process_identity_rejects_a_reused_pid() -> None:
+    runner = _load_runner_module()
+    tracked_processes = {123: "Mon Jan  1 00:00:00 2024"}
+    snapshot = {
+        123: runner.ProcessInfo(
+            parent_pid=1,
+            process_group_id=123,
+            state="S",
+            started_at="Tue Jan  2 00:00:00 2024",
+        )
+    }
+
+    assert runner.live_pids(tracked_processes, snapshot) == set()
+    assert not runner.group_is_alive(123, snapshot, tracked_processes)
+
+
+def test_runner_records_sigint_during_capability_probe_as_interrupted(tmp_path: Path) -> None:
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("bounded task\n")
+    fake_agy = _make_fake_agy(tmp_path)
+    cwd = tmp_path / "worktree"
+    cwd.mkdir()
+    run_dir = tmp_path / "evidence" / "run-1"
+    env = os.environ | {
+        "FAKE_AGY_PROBE_DELAY": "60",
+        "FAKE_AGY_PROMPT": str(tmp_path / "observed-prompt.txt"),
+    }
+    command = [
+        sys.executable,
+        str(RUNNER),
+        "--run-dir",
+        str(run_dir),
+        "--cwd",
+        str(cwd),
+        "--prompt-file",
+        str(prompt),
+        "--agy",
+        str(fake_agy),
+        "--timeout-seconds",
+        "30",
+        "--mode",
+        "plan",
+        "--model",
+        "gemini-test-medium",
+    ]
+    process = subprocess.Popen(command, env=env, start_new_session=True)
+    known_pids: set[int] = set()
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            known_pids.update(_descendant_pids(process.pid))
+            if known_pids:
+                break
+            time.sleep(0.05)
+        assert known_pids, "capability probe did not launch"
+        os.kill(process.pid, signal.SIGINT)
+        assert process.wait(timeout=5) == 128 + signal.SIGINT
+        status = _status(run_dir)
+        assert status["classification"] == "interrupted"
+        assert status["interrupted_signal"] == signal.SIGINT
+        assert all(not _pid_is_running(pid) for pid in known_pids)
+    finally:
+        _kill_test_process_tree(process, known_pids)
 
 
 def test_runner_harvests_workers_and_records_interruption_on_sigterm(tmp_path: Path) -> None:
@@ -365,6 +483,56 @@ def test_runner_harvests_workers_and_records_interruption_on_sigterm(tmp_path: P
         assert status["interrupted_signal"] == signal.SIGTERM
         for pid in known_pids:
             assert not _pid_is_running(pid)
+    finally:
+        _kill_test_process_tree(process, known_pids)
+
+
+def test_runner_ignores_repeated_sigterm_until_worker_cleanup_finishes(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "child.pid"
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("bounded task\n")
+    fake_agy = _make_fake_agy(tmp_path)
+    cwd = tmp_path / "worktree"
+    cwd.mkdir()
+    run_dir = tmp_path / "evidence" / "run-1"
+    env = os.environ | {
+        "FAKE_AGY_BEHAVIOR": "timeout",
+        "FAKE_AGY_CHILD_PID": str(child_pid_path),
+        "FAKE_AGY_PROMPT": str(tmp_path / "observed-prompt.txt"),
+    }
+    command = [
+        sys.executable,
+        str(RUNNER),
+        "--run-dir",
+        str(run_dir),
+        "--cwd",
+        str(cwd),
+        "--prompt-file",
+        str(prompt),
+        "--agy",
+        str(fake_agy),
+        "--timeout-seconds",
+        "30",
+        "--mode",
+        "accept-edits",
+        "--model",
+        "gemini-test-medium",
+    ]
+    process = subprocess.Popen(command, env=env, start_new_session=True)
+    known_pids: set[int] = set()
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not child_pid_path.exists():
+            time.sleep(0.05)
+        assert child_pid_path.exists(), "fake AGY did not launch its child"
+        known_pids.add(int(child_pid_path.read_text()))
+        os.kill(process.pid, signal.SIGTERM)
+        time.sleep(0.01)
+        os.kill(process.pid, signal.SIGTERM)
+        assert process.wait(timeout=5) == 128 + signal.SIGTERM
+        status = _status(run_dir)
+        assert status["classification"] == "interrupted"
+        assert all(not _pid_is_running(pid) for pid in known_pids)
     finally:
         _kill_test_process_tree(process, known_pids)
 

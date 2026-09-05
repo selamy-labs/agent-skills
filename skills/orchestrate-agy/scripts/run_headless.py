@@ -49,6 +49,7 @@ class ProcessInfo:
     parent_pid: int
     process_group_id: int
     state: str
+    started_at: str
 
 
 @dataclass(frozen=True)
@@ -96,16 +97,6 @@ def write_status(path: Path, status: dict[str, object]) -> None:
             pass
 
 
-def process_group_exists(process_group_id: int) -> bool:
-    try:
-        os.killpg(process_group_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def signal_process_group(process_group_id: int, signum: signal.Signals) -> bool:
     try:
         os.killpg(process_group_id, signum)
@@ -128,7 +119,7 @@ def process_snapshot() -> dict[int, ProcessInfo]:
         return {}
     try:
         completed = subprocess.run(
-            [ps, "-axo", "pid=,ppid=,pgid=,stat="],
+            [ps, "-axo", "pid=,ppid=,pgid=,stat=,lstart="],
             check=False,
             capture_output=True,
             text=True,
@@ -139,14 +130,14 @@ def process_snapshot() -> dict[int, ProcessInfo]:
 
     snapshot: dict[int, ProcessInfo] = {}
     for raw_line in completed.stdout.splitlines():
-        fields = raw_line.split()
-        if len(fields) != 4:
+        fields = raw_line.split(maxsplit=4)
+        if len(fields) != 5:
             continue
         try:
             pid, parent_pid, process_group_id = (int(value) for value in fields[:3])
         except ValueError:
             continue
-        snapshot[pid] = ProcessInfo(parent_pid, process_group_id, fields[3])
+        snapshot[pid] = ProcessInfo(parent_pid, process_group_id, fields[3], fields[4])
     return snapshot
 
 
@@ -164,28 +155,53 @@ def descendant_pids(root_pid: int, snapshot: dict[int, ProcessInfo]) -> set[int]
     return descendants
 
 
-def live_pids(pids: set[int], snapshot: dict[int, ProcessInfo]) -> set[int]:
-    return {pid for pid in pids if pid in snapshot and not snapshot[pid].state.startswith("Z")}
+def remember_process_tree(
+    root_pid: int,
+    snapshot: dict[int, ProcessInfo],
+    tracked_processes: dict[int, str],
+) -> None:
+    root_info = snapshot.get(root_pid)
+    if not root_info:
+        return
+    known_root_start = tracked_processes.get(root_pid)
+    if known_root_start and known_root_start != root_info.started_at:
+        return
+    tracked_processes[root_pid] = root_info.started_at
+    for pid in descendant_pids(root_pid, snapshot):
+        tracked_processes[pid] = snapshot[pid].started_at
 
 
-def group_is_alive(process_group_id: int, snapshot: dict[int, ProcessInfo]) -> bool:
-    if snapshot:
-        return any(
-            info.process_group_id == process_group_id and not info.state.startswith("Z") for info in snapshot.values()
-        )
-    return process_group_exists(process_group_id)
+def live_pids(tracked_processes: dict[int, str], snapshot: dict[int, ProcessInfo]) -> set[int]:
+    return {
+        pid
+        for pid, started_at in tracked_processes.items()
+        if pid in snapshot and snapshot[pid].started_at == started_at and not snapshot[pid].state.startswith("Z")
+    }
+
+
+def group_is_alive(
+    process_group_id: int,
+    snapshot: dict[int, ProcessInfo],
+    tracked_processes: dict[int, str],
+) -> bool:
+    return any(
+        pid in snapshot
+        and snapshot[pid].started_at == started_at
+        and snapshot[pid].process_group_id == process_group_id
+        and not snapshot[pid].state.startswith("Z")
+        for pid, started_at in tracked_processes.items()
+    )
 
 
 def harvest_process_tree(
     root_pid: int,
     process_group_id: int,
-    observed_descendants: set[int],
+    tracked_processes: dict[int, str],
 ) -> tuple[bool, bool, list[int]]:
     snapshot = process_snapshot()
-    observed_descendants.update(descendant_pids(root_pid, snapshot))
-    owned_pids = observed_descendants | {root_pid}
-    live_before = live_pids(owned_pids, snapshot)
-    group_alive_before = group_is_alive(process_group_id, snapshot)
+    remember_process_tree(root_pid, snapshot, tracked_processes)
+    live_before = live_pids(tracked_processes, snapshot)
+    group_alive_before = group_is_alive(process_group_id, snapshot, tracked_processes)
     harvested = bool(live_before or group_alive_before)
 
     if group_alive_before:
@@ -196,34 +212,32 @@ def harvest_process_tree(
     deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
     while time.monotonic() < deadline:
         snapshot = process_snapshot()
-        observed_descendants.update(descendant_pids(root_pid, snapshot))
-        owned_pids = observed_descendants | {root_pid}
-        alive = live_pids(owned_pids, snapshot)
-        group_alive = group_is_alive(process_group_id, snapshot)
+        remember_process_tree(root_pid, snapshot, tracked_processes)
+        alive = live_pids(tracked_processes, snapshot)
+        group_alive = group_is_alive(process_group_id, snapshot, tracked_processes)
         if not alive and not group_alive:
             return harvested, False, []
         time.sleep(POLL_INTERVAL_SECONDS)
 
     snapshot = process_snapshot()
-    observed_descendants.update(descendant_pids(root_pid, snapshot))
-    owned_pids = observed_descendants | {root_pid}
-    if group_is_alive(process_group_id, snapshot):
+    remember_process_tree(root_pid, snapshot, tracked_processes)
+    if group_is_alive(process_group_id, snapshot, tracked_processes):
         signal_process_group(process_group_id, signal.SIGKILL)
-    for pid in live_pids(owned_pids, snapshot):
+    for pid in live_pids(tracked_processes, snapshot):
         signal_process(pid, signal.SIGKILL)
 
     deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
     while time.monotonic() < deadline:
         snapshot = process_snapshot()
-        alive = live_pids(owned_pids, snapshot)
-        group_alive = group_is_alive(process_group_id, snapshot)
+        alive = live_pids(tracked_processes, snapshot)
+        group_alive = group_is_alive(process_group_id, snapshot, tracked_processes)
         if not alive and not group_alive:
             return harvested, False, []
         time.sleep(POLL_INTERVAL_SECONDS)
 
     snapshot = process_snapshot()
-    alive = sorted(live_pids(owned_pids, snapshot))
-    return harvested, group_is_alive(process_group_id, snapshot), alive
+    alive = sorted(live_pids(tracked_processes, snapshot))
+    return harvested, group_is_alive(process_group_id, snapshot, tracked_processes), alive
 
 
 @contextmanager
@@ -232,6 +246,8 @@ def termination_signal_handlers() -> Iterator[None]:
     previous = {signum: signal.getsignal(signum) for signum in handled}
 
     def interrupt(signum: int, _frame: object) -> None:
+        for handled_signum in handled:
+            signal.signal(handled_signum, signal.SIG_IGN)
         raise SupervisorInterrupted(signum)
 
     for signum in handled:
@@ -267,13 +283,13 @@ def launch_process(
 def monitor_process(
     process: subprocess.Popen[bytes],
     timeout_seconds: float,
-    observed_descendants: set[int],
+    tracked_processes: dict[int, str],
 ) -> tuple[int, bool, int | None]:
     deadline = time.monotonic() + timeout_seconds
     try:
         while True:
             snapshot = process_snapshot()
-            observed_descendants.update(descendant_pids(process.pid, snapshot))
+            remember_process_tree(process.pid, snapshot, tracked_processes)
             returncode = process.poll()
             if returncode is not None:
                 return returncode, False, None
@@ -308,7 +324,7 @@ def run_process(
     stdin_path: Path | None = None,
     on_start: Callable[[int, int], None] | None = None,
 ) -> ProcessResult:
-    observed_descendants: set[int] = set()
+    tracked_processes: dict[int, str] = {}
 
     with open_private(stdout_path, "wb") as stdout, open_private(stderr_path, "wb") as stderr:
         stdin = stdin_path.open("rb") if stdin_path else open(os.devnull, "rb")
@@ -316,19 +332,19 @@ def run_process(
             process, launch_error = launch_process(command, cwd, stdin, stdout, stderr)
             if not process:
                 return launch_error_result(launch_error or "unknown launch error")
-            if on_start:
-                on_start(process.pid, process.pid)
             try:
+                if on_start:
+                    on_start(process.pid, process.pid)
                 returncode, timed_out, interrupted_signal = monitor_process(
                     process,
                     timeout_seconds,
-                    observed_descendants,
+                    tracked_processes,
                 )
             finally:
                 survivors_harvested, group_alive, alive_descendants = harvest_process_tree(
                     process.pid,
                     process.pid,
-                    observed_descendants,
+                    tracked_processes,
                 )
                 try:
                     returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
@@ -344,7 +360,7 @@ def run_process(
         timed_out=timed_out,
         survivors_harvested=survivors_harvested,
         process_group_alive_after_harvest=group_alive,
-        observed_descendant_pids=sorted(observed_descendants),
+        observed_descendant_pids=sorted(pid for pid in tracked_processes if pid != process.pid),
         descendants_alive_after_harvest=alive_descendants,
         interrupted_signal=interrupted_signal,
         launch_error=None,
@@ -531,7 +547,10 @@ def run_capability_probes(
         )
         if failed:
             overall_timeout = result.timed_out and time.monotonic() >= operation_deadline
-            classification = "timed_out" if overall_timeout else "capability_probe_failed"
+            if result.interrupted_signal:
+                classification = "interrupted"
+            else:
+                classification = "timed_out" if overall_timeout else "capability_probe_failed"
             status.update(
                 state="finished",
                 classification=classification,

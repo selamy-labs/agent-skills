@@ -72,7 +72,7 @@ scripts/run_headless.py \
   --effort high
 ```
 
-The runner writes owner-only prompt, stdin event, command, version, help, model, stdout, stderr, AGY log, and atomic `status.json` artifacts. Inspect `prompt.txt`, `input.ndjson`, and `command.json` together when prompt transport matters. While running, status records the PID and process group. One operation deadline covers the probes and AGY turn; AGY receives the remaining budget, backed by a short wall grace for cleanup. On normal exit, timeout, or SIGINT/SIGTERM, the runner terminates the process group and every descendant PID it observed, including a child that starts a new session, then records any known survivor.
+The runner writes owner-only prompt, stdin event, command, version, help, model, stdout, stderr, AGY log, and atomic `status.json` artifacts. Inspect `prompt.txt`, `input.ndjson`, and `command.json` together when prompt transport matters. While running, status records the PID and process group. One operation deadline covers the probes and AGY turn; AGY receives the remaining budget, backed by a short wall grace for cleanup. On normal exit, timeout, or SIGINT/SIGTERM, the runner terminates the process group and every descendant process identity (PID plus start time) it observed, including a child that starts a new session, then records any known survivor. Repeated termination signals are ignored until this cleanup finishes.
 
 Exit `0` means AGY returned exactly one streaming JSON `result` event with a `SUCCESS` envelope and non-empty response, with no surviving process group or observed descendant. Treat every other classification as undelivered:
 
