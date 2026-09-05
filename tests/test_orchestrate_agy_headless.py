@@ -882,6 +882,23 @@ def test_runner_records_sigint_during_capability_probe_as_interrupted(tmp_path: 
         _kill_test_process_tree(process, known_pids)
 
 
+def test_signal_handlers_keep_repeated_termination_ignored_after_interrupt() -> None:
+    runner = _load_runner_module()
+    handled = (signal.SIGINT, signal.SIGTERM)
+    previous = {signum: signal.getsignal(signum) for signum in handled}
+    try:
+        with runner.termination_signal_handlers():
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler)
+            with pytest.raises(runner.SupervisorInterrupted):
+                handler(signal.SIGTERM, None)
+
+        assert all(signal.getsignal(signum) == signal.SIG_IGN for signum in handled)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
 def test_runner_harvests_workers_and_records_interruption_on_sigterm(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "child.pid"
     prompt = tmp_path / "prompt.txt"
