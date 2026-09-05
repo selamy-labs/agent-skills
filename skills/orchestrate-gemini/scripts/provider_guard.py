@@ -48,10 +48,17 @@ def private_config() -> tuple[Path, Path, Path, str, str, list[Path], bool]:
 
 
 def mount_source(specification: str) -> Path:
-    source = specification.split(":", 1)[0]
-    if not source.startswith("/"):
+    fields = specification.split(":")
+    if len(fields) not in {1, 2, 3}:
+        fail("malformed bind mount")
+    source = fields[0]
+    target = fields[1] if len(fields) >= 2 and fields[1] else source
+    if not source.startswith("/") or not target.startswith("/"):
         fail("relative and named mounts are forbidden")
-    return Path(source).resolve()
+    resolved = Path(source).resolve()
+    if Path(target) != resolved:
+        fail("bind-mount source and target must be identical absolute paths")
+    return resolved
 
 
 def force_read_only(specification: str) -> str:

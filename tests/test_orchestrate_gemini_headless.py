@@ -400,6 +400,18 @@ def test_provider_guard_rewrites_upstream_runtime_boundaries(
 
     with pytest.raises(SystemExit):
         guard.guarded_run(["run", "--network", "gemini-cli-sandbox", "--env", "GEMINI_API_KEY=secret", image, "gemini"])
+    with pytest.raises(SystemExit):
+        guard.guarded_run(
+            [
+                "run",
+                "--network",
+                "gemini-cli-sandbox",
+                "--volume",
+                f"{allowed}:/etc/runtime-control:rw",
+                image,
+                "gemini",
+            ]
+        )
     secret_safe = guard.guarded_run(
         [
             "run",
