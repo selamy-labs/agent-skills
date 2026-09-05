@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   echo "usage: $0 SESSION FOLLOWUP_FILE" >&2
   exit 2
+}
+
+owner_only() {
+  local mode
+  mode=$(stat -f '%Lp' -- "$1" 2>/dev/null || stat -c '%a' -- "$1")
+  (( (8#$mode & 077) == 0 ))
 }
 
 (($# == 2)) || usage
@@ -12,6 +19,8 @@ followup_file=$2
 [[ $session =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid tmux session name" >&2; exit 2; }
 [[ $followup_file == /* ]] || { echo "follow-up path must be absolute: $followup_file" >&2; exit 2; }
 [[ -r $followup_file ]] || { echo "follow-up is not readable: $followup_file" >&2; exit 2; }
+[[ -O $followup_file ]] || { echo "follow-up must be owned by the current user" >&2; exit 2; }
+owner_only "$followup_file" || { echo "follow-up must be owner-only" >&2; exit 2; }
 tmux has-session -t "=$session" 2>/dev/null || { echo "tmux session does not exist: $session" >&2; exit 2; }
 pane_id=$(tmux list-panes -t "=$session" -F '#{pane_id}' | head -n 1)
 [[ -n $pane_id ]] || { echo "tmux session has no pane: $session" >&2; exit 2; }
@@ -24,16 +33,22 @@ end_marker="[dispatch-end:$dispatch_id]"
 buffer="orchestrate-$dispatch_id"
 evidence_dir="${TMPDIR:-/tmp}/orchestrate-$session-$dispatch_id"
 mkdir -p "$evidence_dir"
+chmod 700 "$evidence_dir"
 pre_capture="$evidence_dir/pre.txt"
 tmux capture-pane -p -J -t "$pane_id" -S - >"$pre_capture"
 grep -Fq "$end_marker" "$pre_capture" && { echo "dispatch marker collision" >&2; exit 1; }
 
-tmux send-keys -t "$pane_id" -l "$start_marker "
+directive="$evidence_dir/directive.txt"
 followup=$(<"$followup_file")
-followup="Acknowledge this exact turn first by emitting $accepted_marker. $followup"
-tmux set-buffer -b "$buffer" -- "$followup"
+{
+  printf '%s Acknowledge this exact turn first by emitting %s. ' "$start_marker" "$accepted_marker"
+  printf '%s' "$followup"
+  printf ' %s' "$end_marker"
+} >"$directive"
+chmod 600 "$directive"
+tmux load-buffer -b "$buffer" "$directive"
 tmux paste-buffer -b "$buffer" -t "$pane_id" -d
-tmux send-keys -t "$pane_id" -l " $end_marker"
+rm -f -- "$directive"
 tmux send-keys -t "$pane_id" Enter
 
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)

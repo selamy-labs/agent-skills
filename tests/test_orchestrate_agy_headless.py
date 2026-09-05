@@ -810,12 +810,15 @@ def test_run_process_harvests_tracked_child_across_group_probe_race(
         _kill_known_pids(known_pids)
 
 
-def test_slow_process_inventory_cannot_exceed_the_wall_deadline(tmp_path: Path) -> None:
+def test_slow_process_inventory_cannot_exceed_the_wall_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runner = _load_runner_module()
     slow_ps = tmp_path / "slow-ps.py"
     slow_ps.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n")
     slow_ps.chmod(0o755)
-    runner.shutil.which = lambda _name: str(slow_ps)
+    monkeypatch.setattr(runner.shutil, "which", lambda _name: str(slow_ps))
     runner.WALL_TIMEOUT_GRACE_SECONDS = 0.5
     runner.TERMINATION_GRACE_SECONDS = 0.2
 

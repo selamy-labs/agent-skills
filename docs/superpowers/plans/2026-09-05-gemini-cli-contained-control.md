@@ -4,7 +4,7 @@
 
 **Goal:** Add a self-contained `orchestrate-gemini` skill that runs bounded Gemini CLI repository work only inside a durable, single-writer, OS-sandboxed lane and accepts completion only from verified repository state.
 
-**Architecture:** A Python 3.11 standard-library runner validates an immutable JSON goal, acquires a kernel-backed lane lease, proves a private Git checkout and live Gemini/sandbox/policy capabilities, and launches one staged-file-fed stream-JSON turn in a fresh process group. Owner-only evidence, conservative worker harvesting, Git path-scope checks, and shell-free verification commands determine the terminal result; the sibling skill retains the catalog's established tmux dispatch helpers for interactive setup and recovery.
+**Architecture:** A Python 3.11 standard-library runner validates an immutable JSON goal, acquires kernel-backed lane and v0.51 execution leases, proves a private Git checkout plus a digest-pinned sandbox, and launches one staged-file-fed stream-JSON turn. A provider guard, allowlisting API proxy, owner-only evidence, process/container reconciliation, full-filesystem scope checks, and networkless container verification determine the terminal result. The sibling skill retains hardened tmux helpers for interactive setup only.
 
 **Tech Stack:** Python 3.11 standard library, pytest, POSIX process control, Git CLI, Docker/Podman/gVisor capability probes, Bash tmux helpers, Markdown Agent Skill metadata.
 
@@ -12,14 +12,14 @@
 
 - Add `orchestrate-gemini`; do not repurpose `orchestrate-agy` or translate AGY flags.
 - Keep every runtime dependency inside the skill so single-skill installs remain usable.
-- Require immutable durable goals, exact base SHAs, normalized allowed paths, bounded shell-free verification commands, non-empty stop conditions, attempt limits, and explicit billing policy.
+- Require immutable durable goals, exact base SHAs, existing normalized allowed paths, bounded shell-free verification commands, non-empty stop conditions, attempt limits, explicit billing policy, and a digest-pinned image.
 - Require a private Git common directory inside the checkout; reject linked worktrees or shared Git metadata.
 - Require owner-only state/run directories outside the checkout and one non-blocking kernel lease per lane.
 - Require explicit Docker, Podman, or gVisor sandboxing, isolated Gemini home/system settings/temp, and a reviewed default-deny supplemental admin policy.
-- Keep prompt content out of argv by passing only an owner-only staged-file reference; never record credential values.
+- Keep prompt content out of argv by passing only an owner-only staged-file reference. For live paid API-key work, replace a non-secret outer placeholder with an owner-only runtime env file in the provider guard; never record credential values.
 - Reject YOLO, `--skip-trust`, raw output, inherited sandbox mounts/flags, standard admin-policy conflicts, and paid-capable auth without two-part authorization.
 - Preserve conservative process-group and observed-descendant cleanup on success, error, timeout, and interruption.
-- Exit zero only for valid non-empty stream output, clean worker harvest, in-scope Git state, and passing immutable verification commands.
+- Exit zero only for strict stream output, clean process/container harvest, in-scope Git and full-filesystem state, immutable Git metadata, exclusive requested-model statistics, and passing networkless container verification.
 - Validate the real installation without paid generation or shared-checkout mutation; deterministic tests remain the merge gate.
 
 ---
@@ -31,7 +31,7 @@
 - Create: `skills/orchestrate-gemini/scripts/run_headless.py`
 
 **Interfaces:**
-- Consumes: `run_headless.py --run-dir PATH --state-dir PATH --cwd PATH --goal-file PATH --prompt-file PATH --policy-file PATH --gemini PATH --sandbox-provider {docker,podman,runsc} --timeout-seconds INT --model MODEL --approval-mode {plan,default,auto_edit} [--preflight-only] [--resume-from PATH] [--validation-fake-responses PATH]`
+- Consumes: `run_headless.py --run-dir PATH --state-dir PATH --cwd PATH --goal-file PATH --prompt-file PATH --policy-file PATH --gemini PATH --sandbox-provider {docker,podman,runsc} --timeout-seconds INT --model MODEL --approval-mode {plan,default,auto_edit} [--credential-env-file PATH] [--preflight-only] [--resume-from PATH] [--validation-fake-responses PATH]`
 - Produces: validated `Goal`, a stable `goal.json`/`goal.sha256`, exclusive `lease.lock`, atomic `lease.json`, and exact Git preflight evidence.
 
 - [ ] **Step 1: Write the manifest validation tests**
@@ -135,9 +135,11 @@
   rule plus at least one narrower higher-priority `allow` rule. Reject symlinks,
   group/other-writable files, missing deny/allow rules, and a populated standard
   admin policy directory that would supersede `--admin-policy`. Assert
-  `gemini-api-key`, `vertex-ai`, and `gateway` goals are blocked unless both
-  `allow_paid_generation` and
-  `ORCHESTRATE_GEMINI_PAID_GENERATION_ACK=authorized` are present;
+  live execution is restricted to `gemini-api-key`, supplied through an
+  owner-only env file. It is blocked unless both `allow_paid_generation` and
+  `ORCHESTRATE_GEMINI_PAID_GENERATION_ACK=authorized` are present. Consumer
+  OAuth, Vertex AI, and gateway goals fail closed because this v0.51 workflow
+  does not prove those routes;
   `--preflight-only` never needs this acknowledgement because it cannot issue a
   model request.
 
@@ -189,8 +191,8 @@
   Port the relevant AGY regression classes without weakening them: timeout child
   cleanup, SIGINT/SIGTERM cleanup, repeated termination signals, a child that
   calls `setsid()`, PID start-time reuse, unavailable/partial process inventory,
-  unknown group state, launch callback failure, and one absolute deadline for
-  probes, turn, verification, and cleanup. Every case asserts terminal evidence
+  unknown group state, launch callback failure, one absolute operation deadline,
+  and a fixed cleanup grace. Every case asserts terminal evidence
   and no known survivor.
 
 - [ ] **Step 4: Implement bounded execution and conservative harvesting**
@@ -309,8 +311,8 @@
 
 - [ ] **Step 3: Exercise sandbox launch with Gemini's fake-response source**
 
-  In the disposable lane only, provide a non-secret placeholder API key and a
-  reviewed `--fake-responses` fixture using Gemini 0.51.0's documented test
+  In the disposable lane only, provide a reviewed `--fake-responses` fixture
+  using Gemini 0.51.0's documented test
   format. Invoke the runner's validation-only mode and require
   `classification=validation_succeeded`, `validation_mode=true`, a retained
   fixture digest, valid init/message/result events, no worker/container survivor,

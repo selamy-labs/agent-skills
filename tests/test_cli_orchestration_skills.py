@@ -56,12 +56,15 @@ def _wait_for_pane_text(session: str, expected: str, timeout: float = 4) -> None
 def test_launcher_preserves_atomic_shell_sensitive_multiline_prompt(tmp_path: Path, tool: str) -> None:
     prompt = tmp_path / "prompt.txt"
     prompt.write_text('First $HOME $(not-executed) "quotes"\nSecond `backticks`; apostrophe\'s value\n')
+    prompt.chmod(0o600)
     output = tmp_path / "argv.json"
     fake_cli = tmp_path / "fake-cli.py"
     fake_cli.write_text(
         "#!/usr/bin/env python3\n"
         "import json, pathlib, sys, time\n"
-        "pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))\n"
+        "args = sys.argv[2:]\n"
+        "expanded = pathlib.Path(args[-1][1:]).read_text() if args[-1].startswith('@') else args[-1]\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({'argv': args, 'expanded': expanded}))\n"
         "time.sleep(3)\n"
     )
     fake_cli.chmod(0o755)
@@ -84,10 +87,14 @@ def test_launcher_preserves_atomic_shell_sensitive_multiline_prompt(tmp_path: Pa
         )
         dispatch_id = re.search(r"^dispatch_id=(.+)$", result.stdout, re.MULTILINE).group(1)
         _wait_for(output)
-        argv = json.loads(output.read_text())
+        record = json.loads(output.read_text())
+        argv = record["argv"]
         if tool == "agy":
             assert "--effort" not in argv
-        submitted = argv[-1]
+        submitted = record["expanded"]
+        if tool == "gemini":
+            assert argv[-1].startswith("@")
+            assert prompt.read_text().rstrip() not in argv
         assert submitted == (
             f"[dispatch:{dispatch_id}]\n"
             f"Acknowledge this exact turn first by emitting [dispatch-accepted:{dispatch_id}].\n"
@@ -102,6 +109,7 @@ def test_launcher_preserves_atomic_shell_sensitive_multiline_prompt(tmp_path: Pa
 def test_launcher_rejects_an_existing_session(tmp_path: Path, tool: str) -> None:
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("bounded task\n")
+    prompt.chmod(0o600)
     session = f"test-existing-{tool}-{uuid.uuid4().hex[:8]}"
     subprocess.run([TMUX, "new-session", "-d", "-s", session, "sleep 10"], check=True)
     try:
@@ -139,6 +147,7 @@ def test_followup_retries_enter_and_requires_fresh_post_marker_activity(tmp_path
     fake_tui.chmod(0o755)
     followup = tmp_path / "followup.txt"
     followup.write_text("Do the next bounded task.\n")
+    followup.chmod(0o600)
     session = f"test-enter-{tool}-{uuid.uuid4().hex[:8]}"
     command = f"exec {shlex.quote(str(fake_tui))}"
     subprocess.run(
@@ -191,6 +200,7 @@ def test_accepted_active_followup_without_clean_composer_never_gets_second_enter
     fake_tui.chmod(0o755)
     followup = tmp_path / "followup.txt"
     followup.write_text("Continue the accepted task.\n")
+    followup.chmod(0o600)
     session = f"test-no-second-{tool}-{uuid.uuid4().hex[:8]}"
     command = f"exec {shlex.quote(str(fake_tui))} {shlex.quote(str(outcome))}"
     subprocess.run([TMUX, "new-session", "-d", "-s", session, "-c", str(tmp_path), command], check=True)

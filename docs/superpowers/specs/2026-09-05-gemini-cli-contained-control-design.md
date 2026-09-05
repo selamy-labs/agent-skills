@@ -37,6 +37,13 @@ The versioned Gemini 0.51.0 sources establish several additional constraints:
 - Gemini's native `--worktree` support is experimental and shares Git metadata.
   A worker that can write shared Git metadata can still affect sibling lanes,
   so native worktree creation is not a sufficient containment boundary.
+- Since June 18, 2026, Gemini CLI no longer serves free, Google AI Pro, or
+  Google AI Ultra individual accounts. Enterprise licenses and paid API-key
+  access remain supported. This workflow cannot treat personal OAuth as live.
+- In 0.51.0 the entire CLI enters the container. A network-disabled container
+  cannot contact the model, while unrestricted egress would let tools bypass
+  containment. Live runs require an allowlisting proxy on Gemini's internal
+  sandbox network.
 
 Primary sources:
 
@@ -46,6 +53,7 @@ Primary sources:
 - https://github.com/google-gemini/gemini-cli/blob/v0.51.0/docs/reference/policy-engine.md
 - https://github.com/google-gemini/gemini-cli/blob/v0.51.0/docs/reference/configuration.md
 - https://github.com/google-gemini/gemini-cli/blob/v0.51.0/docs/cli/git-worktrees.md
+- https://github.com/google-gemini/gemini-cli/discussions/28017
 
 ## Decision
 
@@ -78,8 +86,9 @@ Every headless lane requires an immutable JSON goal file with this shape:
   ],
   "stop_conditions": ["scope would expand", "credentials are unavailable"],
   "max_attempts": 3,
-  "auth_type": "oauth-personal",
-  "allow_paid_generation": false
+  "auth_type": "gemini-api-key",
+  "allow_paid_generation": false,
+  "sandbox_image": "registry.example/sandbox@sha256:64-lowercase-hex-digits"
 }
 ```
 
@@ -87,7 +96,9 @@ Paths are repository-relative, normalized prefixes without `..`, absolute
 components, or shell syntax. Verification commands are non-empty argv arrays
 executed without a shell and have positive individual deadlines. The objective,
 stop conditions, exact base, allowed paths, verification commands, attempt
-budget, and billing policy are requirements, not optional annotations.
+budget, billing policy, and digest-pinned sandbox image are requirements, not
+optional annotations. Allowed paths must already exist so the runtime can mount
+only those paths writable over a read-only checkout root.
 
 On the first attempt, the runner copies the goal to the lane state directory
 with mode `0600` and records its SHA-256 digest. Later attempts must present the
@@ -118,11 +129,13 @@ Before launch, the runner verifies:
 5. the supplemental policy is a regular owner-controlled file and no standard
    admin policy directory would cause Gemini to ignore it.
 
-The worker receives an isolated Gemini home, system-settings path, and temp
-directory below the lane state directory. Network access is disabled. The runner writes system overrides
-that disable auto-update, YOLO, permanent approvals, and extension loading;
-enable environment-variable redaction and folder trust; ignore project `.env`
-files; and require the selected sandbox provider. The private temp directory
+The worker receives an isolated `HOME`, Gemini home, system-settings path, and
+temp directory below the lane state directory. Validation uses no network;
+live execution uses only the internal proxy network. The
+runner trusts only the already verified checkout and writes system overrides
+that disable auto-update, YOLO, permanent approvals, extension loading, MCP
+servers, skills, and hooks; enable environment-variable redaction and folder
+trust; ignore project `.env` files; and require the selected sandbox provider. The private temp directory
 prevents Gemini's container sandbox from mounting a shared host temp tree.
 
 Gemini 0.51.0 reads non-TTY stdin in the outer process and injects that content
@@ -140,16 +153,26 @@ Gemini's documented `-e none` selector, passes only the staged prompt reference,
 requests `stream-json`, uses a non-YOLO approval mode, and passes the reviewed
 policy as a supplemental admin policy. The policy must default-deny all tools
 and narrowly allow only the goal's required operations.
-OS isolation protects the checkout boundary even if a policy or model decision
-is wrong; policy remains the least-privilege tool boundary inside that checkout.
 
-Authentication is pre-provisioned in the lane-specific Gemini home or supplied
-through an explicitly allowlisted environment variable name. The runner never
-copies credential values into evidence. An account, IDE, or adjacent CLI's
-credential state is never assumed to be a supported Gemini auth route. The
-supervisor must prove the intended identity and quota owner before a generated
-turn. `--preflight-only` performs every non-generating check and writes evidence
-without contacting a model.
+An owner-only provider guard removes the upstream host-gateway mapping, binds
+the proxy readiness port to loopback, labels every container, rewrites the
+checkout root and Git metadata read-only, and remounts only goal paths writable.
+It attests that Gemini's fixed worker network is internal, that the fixed proxy
+network is external, and rejects unexpected network creates, connections, or
+container attachments. This prevents a pre-existing network with the right
+name from silently restoring worker egress.
+OS isolation protects the checkout boundary even if policy or model judgment is
+wrong; policy remains the least-privilege tool boundary inside that checkout.
+
+Live authentication is restricted to a paid Gemini API key because consumer
+OAuth service is discontinued and other enterprise routes are not proven by this v0.51
+runner. The key arrives in one owner-only env file. Gemini's outer process gets
+only a placeholder; the provider guard replaces it with `--env-file`, keeping
+the real key out of process argv and evidence. Its lane-local runtime copy is
+removed after container reconciliation on every terminal path. The bundled CONNECT proxy permits
+only `generativelanguage.googleapis.com:443`. The supervisor must still prove
+quota ownership and explicit paid-generation authorization. `--preflight-only`
+performs every non-generating check without contacting a model.
 
 ## Execution, evidence, and acceptance
 
@@ -158,12 +181,14 @@ command metadata, version/help probes, stdout, stderr, Git before/after state,
 verification outputs, and status are owner-only. Command metadata records argv
 and passed environment-variable names, never secret values. Status is replaced
 atomically and includes goal digest, attempt, lease identity, PID/process group,
-heartbeat and last-output time, requested and resolved model, session ID,
+heartbeat and last-output time, requested/reported model, result model statistics, session ID,
 classification, Git identities, changed paths, verification results, and
 survivor state.
 
-One absolute attempt deadline covers probes, Gemini, verification, and cleanup.
-The worker runs in a fresh process group. The runner preserves the AGY runner's
+One absolute attempt deadline covers probes, Gemini, Git inspection, and
+verification. A fixed short cleanup grace remains available after that deadline
+so timeout cannot prevent process harvesting. Probes, the worker, and verification
+commands all run in fresh process groups. The runner preserves the AGY runner's
 conservative process-group and observed-descendant harvesting semantics,
 including start-time identity checks, TERM/KILL escalation, repeated-signal
 handling, incomplete-inventory uncertainty, and no success with a known or
@@ -176,9 +201,10 @@ Success requires all of the following:
   stream error;
 - no process-group or observed-descendant survivor;
 - post-run `HEAD` descended from the exact base;
-- every committed, staged, unstaged, and untracked changed path within an
-  allowed path prefix;
-- every immutable verification command passing against the resulting checkout.
+- every Git and filesystem change, including ignored paths, within an allowed
+  path prefix and no Git-control metadata change;
+- every immutable verification command passing inside a networkless,
+  digest-pinned verification container with the checkout read-only.
 
 Exit zero means those conditions all hold. Capability mismatch, locked lease,
 goal mismatch, attempt exhaustion, billing-policy violation, sandbox/policy
@@ -189,11 +215,12 @@ nonzero classifications. A worker narrative is never completion evidence.
 ## Restart resilience
 
 Each attempt gets a new run directory but reuses the lane state directory and
-immutable goal. The stream `init` session ID is recorded. A later invocation may
-resume only when the prior status is terminal, the kernel lease is available,
-the goal digest and checkout identity still match, no prior worker survives,
-and the attempt budget remains. Resume is explicit; `latest` is forbidden
-because it can select another lane's session.
+immutable goal. Before dispatch, a replacement reconciles a stale PID/process
+group by start-time identity and removes runtime containers by lane/UID labels.
+Gemini 0.51's fixed proxy name requires a user-global execution lock. A later
+invocation may resume only a prior `succeeded` delivery whose complete execution
+request digest and checkout identity match and whose worker is absent. Resume
+is explicit; validation, failure, and `latest` are forbidden.
 
 ## Verification strategy
 
@@ -211,9 +238,9 @@ container provider. A separate validation-only mode may supply Gemini's document
 `--fake-responses` fixture to the real binary, exercise sandbox launch, staged
 prompt expansion, stream output, and cleanup without contacting a model, and finish
 with `validation_succeeded` rather than the operational `succeeded`
-classification. The fake fixture and validation marker are retained in
+classification. The fake fixture, its digest, and validation marker are retained in
 evidence so they cannot be mistaken for delegated delivery. A generated live
-turn is supplemental and must not run unless the intended non-paid or
-explicitly funded quota route is proven. Merge readiness depends on
+turn is supplemental and must not run unless an explicitly funded quota route
+is proven. Merge readiness depends on
 deterministic tests and non-generating real-installation evidence, not external
 model availability.

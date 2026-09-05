@@ -19,6 +19,7 @@
     "The intended identity, quota route, or sandbox cannot be proven."
   ],
   "max_attempts": 3,
-  "auth_type": "oauth-personal",
-  "allow_paid_generation": false
+  "auth_type": "gemini-api-key",
+  "allow_paid_generation": false,
+  "sandbox_image": "registry.example/gemini-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 }

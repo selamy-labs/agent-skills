@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   echo "usage: $0 SESSION CWD PROMPT_FILE GEMINI [ARG ...]" >&2
   exit 2
+}
+
+owner_only() {
+  local mode
+  mode=$(stat -f '%Lp' -- "$1" 2>/dev/null || stat -c '%a' -- "$1")
+  (( (8#$mode & 077) == 0 ))
 }
 
 if [[ ${1:-} == __run ]]; then
@@ -13,9 +20,9 @@ if [[ ${1:-} == __run ]]; then
   cli=$2
   dispatch_id=$3
   shift 3
-  prompt=$(<"$prompt_file")
-  prompt="[dispatch:$dispatch_id]"$'\n'"Acknowledge this exact turn first by emitting [dispatch-accepted:$dispatch_id]."$'\n'"$prompt"$'\n'"[dispatch-end:$dispatch_id]"
-  exec "$cli" "$@" --prompt-interactive "$prompt"
+  trap 'rm -f -- "$prompt_file"' EXIT HUP INT TERM
+  "$cli" "$@" --prompt-interactive "@$prompt_file"
+  exit $?
 fi
 
 (($# >= 4)) || usage
@@ -31,6 +38,8 @@ shift 4
 [[ $cli == /* ]] || { echo "CLI path must be absolute: $cli" >&2; exit 2; }
 [[ -d $cwd ]] || { echo "cwd is not a directory: $cwd" >&2; exit 2; }
 [[ -r $prompt_file ]] || { echo "prompt is not readable: $prompt_file" >&2; exit 2; }
+[[ -O $prompt_file ]] || { echo "prompt must be owned by the current user" >&2; exit 2; }
+owner_only "$prompt_file" || { echo "prompt must be owner-only" >&2; exit 2; }
 [[ -x $cli ]] || { echo "CLI is not executable: $cli" >&2; exit 2; }
 tmux has-session -t "=$session" 2>/dev/null && { echo "tmux session already exists: $session" >&2; exit 2; }
 
@@ -39,9 +48,19 @@ runner="$script_dir/$(basename -- "$0")"
 dispatch_id="gemini-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
 evidence_dir="${TMPDIR:-/tmp}/orchestrate-$session-$dispatch_id"
 mkdir -p "$evidence_dir"
+chmod 700 "$evidence_dir"
 : >"$evidence_dir/pre.txt"
+staged_prompt="$evidence_dir/prompt.txt"
+prompt=$(<"$prompt_file")
+{
+  printf '[dispatch:%s]\n' "$dispatch_id"
+  printf 'Acknowledge this exact turn first by emitting [dispatch-accepted:%s].\n' "$dispatch_id"
+  printf '%s\n' "$prompt"
+  printf '[dispatch-end:%s]' "$dispatch_id"
+} >"$staged_prompt"
+chmod 600 "$staged_prompt"
 command_string=
-for arg in "$runner" __run "$prompt_file" "$cli" "$dispatch_id" "$@"; do
+for arg in "$runner" __run "$staged_prompt" "$cli" "$dispatch_id" "$@"; do
   printf -v quoted '%q' "$arg"
   command_string+="${command_string:+ }$quoted"
 done
