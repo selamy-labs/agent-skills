@@ -303,7 +303,12 @@ def prepare_command(
             print(f"AGY capability probe failed: {name}; evidence: {args.run_dir}", file=sys.stderr)
             return None, 1
 
-    help_text = (args.run_dir / "agy-help.stdout").read_text(errors="replace")
+    help_text = "\n".join(
+        (
+            (args.run_dir / "agy-help.stdout").read_text(errors="replace"),
+            (args.run_dir / "agy-help.stderr").read_text(errors="replace"),
+        )
+    )
     required_flags = list(REQUIRED_FLAGS)
     if args.effort:
         required_flags.append("--effort")

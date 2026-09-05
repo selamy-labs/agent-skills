@@ -34,7 +34,8 @@ if args == ["--version"]:
 if args == ["--help"]:
     print(
         "--mode --model --effort --sandbox --output-format --print-timeout "
-        "--log-file --print --dangerously-skip-permissions"
+        "--log-file --print --dangerously-skip-permissions",
+        file=sys.stderr,
     )
     raise SystemExit(0)
 if args == ["models"]:
@@ -157,7 +158,7 @@ def test_runner_constructs_a_sandboxed_bounded_command(tmp_path: Path) -> None:
     assert stat.S_IMODE((run_dir / "status.json").stat().st_mode) == 0o600
     assert json.loads((run_dir / "command.json").read_text())[-1] == "<prompt from prompt.txt>"
     assert (run_dir / "agy-version.stdout").read_text().strip() == "1.1.25"
-    assert "--print-timeout" in (run_dir / "agy-help.stdout").read_text()
+    assert "--print-timeout" in (run_dir / "agy-help.stderr").read_text()
     assert "gemini-test-medium" in (run_dir / "agy-models.stdout").read_text()
     assert _status(run_dir)["classification"] == "succeeded"
 
