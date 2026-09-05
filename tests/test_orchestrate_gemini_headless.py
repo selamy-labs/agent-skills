@@ -437,6 +437,20 @@ def test_preflight_rejects_an_unavailable_sandbox_provider(tmp_path: Path) -> No
     assert _status(fixture, "attempt-001")["classification"] == "sandbox_unavailable"
 
 
+def test_preflight_rejects_a_provider_with_an_inaccessible_daemon(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    provider = Path(fixture["path"]) / "docker"
+    provider.write_text("#!/bin/sh\necho 'daemon denied' >&2\nexit 1\n")
+    provider.chmod(0o755)
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "sandbox_unavailable"
+    run_dir = Path(fixture["state"]) / "runs" / "attempt-001"
+    assert "daemon denied" in (run_dir / "sandbox-provider.stderr").read_text()
+
+
 def test_preflight_rejects_a_policy_without_default_deny(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     _write_private(

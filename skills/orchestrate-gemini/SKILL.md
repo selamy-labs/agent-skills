@@ -62,7 +62,8 @@ skills/orchestrate-gemini/scripts/run_headless.py \
 
 Preflight acquires a non-blocking `flock` lease, persists the canonical goal and
 digest, proves the exact clean Git base, validates the default-deny policy,
-creates an isolated Gemini home and temp directory, disables extensions and
+creates an isolated Gemini home and temp directory, proves the selected
+container service is reachable, disables extensions and
 network access, installs fixed container hardening flags, and probes the live
 version/help. It never starts a generated turn.
 

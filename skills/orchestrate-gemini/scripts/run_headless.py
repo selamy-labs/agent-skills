@@ -388,23 +388,27 @@ def ensure_owner_controlled_file(path: Path, classification: str) -> None:
         raise PreflightError(classification, f"{path.name} must be owner-controlled and not writable by others")
 
 
-def resolve_executable(path: Path) -> Path:
-    """Resolve an explicit launcher symlink without weakening policy-file checks."""
+def resolve_controlled_executable(path: Path, label: str, classification: str) -> Path:
+    """Resolve a launcher symlink without weakening policy-file checks."""
     try:
         link_metadata = path.lstat()
         resolved = path.resolve(strict=True)
         target_metadata = resolved.stat()
     except OSError as error:
-        raise PreflightError("capability_probe_failed", f"cannot inspect Gemini executable: {error}") from error
+        raise PreflightError(classification, f"cannot inspect {label} executable: {error}") from error
     allowed_owners = {0, os.getuid()}
     if link_metadata.st_uid not in allowed_owners or target_metadata.st_uid not in allowed_owners:
-        raise PreflightError("capability_probe_failed", "Gemini executable must be owned by the lane user or root")
+        raise PreflightError(classification, f"{label} executable must be owned by the lane user or root")
     if not resolved.is_file() or target_metadata.st_mode & 0o022 or not os.access(resolved, os.X_OK):
         raise PreflightError(
-            "capability_probe_failed",
-            "Gemini executable target must be regular, executable, and not writable by other users",
+            classification,
+            f"{label} executable target must be regular, executable, and not writable by other users",
         )
     return resolved
+
+
+def resolve_executable(path: Path) -> Path:
+    return resolve_controlled_executable(path, "Gemini", "capability_probe_failed")
 
 
 def policy_tool_names(rule: dict[str, object]) -> set[str]:
@@ -557,6 +561,48 @@ def run_probe(
     if result.returncode != 0:
         raise PreflightError("capability_probe_failed", f"Gemini probe exited {result.returncode}")
     return result.stdout
+
+
+def probe_sandbox_provider(
+    args: argparse.Namespace,
+    environment: dict[str, str],
+    deadline: float,
+) -> str:
+    provider_path = shutil.which(args.sandbox_provider)
+    if provider_path is None:
+        raise PreflightError("sandbox_unavailable", f"sandbox provider is unavailable: {args.sandbox_provider}")
+    provider = resolve_controlled_executable(Path(provider_path), args.sandbox_provider, "sandbox_unavailable")
+    commands = {
+        "docker": ["version", "--format", "{{.Server.Version}}"],
+        "podman": ["info", "--format", "json"],
+        "runsc": ["--version"],
+    }
+    try:
+        run_probe(
+            provider,
+            commands[args.sandbox_provider],
+            args.cwd,
+            environment,
+            deadline,
+            args.run_dir / "sandbox-provider.stdout",
+            args.run_dir / "sandbox-provider.stderr",
+        )
+        if args.sandbox_provider == "runsc":
+            docker_path = shutil.which("docker")
+            if docker_path is None:
+                raise PreflightError("sandbox_unavailable", "runsc requires an accessible Docker server")
+            run_probe(
+                resolve_controlled_executable(Path(docker_path), "Docker", "sandbox_unavailable"),
+                ["version", "--format", "{{.Server.Version}}"],
+                args.cwd,
+                environment,
+                deadline,
+                args.run_dir / "sandbox-docker.stdout",
+                args.run_dir / "sandbox-docker.stderr",
+            )
+    except PreflightError as error:
+        raise PreflightError("sandbox_unavailable", str(error)) from error
+    return str(provider)
 
 
 def probe_capabilities(args: argparse.Namespace, environment: dict[str, str], deadline: float) -> tuple[str, Path]:
@@ -1224,6 +1270,7 @@ def prepare_attempt(args: argparse.Namespace, deadline: float, status: dict[str,
         goal.auth_type,
     )
     policy_digest, durable_policy = validate_policy(args.policy_file, args.run_dir, gemini_home)
+    sandbox_executable = probe_sandbox_provider(args, environment, deadline)
     version, resolved_executable = probe_capabilities(args, environment, deadline)
     status.update(
         {
@@ -1233,6 +1280,7 @@ def prepare_attempt(args: argparse.Namespace, deadline: float, status: dict[str,
             "gemini_executable": str(args.gemini),
             "gemini_executable_resolved": str(resolved_executable),
             "policy_sha256": policy_digest,
+            "sandbox_executable": sandbox_executable,
             "runtime": {
                 "environment_names": sorted(environment),
                 "gemini_home": environment["GEMINI_CLI_HOME"],
