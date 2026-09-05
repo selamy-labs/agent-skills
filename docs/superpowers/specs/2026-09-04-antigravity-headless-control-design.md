@@ -70,8 +70,7 @@ stdin event, capability probes, stdout JSON, stderr, AGY log, and an atomically
 replaced `status.json`. The status includes timestamps, duration, process and
 process-group IDs, observed descendant PIDs, requested mode/model/effort, exit
 code, timeout state, terminal classification, conversation ID when available,
-and whether the group or any observed descendant remained alive after
-harvesting.
+and tri-state group and detached-descendant outcomes after harvesting.
 
 One operation deadline covers all capability probes and the AGY turn. AGY gets
 the remaining operation budget as its internal timeout, backed by one short
@@ -86,6 +85,8 @@ The start-time check prevents a reused PID from being signaled, and repeated
 termination signals are ignored until cleanup finishes. Process-group state is
 recorded as `absent`, `alive`, or `unknown`; ambiguous permission errors are a
 conservative harvest failure unless inventory proves the group is zombie-only.
+A previously observed detached identity is also `unknown` and rejected when
+inventory becomes incomplete before absence can be proved.
 A process that deliberately double-forks and
 detaches before the supervisor observes it is outside this portable
 standard-library boundary; such workloads require a separately verified OS
@@ -130,6 +131,8 @@ Focused tests use fake AGY executables and assert:
 - tri-state group reporting that rejects ambiguous `EPERM` as a harvest failure;
 - a hanging process-inventory command that cannot exceed the wall deadline;
 - early interruption that cannot consume the unused operation budget;
+- an observed detached descendant whose cleanup inventory disappears, forcing
+  an `unknown` harvest failure rather than false success;
 - a shared overall deadline across capability probes and dispatch;
 - terminal evidence for process-launch failure;
 - rejection of evidence directories inside the worker cwd;

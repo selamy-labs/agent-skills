@@ -79,7 +79,7 @@ Exit `0` means AGY returned exactly one streaming JSON `result` event with a `SU
 - `permission_blocked`: AGY exited zero with `SUCCESS` but returned an empty response alongside a headless permission notice;
 - `no_output` or `invalid_output`: the response cannot prove a completed turn;
 - `agy_status_*` or `cli_error`: AGY reported or exited with failure;
-- `timed_out`, `interrupted`, or `harvest_failed`: the bounded process did not terminate cleanly; ambiguous `EPERM` group probes are conservatively `harvest_failed` unless the process inventory proves the group is zombie-only;
+- `timed_out`, `interrupted`, or `harvest_failed`: the bounded process did not terminate cleanly; ambiguous `EPERM` group probes and observed detached descendants that can no longer be identity-checked are conservatively `harvest_failed`;
 - `launch_error` or `internal_error`: the worker or wrapper failed before producing a valid terminal result;
 - `capability_probe_failed` or `capability_mismatch`: the executable, flags, or selected model were not proven.
 

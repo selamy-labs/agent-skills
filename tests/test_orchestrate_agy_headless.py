@@ -376,7 +376,7 @@ def test_early_interruption_uses_only_the_short_cleanup_grace(tmp_path: Path) ->
     runner = _load_runner_module()
     runner.WALL_TIMEOUT_GRACE_SECONDS = 0.3
     runner.TERMINATION_GRACE_SECONDS = 0.1
-    runner.process_snapshot = lambda _timeout_seconds=2: {}
+    runner.process_snapshot = lambda _timeout_seconds=2: runner.ProcessInventory({}, False)
     known_pids: set[int] = set()
 
     def interrupt_after_start(pid: int, _process_group_id: int) -> None:
@@ -402,7 +402,7 @@ def test_early_interruption_uses_only_the_short_cleanup_grace(tmp_path: Path) ->
 
 def test_process_identity_rejects_a_reused_pid() -> None:
     runner = _load_runner_module()
-    tracked_processes = {123: "Mon Jan  1 00:00:00 2024"}
+    tracked_processes = {123: runner.ProcessIdentity("Mon Jan  1 00:00:00 2024", 123)}
     snapshot = {
         123: runner.ProcessInfo(
             parent_pid=1,
@@ -426,7 +426,7 @@ def test_run_process_harvests_owned_group_when_process_listing_fails(tmp_path: P
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
         "time.sleep(0.2)"
     )
-    runner.process_snapshot = lambda _timeout_seconds=2: {}
+    runner.process_snapshot = lambda _timeout_seconds=2: runner.ProcessInventory({}, False)
 
     try:
         result = runner.run_process(
@@ -455,7 +455,7 @@ def test_run_process_times_out_cleanly_without_process_listing(tmp_path: Path) -
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
         "time.sleep(60)"
     )
-    runner.process_snapshot = lambda _timeout_seconds=2: {}
+    runner.process_snapshot = lambda _timeout_seconds=2: runner.ProcessInventory({}, False)
 
     try:
         result = runner.run_process(
@@ -506,6 +506,7 @@ def test_unknown_group_state_is_a_harvest_failure(tmp_path: Path) -> None:
         survivors_harvested=True,
         process_group_alive_after_harvest=True,
         process_group_state_after_harvest="unknown",
+        descendant_state_after_harvest="absent",
         observed_descendant_pids=[],
         descendants_alive_after_harvest=[],
         interrupted_signal=None,
@@ -542,7 +543,7 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
             started_at="Mon Jan  1 00:00:00 2024",
         )
     }
-    runner.process_snapshot = lambda _timeout_seconds=2: unrelated_snapshot
+    runner.process_snapshot = lambda _timeout_seconds=2: runner.ProcessInventory(unrelated_snapshot, False)
 
     try:
         result = runner.run_process(
@@ -557,6 +558,57 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
         child_pid = int(child_pid_path.read_text())
         known_pids.add(child_pid)
         assert not _pid_is_running(child_pid)
+    finally:
+        _kill_known_pids(known_pids)
+
+
+def test_detached_descendant_is_unknown_when_cleanup_inventory_disappears(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    runner.WALL_TIMEOUT_GRACE_SECONDS = 0.3
+    runner.TERMINATION_GRACE_SECONDS = 0.1
+    child_pid_path = tmp_path / "child.pid"
+    known_pids: set[int] = set()
+    root_pid: list[int] = []
+    original_snapshot = runner.process_snapshot
+    child_script = "import time; time.sleep(60)"
+    parent_script = (
+        "import pathlib, subprocess, sys, time; "
+        f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}], start_new_session=True); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "time.sleep(0.3)"
+    )
+
+    def disappearing_inventory(timeout_seconds: float = 2) -> object:
+        inventory = original_snapshot(timeout_seconds)
+        if root_pid and root_pid[0] not in inventory.processes and child_pid_path.exists():
+            return runner.ProcessInventory({}, False)
+        return inventory
+
+    def record_root(pid: int, _process_group_id: int) -> None:
+        root_pid.append(pid)
+
+    runner.process_snapshot = disappearing_inventory
+    try:
+        result = runner.run_process(
+            [sys.executable, "-c", parent_script, str(child_pid_path)],
+            tmp_path,
+            tmp_path / "stdout.log",
+            tmp_path / "stderr.log",
+            5,
+            on_start=record_root,
+        )
+        child_pid = int(child_pid_path.read_text())
+        known_pids.add(child_pid)
+        assert child_pid in result.observed_descendant_pids
+        assert result.process_group_state_after_harvest == "absent"
+        assert result.descendant_state_after_harvest == "unknown"
+        classification, _envelope = runner.classify_result(
+            result,
+            tmp_path / "stdout.log",
+            tmp_path / "stderr.log",
+        )
+        assert classification == "harvest_failed"
+        assert _pid_is_running(child_pid)
     finally:
         _kill_known_pids(known_pids)
 
