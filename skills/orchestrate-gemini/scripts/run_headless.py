@@ -321,6 +321,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--approval-mode", required=True, choices=("plan", "default", "auto_edit"))
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--resume-from", type=lambda value, p=parser: absolute_path(p, value))
+    parser.add_argument("--validation-fake-responses", type=lambda value, p=parser: absolute_path(p, value))
     args = parser.parse_args()
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
@@ -473,7 +474,7 @@ def build_system_settings(provider: str) -> bytes:
             "sandbox": {
                 "command": provider,
                 "enabled": True,
-                "networkAccess": True,
+                "networkAccess": False,
             },
         },
     }
@@ -1026,6 +1027,7 @@ def worker_command(
     staged_prompt: Path,
     durable_policy: Path,
     resume_id: str | None,
+    validation_responses: Path | None,
 ) -> list[str]:
     command = [
         str(args.gemini),
@@ -1043,8 +1045,29 @@ def worker_command(
     ]
     if resume_id:
         command.extend(("--resume", resume_id))
+    if validation_responses:
+        command.extend(("--fake-responses", str(validation_responses)))
     command.extend(("--prompt", f"@{staged_prompt}"))
     return command
+
+
+def prepare_validation_responses(args: argparse.Namespace, prepared: PreparedAttempt) -> Path | None:
+    source = args.validation_fake_responses
+    if source is None:
+        authorize_generation(prepared.goal)
+        return None
+    ensure_owner_controlled_file(source, "invalid_validation_fixture")
+    try:
+        content = source.read_bytes()
+    except OSError as error:
+        raise PreflightError("invalid_validation_fixture", f"cannot read fake-response fixture: {error}") from error
+    if not content or len(content) > 1024 * 1024:
+        raise PreflightError("invalid_validation_fixture", "fake-response fixture must contain 1 byte to 1 MiB")
+    retained = args.run_dir / "validation-fake-responses.json"
+    write_private(retained, content)
+    durable = Path(prepared.environment["GEMINI_CLI_HOME"]) / "validation-fake-responses.json"
+    persist_exact_private(durable, content, "runtime_mismatch")
+    return durable
 
 
 def load_stream_events(path: Path) -> list[dict[str, Any]]:
@@ -1251,11 +1274,11 @@ def execute_attempt(
     status_path: Path,
     status: dict[str, Any],
 ) -> int:
-    authorize_generation(prepared.goal)
+    validation_responses = prepare_validation_responses(args, prepared)
     add_auth_environment(prepared.environment, prepared.goal.auth_type)
     resume_id = resume_session(args, prepared.goal_digest, prepared.git_state)
     staged_prompt = stage_prompt(args, prepared.git_state, prepared.goal, prepared.attempt)
-    command = worker_command(args, staged_prompt, prepared.durable_policy, resume_id)
+    command = worker_command(args, staged_prompt, prepared.durable_policy, resume_id, validation_responses)
     write_private(
         args.run_dir / "command.json",
         json.dumps(
@@ -1263,6 +1286,7 @@ def execute_attempt(
                 "argv": command,
                 "environment_names": sorted(prepared.environment),
                 "prompt_transport": "owner-only-staged-file-reference",
+                "validation_mode": validation_responses is not None,
             },
             indent=2,
             sort_keys=True,
@@ -1317,9 +1341,11 @@ def execute_attempt(
                 "status": str(git_output(args.cwd, "status", "--short")),
             },
             "verification": verification,
+            "validation_mode": validation_responses is not None,
         }
     )
-    return finish_status(status_path, status, "succeeded")
+    classification = "validation_succeeded" if validation_responses else "succeeded"
+    return finish_status(status_path, status, classification)
 
 
 def run_locked_attempt(

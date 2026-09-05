@@ -119,7 +119,7 @@ Before launch, the runner verifies:
    admin policy directory would cause Gemini to ignore it.
 
 The worker receives an isolated Gemini home, system-settings path, and temp
-directory below the lane state directory. The runner writes system overrides
+directory below the lane state directory. Network access is disabled. The runner writes system overrides
 that disable auto-update, YOLO, permanent approvals, and extension loading;
 enable environment-variable redaction and folder trust; ignore project `.env`
 files; and require the selected sandbox provider. The private temp directory

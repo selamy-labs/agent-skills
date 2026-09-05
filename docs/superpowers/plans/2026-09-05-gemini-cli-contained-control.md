@@ -31,7 +31,7 @@
 - Create: `skills/orchestrate-gemini/scripts/run_headless.py`
 
 **Interfaces:**
-- Consumes: `run_headless.py --run-dir PATH --state-dir PATH --cwd PATH --goal-file PATH --prompt-file PATH --policy-file PATH --gemini PATH --sandbox-provider {docker,podman,runsc} --timeout-seconds INT [--preflight-only] [--resume-from PATH]`
+- Consumes: `run_headless.py --run-dir PATH --state-dir PATH --cwd PATH --goal-file PATH --prompt-file PATH --policy-file PATH --gemini PATH --sandbox-provider {docker,podman,runsc} --timeout-seconds INT --model MODEL --approval-mode {plan,default,auto_edit} [--preflight-only] [--resume-from PATH] [--validation-fake-responses PATH]`
 - Produces: validated `Goal`, a stable `goal.json`/`goal.sha256`, exclusive `lease.lock`, atomic `lease.json`, and exact Git preflight evidence.
 
 - [ ] **Step 1: Write the manifest validation tests**

@@ -1,0 +1,12 @@
+# Deny every Gemini tool unless a reviewed, higher-priority rule allows it.
+[[rule]]
+toolName = "*"
+decision = "deny"
+priority = 1
+
+# Example for a read-only investigation. Replace or extend this rule only with
+# the exact tool names required by the immutable goal.
+[[rule]]
+toolName = "read_file"
+decision = "allow"
+priority = 100

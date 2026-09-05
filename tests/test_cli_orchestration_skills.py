@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ("agy", "codex", "claude")
+TOOLS = ("agy", "codex", "claude", "gemini")
 TMUX = shutil.which("tmux")
 
 

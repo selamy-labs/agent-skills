@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrate Gemini CLI"
+  short_description: "Run Gemini CLI in isolated, verifiable lanes"
+  default_prompt: "Use $orchestrate-gemini to run and verify a bounded Gemini CLI worker."

@@ -181,6 +181,7 @@ def _command(
     timeout_seconds: int = 5,
     resume_from: Path | None = None,
     model: str = "gemini-test-model",
+    validation_fake_responses: Path | None = None,
 ) -> list[str]:
     run_dir = Path(fixture["state"]) / "runs" / run_name
     command = [
@@ -213,6 +214,8 @@ def _command(
         command.append("--preflight-only")
     if resume_from:
         command.extend(("--resume-from", str(resume_from)))
+    if validation_fake_responses:
+        command.extend(("--validation-fake-responses", str(validation_fake_responses)))
     return command
 
 
@@ -227,6 +230,7 @@ def _invoke(
     timeout_seconds: int = 5,
     resume_from: Path | None = None,
     model: str = "gemini-test-model",
+    validation_fake_responses: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = _command(
         fixture,
@@ -237,6 +241,7 @@ def _invoke(
         timeout_seconds=timeout_seconds,
         resume_from=resume_from,
         model=model,
+        validation_fake_responses=validation_fake_responses,
     )
     env = os.environ | {"PATH": f"{fixture['path']}:{os.environ['PATH']}"} | (extra_env or {})
     return subprocess.run(command, capture_output=True, text=True, env=env, timeout=10)
@@ -590,6 +595,27 @@ def test_runner_requires_two_part_authorization_for_paid_capable_auth(tmp_path: 
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_validation_fake_responses_never_claim_operational_success_or_require_billing_ack(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, auth_type="gemini-api-key", allow_paid_generation=False)
+    fake_responses = tmp_path / "responses.json"
+    _write_private(fake_responses, '[{"response":"fixture"}]\n')
+
+    result = _invoke(
+        fixture,
+        "attempt-001",
+        preflight=False,
+        validation_fake_responses=fake_responses,
+    )
+
+    assert result.returncode == 0, result.stderr
+    status = _status(fixture, "attempt-001")
+    assert status["classification"] == "validation_succeeded"
+    assert status["validation_mode"] is True
+    command = json.loads((Path(fixture["state"]) / "runs" / "attempt-001" / "command.json").read_text())
+    assert command["validation_mode"] is True
+    assert "--fake-responses" in command["argv"]
 
 
 def test_preflight_accepts_an_owner_controlled_gemini_launcher_symlink(tmp_path: Path) -> None:
