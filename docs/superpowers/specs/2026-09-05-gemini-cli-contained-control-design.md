@@ -11,7 +11,7 @@ stream-JSON schema, uses `--approval-mode` plus policy TOML, and selects a
 sandbox provider through `GEMINI_SANDBOX`.
 
 The existing AGY lifecycle decisions remain valid and must be preserved:
-prompts stay out of argv, one absolute deadline covers probes and the worker,
+prompt content stays out of argv, one absolute deadline covers probes and the worker,
 the worker runs in its own process group, descendants are harvested on every
 terminal path, evidence is owner-only and atomically finalized, and a zero
 process exit is not sufficient evidence of successful delivery. The new
@@ -125,10 +125,18 @@ enable environment-variable redaction and folder trust; ignore project `.env`
 files; and require the selected sandbox provider. The private temp directory
 prevents Gemini's container sandbox from mounting a shared host temp tree.
 
+Gemini 0.51.0 reads non-TTY stdin in the outer process and injects that content
+as an inner `--prompt` argument before launching its container sandbox. Sending
+the directive directly over stdin would therefore expose it in a host-visible
+Docker argv. The runner instead stages an owner-only prompt file under the
+private checkout's Git directory, supplies only an `@<absolute-path>` reference
+through `--prompt`, and removes the staged file after worker harvest. Gemini
+expands the reference inside the sandbox; the full directive never enters argv.
+
 The runner rejects inherited sandbox mounts, sandbox flags, raw-output flags,
 and `--skip-trust`. It supplies a fixed container-hardening flag set, disables
 all extensions with both the system `admin.extensions.enabled` override and
-Gemini's documented `-e none` selector, passes the prompt only over stdin,
+Gemini's documented `-e none` selector, passes only the staged prompt reference,
 requests `stream-json`, uses a non-YOLO approval mode, and passes the reviewed
 policy as a supplemental admin policy. The policy must default-deny all tools
 and narrowly allow only the goal's required operations.
@@ -200,8 +208,8 @@ dispatch ratchet.
 
 A jump-box smoke test uses `--preflight-only` against the real Gemini binary and
 container provider. A separate validation-only mode may supply Gemini's documented
-`--fake-responses` fixture to the real binary, exercise sandbox launch, stdin
-transport, stream output, and cleanup without contacting a model, and finish
+`--fake-responses` fixture to the real binary, exercise sandbox launch, staged
+prompt expansion, stream output, and cleanup without contacting a model, and finish
 with `validation_succeeded` rather than the operational `succeeded`
 classification. The fake fixture and validation marker are retained in
 evidence so they cannot be mistaken for delegated delivery. A generated live

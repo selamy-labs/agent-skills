@@ -4,7 +4,7 @@
 
 **Goal:** Add a self-contained `orchestrate-gemini` skill that runs bounded Gemini CLI repository work only inside a durable, single-writer, OS-sandboxed lane and accepts completion only from verified repository state.
 
-**Architecture:** A Python 3.11 standard-library runner validates an immutable JSON goal, acquires a kernel-backed lane lease, proves a private Git checkout and live Gemini/sandbox/policy capabilities, and launches one stdin-fed stream-JSON turn in a fresh process group. Owner-only evidence, conservative worker harvesting, Git path-scope checks, and shell-free verification commands determine the terminal result; the sibling skill retains the catalog's established tmux dispatch helpers for interactive setup and recovery.
+**Architecture:** A Python 3.11 standard-library runner validates an immutable JSON goal, acquires a kernel-backed lane lease, proves a private Git checkout and live Gemini/sandbox/policy capabilities, and launches one staged-file-fed stream-JSON turn in a fresh process group. Owner-only evidence, conservative worker harvesting, Git path-scope checks, and shell-free verification commands determine the terminal result; the sibling skill retains the catalog's established tmux dispatch helpers for interactive setup and recovery.
 
 **Tech Stack:** Python 3.11 standard library, pytest, POSIX process control, Git CLI, Docker/Podman/gVisor capability probes, Bash tmux helpers, Markdown Agent Skill metadata.
 
@@ -16,7 +16,7 @@
 - Require a private Git common directory inside the checkout; reject linked worktrees or shared Git metadata.
 - Require owner-only state/run directories outside the checkout and one non-blocking kernel lease per lane.
 - Require explicit Docker, Podman, or gVisor sandboxing, isolated Gemini home/system settings/temp, and a reviewed default-deny supplemental admin policy.
-- Send prompts only over stdin, never argv; never record credential values.
+- Keep prompt content out of argv by passing only an owner-only staged-file reference; never record credential values.
 - Reject YOLO, `--skip-trust`, raw output, inherited sandbox mounts/flags, standard admin-policy conflicts, and paid-capable auth without two-part authorization.
 - Preserve conservative process-group and observed-descendant cleanup on success, error, timeout, and interruption.
 - Exit zero only for valid non-empty stream output, clean worker harvest, in-scope Git state, and passing immutable verification commands.
@@ -167,20 +167,20 @@
 
 **Interfaces:**
 - Consumes: Task 2's immutable runtime and reviewed lane.
-- Produces: stdin-only Gemini execution; `stdout.jsonl`, `stderr.log`, Git and verification artifacts; atomic terminal status; exit zero only for verified success.
+- Produces: staged-file Gemini execution with only an `@<path>` reference in argv; `stdout.jsonl`, `stderr.log`, Git and verification artifacts; atomic terminal status; exit zero only for verified success.
 
 - [ ] **Step 1: Add command and stream tests**
 
   Assert the exact command contains `--output-format stream-json`, an explicit
   non-alias model, non-YOLO approval mode, `--sandbox`, and `--admin-policy`, but
   never the prompt, raw-output flags, `--skip-trust`, or `--worktree`. Assert the
-  prompt bytes arrive over stdin. Cover valid `init/message/result`, empty
+  prompt bytes are loaded from the staged owner-only file. Cover valid `init/message/result`, empty
   assistant content, duplicate init/result, malformed JSON, fatal error events,
   terminal error status, model mismatch, and nonzero CLI exit.
 
 - [ ] **Step 2: Run the command test and verify RED**
 
-  Run: `python -m pytest -q tests/test_orchestrate_gemini_headless.py::test_runner_dispatches_prompt_only_over_stdin`
+  Run: `python -m pytest -q tests/test_orchestrate_gemini_headless.py::test_runner_keeps_prompt_content_out_of_process_arguments`
 
   Expected: FAIL because dispatch is not implemented.
 
@@ -195,7 +195,7 @@
 
 - [ ] **Step 4: Implement bounded execution and conservative harvesting**
 
-  Launch Gemini with `start_new_session=True`, owner-only stdin/stdout/stderr
+  Launch Gemini with `start_new_session=True`, owner-only staged prompt/stdout/stderr
   files, and the minimal environment. Track process identities from bounded
   `ps` snapshots; update lease/status heartbeat only when output size advances.
   On every terminal path, TERM then KILL the owned group and every observed

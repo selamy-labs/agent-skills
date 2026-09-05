@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import fcntl
+import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,9 +39,12 @@ def _write_private(path: Path, text: str) -> None:
 def _fake_gemini(path: Path) -> Path:
     executable = path / "gemini"
     log = path / "gemini-invocations.jsonl"
+    behavior = path / "gemini-behavior"
+    prompt_capture = path / "gemini-prompt.txt"
+    child_capture = path / "gemini-child.pid"
     executable.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, os, pathlib, sys\n"
+        "import json, os, pathlib, subprocess, sys, time\n"
         "record = {\n"
         "    'argv': sys.argv[1:],\n"
         "    'gemini_home': os.environ.get('GEMINI_CLI_HOME'),\n"
@@ -55,7 +61,52 @@ def _fake_gemini(path: Path) -> Path:
         "elif '--help' in sys.argv:\n"
         "    print('--model --output-format --approval-mode --sandbox --admin-policy --extensions --resume')\n"
         "else:\n"
-        "    raise SystemExit(97)\n"
+        f"    behavior_path = pathlib.Path({str(behavior)!r})\n"
+        "    behavior = behavior_path.read_text().strip() if behavior_path.exists() else 'success'\n"
+        "    prompt_arg = sys.argv[sys.argv.index('--prompt') + 1]\n"
+        "    prompt = pathlib.Path(prompt_arg[1:]).read_text() if prompt_arg.startswith('@') else prompt_arg\n"
+        f"    pathlib.Path({str(prompt_capture)!r}).write_text(prompt)\n"
+        "    model = sys.argv[sys.argv.index('--model') + 1]\n"
+        "    if behavior == 'malformed':\n"
+        "        print('not-json')\n"
+        "        raise SystemExit(0)\n"
+        "    if behavior in {'hang_child', 'detached_child'}:\n"
+        "        child = subprocess.Popen(\n"
+        "            [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "            start_new_session=behavior == 'detached_child',\n"
+        "        )\n"
+        f"        pathlib.Path({str(child_capture)!r}).write_text(str(child.pid))\n"
+        "        print(json.dumps({'type': 'init', 'session_id': 'session-test', 'model': model}), flush=True)\n"
+        "        time.sleep(60)\n"
+        "    resolved_model = 'wrong-model' if behavior == 'model_mismatch' else model\n"
+        "    print(json.dumps({'type': 'init', 'session_id': 'session-test', 'model': resolved_model}))\n"
+        "    print(json.dumps({'type': 'message', 'role': 'user', 'content': prompt}))\n"
+        "    if behavior not in {'empty', 'fatal_event'}:\n"
+        "        print(json.dumps({'type': 'message', 'role': 'assistant', 'content': 'fixture complete'}))\n"
+        "    if behavior == 'fatal_event':\n"
+        "        print(json.dumps({'type': 'error', 'severity': 'error', 'message': 'fatal fixture error'}))\n"
+        "    status = 'error' if behavior == 'error_status' else 'success'\n"
+        "    print(json.dumps({'type': 'result', 'status': status}))\n"
+        "    if behavior == 'duplicate_result':\n"
+        "        print(json.dumps({'type': 'result', 'status': 'success'}))\n"
+        "    if behavior == 'write_outside':\n"
+        "        pathlib.Path('outside.txt').write_text('escaped scope\\n')\n"
+        "    if behavior == 'write_allowed':\n"
+        "        pathlib.Path('README.md').write_text('changed in scope\\n')\n"
+        "    if behavior == 'stage_allowed':\n"
+        "        pathlib.Path('README.md').write_text('staged in scope\\n')\n"
+        "        subprocess.run(['git', 'add', 'README.md'], check=True)\n"
+        "    if behavior == 'commit_allowed':\n"
+        "        pathlib.Path('README.md').write_text('committed in scope\\n')\n"
+        "        subprocess.run(['git', 'add', 'README.md'], check=True)\n"
+        "        subprocess.run(['git', 'commit', '-qm', 'fixture delivery'], check=True)\n"
+        "    if behavior == 'delete_allowed':\n"
+        "        pathlib.Path('README.md').unlink()\n"
+        "    if behavior == 'rename_allowed':\n"
+        "        pathlib.Path('src').mkdir()\n"
+        "        pathlib.Path('README.md').rename('src/README.md')\n"
+        "    if behavior == 'cli_error':\n"
+        "        raise SystemExit(7)\n"
     )
     executable.chmod(0o755)
     return executable
@@ -120,14 +171,17 @@ def _fixture(tmp_path: Path, **goal_overrides: object) -> dict[str, object]:
     }
 
 
-def _invoke(
+def _command(
     fixture: dict[str, object],
     run_name: str,
     *,
     goal_file: Path | None = None,
-    extra_env: dict[str, str] | None = None,
     provider: str = "docker",
-) -> subprocess.CompletedProcess[str]:
+    preflight: bool = True,
+    timeout_seconds: int = 5,
+    resume_from: Path | None = None,
+    model: str = "gemini-test-model",
+) -> list[str]:
     run_dir = Path(fixture["state"]) / "runs" / run_name
     command = [
         sys.executable,
@@ -149,9 +203,41 @@ def _invoke(
         "--sandbox-provider",
         provider,
         "--timeout-seconds",
-        "5",
-        "--preflight-only",
+        str(timeout_seconds),
+        "--model",
+        model,
+        "--approval-mode",
+        "plan",
     ]
+    if preflight:
+        command.append("--preflight-only")
+    if resume_from:
+        command.extend(("--resume-from", str(resume_from)))
+    return command
+
+
+def _invoke(
+    fixture: dict[str, object],
+    run_name: str,
+    *,
+    goal_file: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+    provider: str = "docker",
+    preflight: bool = True,
+    timeout_seconds: int = 5,
+    resume_from: Path | None = None,
+    model: str = "gemini-test-model",
+) -> subprocess.CompletedProcess[str]:
+    command = _command(
+        fixture,
+        run_name,
+        goal_file=goal_file,
+        provider=provider,
+        preflight=preflight,
+        timeout_seconds=timeout_seconds,
+        resume_from=resume_from,
+        model=model,
+    )
     env = os.environ | {"PATH": f"{fixture['path']}:{os.environ['PATH']}"} | (extra_env or {})
     return subprocess.run(command, capture_output=True, text=True, env=env, timeout=10)
 
@@ -159,6 +245,42 @@ def _invoke(
 def _status(fixture: dict[str, object], run_name: str) -> dict[str, object]:
     path = Path(fixture["state"]) / "runs" / run_name / "status.json"
     return json.loads(path.read_text())
+
+
+def _set_behavior(fixture: dict[str, object], behavior: str) -> None:
+    Path(fixture["gemini"]).with_name("gemini-behavior").write_text(behavior)
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    result = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and not result.stdout.strip().startswith("Z")
+
+
+def _wait_for(path: Path, timeout: float = 3) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {path}")
+
+
+def _load_runner_module():
+    spec = importlib.util.spec_from_file_location("test_orchestrate_gemini_runner", RUNNER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_preflight_persists_an_immutable_durable_goal(tmp_path: Path) -> None:
@@ -273,13 +395,14 @@ def test_preflight_builds_an_isolated_gemini_runtime(tmp_path: Path) -> None:
     run_dir = Path(fixture["state"]) / "runs" / "attempt-001"
     assert (run_dir / "gemini-version.stdout").read_text().strip() == "0.51.0"
     assert "--admin-policy" in (run_dir / "gemini-help.stdout").read_text()
-    settings_path = Path(fixture["state"]) / "system-settings.json"
+    settings_path = Path(fixture["state"]) / "gemini-home" / "system-settings.json"
     settings = json.loads(settings_path.read_text())
     assert settings["admin"]["extensions"]["enabled"] is False
     assert settings["security"]["disableYoloMode"] is True
     assert settings["security"]["environmentVariableRedaction"]["enabled"] is True
     assert settings["advanced"]["ignoreLocalEnv"] is True
     assert settings["tools"]["sandbox"]["command"] == "docker"
+    assert (settings_path.parent / "control-policy.toml").read_text() == Path(fixture["policy"]).read_text()
     records = [json.loads(line) for line in log.read_text().splitlines()]
     assert records
     assert all(record["gemini_home"] == str(Path(fixture["state"]) / "gemini-home") for record in records)
@@ -330,3 +453,250 @@ def test_preflight_rejects_a_group_writable_policy(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert _status(fixture, "attempt-001")["classification"] == "invalid_policy"
+
+
+def test_runner_keeps_prompt_content_out_of_process_arguments(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _invoke(fixture, "attempt-001", preflight=False)
+
+    assert result.returncode == 0, result.stderr
+    assert Path(fixture["gemini"]).with_name("gemini-prompt.txt").read_text() == Path(fixture["prompt"]).read_text()
+    invocations = [
+        json.loads(line)
+        for line in Path(fixture["gemini"]).with_name("gemini-invocations.jsonl").read_text().splitlines()
+    ]
+    argv = invocations[-1]["argv"]
+    assert Path(fixture["prompt"]).read_text() not in argv
+    assert argv[argv.index("--prompt") + 1].startswith("@")
+    assert Path(argv[argv.index("--prompt") + 1][1:]).name.endswith(".prompt")
+    assert argv[argv.index("--model") + 1] == "gemini-test-model"
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert argv[argv.index("--approval-mode") + 1] == "plan"
+    assert "--sandbox" in argv
+    assert argv[argv.index("--extensions") + 1] == "none"
+    assert "--admin-policy" in argv
+    status = _status(fixture, "attempt-001")
+    assert status["classification"] == "succeeded"
+    assert status["session_id"] == "session-test"
+    assert status["resolved_model"] == "gemini-test-model"
+
+
+def test_runner_rejects_invalid_or_undelivered_streams(tmp_path: Path) -> None:
+    expected = {
+        "malformed": "invalid_output",
+        "empty": "no_output",
+        "duplicate_result": "invalid_output",
+        "error_status": "gemini_status_error",
+        "model_mismatch": "model_mismatch",
+        "fatal_event": "gemini_stream_error",
+        "cli_error": "cli_error",
+    }
+    for index, (behavior, classification) in enumerate(expected.items(), start=1):
+        case = tmp_path / behavior
+        case.mkdir()
+        fixture = _fixture(case)
+        _set_behavior(fixture, behavior)
+
+        result = _invoke(fixture, f"attempt-{index:03}", preflight=False)
+
+        assert result.returncode != 0, behavior
+        assert _status(fixture, f"attempt-{index:03}")["classification"] == classification
+
+
+def test_runner_harvests_the_worker_group_on_timeout(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _set_behavior(fixture, "hang_child")
+
+    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=1)
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "timed_out"
+    child_path = Path(fixture["gemini"]).with_name("gemini-child.pid")
+    _wait_for(child_path)
+    assert not _pid_is_running(int(child_path.read_text()))
+
+
+def test_runner_harvests_an_observed_detached_descendant(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _set_behavior(fixture, "detached_child")
+
+    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=1)
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "timed_out"
+    child_path = Path(fixture["gemini"]).with_name("gemini-child.pid")
+    _wait_for(child_path)
+    assert not _pid_is_running(int(child_path.read_text()))
+
+
+def test_runner_rejects_changes_outside_the_goal_scope(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _set_behavior(fixture, "write_outside")
+
+    result = _invoke(fixture, "attempt-001", preflight=False)
+
+    assert result.returncode != 0
+    status = _status(fixture, "attempt-001")
+    assert status["classification"] == "scope_violation"
+    assert status["changed_paths"] == ["outside.txt"]
+
+
+def test_runner_accepts_in_scope_changes_after_immutable_verification(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _set_behavior(fixture, "write_allowed")
+
+    result = _invoke(fixture, "attempt-001", preflight=False)
+
+    assert result.returncode == 0, result.stderr
+    status = _status(fixture, "attempt-001")
+    assert status["classification"] == "succeeded"
+    assert status["changed_paths"] == ["README.md"]
+    assert status["verification"][0]["returncode"] == 0
+
+
+def test_runner_rejects_failed_immutable_verification(tmp_path: Path) -> None:
+    fixture = _fixture(
+        tmp_path,
+        verification_commands=[
+            {"argv": [sys.executable, "-c", "raise SystemExit(9)"], "timeout_seconds": 5},
+        ],
+    )
+
+    result = _invoke(fixture, "attempt-001", preflight=False)
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "verification_failed"
+
+
+def test_runner_requires_two_part_authorization_for_paid_capable_auth(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, auth_type="gemini-api-key", allow_paid_generation=False)
+
+    result = _invoke(fixture, "attempt-001", preflight=False)
+
+    assert result.returncode != 0
+    assert _status(fixture, "attempt-001")["classification"] == "billing_not_authorized"
+    records = Path(fixture["gemini"]).with_name("gemini-invocations.jsonl").read_text().splitlines()
+    assert len(records) == 2
+
+    authorized_case = tmp_path / "authorized"
+    authorized_case.mkdir()
+    authorized = _fixture(authorized_case, auth_type="gemini-api-key", allow_paid_generation=True)
+    result = _invoke(
+        authorized,
+        "attempt-001",
+        preflight=False,
+        extra_env={"ORCHESTRATE_GEMINI_PAID_GENERATION_ACK": "authorized"},
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_preflight_accepts_an_owner_controlled_gemini_launcher_symlink(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    executable = Path(fixture["gemini"])
+    target = executable.with_name("gemini-real")
+    executable.rename(target)
+    executable.symlink_to(target)
+
+    result = _invoke(fixture, "attempt-001")
+
+    assert result.returncode == 0, result.stderr
+    assert _status(fixture, "attempt-001")["gemini_executable_resolved"] == str(target)
+
+
+def test_runner_resumes_only_the_exact_prior_session(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    assert _invoke(fixture, "attempt-001", preflight=False).returncode == 0
+    prior_run = Path(fixture["state"]) / "runs" / "attempt-001"
+
+    result = _invoke(fixture, "attempt-002", preflight=False, resume_from=prior_run)
+
+    assert result.returncode == 0, result.stderr
+    command = json.loads((Path(fixture["state"]) / "runs" / "attempt-002" / "command.json").read_text())["argv"]
+    assert command[command.index("--resume") + 1] == "session-test"
+    assert "latest" not in command
+
+
+def test_runner_observes_all_supported_git_change_states(tmp_path: Path) -> None:
+    expected = {
+        "stage_allowed": ["README.md"],
+        "commit_allowed": ["README.md"],
+        "delete_allowed": ["README.md"],
+        "rename_allowed": ["README.md", "src/README.md"],
+    }
+    for behavior, changed in expected.items():
+        case = tmp_path / behavior
+        case.mkdir()
+        fixture = _fixture(case)
+        _set_behavior(fixture, behavior)
+
+        result = _invoke(fixture, "attempt-001", preflight=False)
+
+        assert result.returncode == 0, behavior
+        assert _status(fixture, "attempt-001")["changed_paths"] == changed
+
+
+def test_runner_harvests_after_sigterm_and_ignores_a_repeat_signal(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _set_behavior(fixture, "hang_child")
+    command = _command(fixture, "attempt-001", preflight=False, timeout_seconds=20)
+    env = os.environ | {"PATH": f"{fixture['path']}:{os.environ['PATH']}"}
+    wrapper = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    child_path = Path(fixture["gemini"]).with_name("gemini-child.pid")
+    try:
+        _wait_for(child_path)
+        wrapper.send_signal(signal.SIGTERM)
+        time.sleep(0.05)
+        wrapper.send_signal(signal.SIGTERM)
+        wrapper.communicate(timeout=8)
+        assert wrapper.returncode != 0
+        assert _status(fixture, "attempt-001")["classification"] == "interrupted"
+        assert not _pid_is_running(int(child_path.read_text()))
+    finally:
+        if wrapper.poll() is None:
+            wrapper.kill()
+
+
+def test_process_identity_rejects_a_reused_pid() -> None:
+    runner = _load_runner_module()
+    tracked = {456: runner.ProcessIdentity("Mon Jan  1 00:00:01 2024")}
+    reused = runner.ProcessInventory(
+        {456: runner.ProcessInfo(1, 456, "S", "Tue Jan  2 00:00:01 2024")},
+        True,
+    )
+
+    assert runner.tracked_descendant_state(123, tracked, reused) == ("absent", [])
+
+
+def test_unknown_process_inventory_never_proves_absence() -> None:
+    runner = _load_runner_module()
+    tracked = {456: runner.ProcessIdentity("Mon Jan  1 00:00:01 2024")}
+
+    assert runner.tracked_descendant_state(123, tracked, runner.ProcessInventory({}, False)) == ("unknown", [])
+    assert runner.process_group_state(123, runner.ProcessInventory({}, False)) in {"absent", "unknown"}
+
+
+def test_run_process_harvests_when_start_callback_raises(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    started: list[int] = []
+
+    def fail_after_start(pid: int, _process_group_id: int) -> None:
+        started.append(pid)
+        raise RuntimeError("injected callback failure")
+
+    try:
+        runner.run_process(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            tmp_path,
+            dict(os.environ),
+            tmp_path / "stdout.log",
+            tmp_path / "stderr.log",
+            5,
+            on_start=fail_after_start,
+        )
+    except RuntimeError as error:
+        assert str(error) == "injected callback failure"
+    else:
+        raise AssertionError("callback failure did not propagate")
+    assert started and not _pid_is_running(started[0])
