@@ -126,10 +126,12 @@ files; and require the selected sandbox provider. The private temp directory
 prevents Gemini's container sandbox from mounting a shared host temp tree.
 
 The runner rejects inherited sandbox mounts, sandbox flags, raw-output flags,
-and `--skip-trust`. It supplies a fixed container-hardening flag set, passes the
-prompt only over stdin, requests `stream-json`, uses a non-YOLO approval mode,
-and passes the reviewed policy as a supplemental admin policy. The policy must
-default-deny all tools and narrowly allow only the goal's required operations.
+and `--skip-trust`. It supplies a fixed container-hardening flag set, disables
+all extensions with both the system `admin.extensions.enabled` override and
+Gemini's documented `-e none` selector, passes the prompt only over stdin,
+requests `stream-json`, uses a non-YOLO approval mode, and passes the reviewed
+policy as a supplemental admin policy. The policy must default-deny all tools
+and narrowly allow only the goal's required operations.
 OS isolation protects the checkout boundary even if a policy or model decision
 is wrong; policy remains the least-privilege tool boundary inside that checkout.
 
@@ -197,9 +199,13 @@ session resume. Shared tmux tests add Gemini to the established cross-client
 dispatch ratchet.
 
 A jump-box smoke test uses `--preflight-only` against the real Gemini binary and
-container provider. A no-cost negative integration may route a placeholder key
-to an unreachable loopback endpoint to prove sandbox launch and failure
-classification without contacting a paid model. A generated live turn is
-supplemental and must not run unless the intended non-paid or explicitly funded
-quota route is proven. Merge readiness depends on deterministic tests and
-non-generating real-installation evidence, not external model availability.
+container provider. A separate validation-only mode may supply Gemini's documented
+`--fake-responses` fixture to the real binary, exercise sandbox launch, stdin
+transport, stream output, and cleanup without contacting a model, and finish
+with `validation_succeeded` rather than the operational `succeeded`
+classification. The fake fixture and validation marker are retained in
+evidence so they cannot be mistaken for delegated delivery. A generated live
+turn is supplemental and must not run unless the intended non-paid or
+explicitly funded quota route is proven. Merge readiness depends on
+deterministic tests and non-generating real-installation evidence, not external
+model availability.
