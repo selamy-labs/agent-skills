@@ -9,7 +9,8 @@ usage() {
 
 owner_only() {
   local mode
-  mode=$(stat -f '%Lp' -- "$1" 2>/dev/null || stat -c '%a' -- "$1")
+  mode=$(stat -c '%a' -- "$1" 2>/dev/null || stat -f '%Lp' -- "$1")
+  [[ $mode =~ ^[0-7]{3,4}$ ]] || return 1
   (( (8#$mode & 077) == 0 ))
 }
 

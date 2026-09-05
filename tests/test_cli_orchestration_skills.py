@@ -124,6 +124,50 @@ def test_launcher_rejects_an_existing_session(tmp_path: Path, tool: str) -> None
         _kill_session(session)
 
 
+@pytest.mark.parametrize("surface", ("launch_tmux.sh", "submit_followup.sh"))
+def test_gemini_owner_only_checks_prefer_gnu_stat_format(tmp_path: Path, surface: str) -> None:
+    directive = tmp_path / "directive.txt"
+    directive.write_text("bounded task\n")
+    directive.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_stat = fake_bin / "stat"
+    fake_stat.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ $1 == -c ]]; then printf '600\\n'; exit 0; fi\n"
+        "if [[ $1 == -f ]]; then printf 'gnu filesystem status\\n%.0s' {1..6}; exit 1; fi\n"
+        "exit 2\n"
+    )
+    fake_stat.chmod(0o755)
+    fake_tmux = fake_bin / "tmux"
+    fake_tmux.write_text('#!/usr/bin/env bash\n[[ $1 == has-session ]] && exit "$FAKE_HAS_SESSION_EXIT"\nexit 99\n')
+    fake_tmux.chmod(0o755)
+
+    if surface == "launch_tmux.sh":
+        script_args = ["existing-gemini-session", str(tmp_path), str(directive), "/bin/echo"]
+        has_session_exit = "0"
+        expected = "session already exists"
+    else:
+        script_args = ["missing-gemini-session", str(directive)]
+        has_session_exit = "1"
+        expected = "session does not exist"
+
+    result = subprocess.run(
+        [str(_script("gemini", surface)), *script_args],
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "FAKE_HAS_SESSION_EXIT": has_session_exit,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        },
+    )
+
+    assert result.returncode == 2
+    assert expected in result.stderr
+    assert "owner-only" not in result.stderr
+
+
 @pytest.mark.skipif(TMUX is None, reason="tmux is not installed")
 @pytest.mark.parametrize("tool", TOOLS)
 def test_followup_retries_enter_and_requires_fresh_post_marker_activity(tmp_path: Path, tool: str) -> None:
