@@ -110,17 +110,23 @@ def write_status(path: Path, status: dict[str, object]) -> None:
             pass
 
 
+def inventory_group_state(process_group_id: int, inventory: ProcessInventory) -> str:
+    group_members = [info for info in inventory.processes.values() if info.process_group_id == process_group_id]
+    if any(not info.state.startswith("Z") for info in group_members):
+        return "alive"
+    if inventory.complete and group_members:
+        return "absent"
+    return "unknown"
+
+
 def process_group_state(process_group_id: int, inventory: ProcessInventory) -> str:
     try:
         os.killpg(process_group_id, 0)
     except ProcessLookupError:
         return "absent"
     except PermissionError:
-        group_members = [info for info in inventory.processes.values() if info.process_group_id == process_group_id]
-        if inventory.complete and group_members and all(info.state.startswith("Z") for info in group_members):
-            return "absent"
-        return "unknown"
-    return "alive"
+        return inventory_group_state(process_group_id, inventory)
+    return inventory_group_state(process_group_id, inventory)
 
 
 def signal_process_group(process_group_id: int, signum: signal.Signals) -> bool:

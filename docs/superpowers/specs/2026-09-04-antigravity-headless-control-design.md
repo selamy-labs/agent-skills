@@ -90,6 +90,9 @@ recorded as `absent`, `alive`, or `unknown`; ambiguous permission errors are a
 conservative harvest failure unless a complete inventory proves the group is
 zombie-only. A previously observed descendant identity is also `unknown` and
 rejected when an incomplete inventory omits it before absence can be proved.
+On platforms where a successful kernel probe still sees a zombie-only group,
+the same complete-inventory requirement proves that the group is quiescent;
+partial zombie evidence remains `unknown`.
 A process that deliberately double-forks and
 detaches before the supervisor observes it is outside this portable
 standard-library boundary; such workloads require a separately verified OS
@@ -130,8 +133,8 @@ Focused tests use fake AGY executables and assert:
 - process-group and observed-descendant harvesting after timeout or SIGTERM;
 - callback-failure cleanup, repeated-signal cleanup, and PID-reuse rejection;
 - normal-exit and timeout process-group cleanup when process inventory is
-  unavailable, including complete-versus-incomplete zombie-only `EPERM`
-  handling;
+  unavailable, including complete-versus-incomplete zombie-only handling after
+  either a successful or permission-denied kernel probe;
 - SIGKILL escalation with a nonempty but incomplete process inventory;
 - tri-state group reporting that rejects ambiguous `EPERM` as a harvest failure;
 - a hanging process-inventory command that cannot exceed the wall deadline;

@@ -107,10 +107,11 @@
   use kernel group probes and must not trust process inventory, including a
   nonempty but partial snapshot. Ignore repeated termination signals until
   cleanup finishes, record group state as `absent|alive|unknown`, prove a
-  zombie-only group's `EPERM` as absent only from a complete inventory, treat
-  ambiguous `EPERM` as a harvest failure, and never signal a stale PID whose
-  start time changed. Verify every tracked descendant independently of process
-  group so a child racing `setsid()` against a group probe remains covered.
+  zombie-only group as absent only from a complete inventory whether the kernel
+  probe succeeds or returns `EPERM`, treat ambiguous state as a harvest failure,
+  and never signal a stale PID whose start time changed. Verify every tracked
+  descendant independently of process group so a child racing `setsid()`
+  against a group probe remains covered.
   Reject descendant state as unknown if incomplete inventory omits an observed
   identity before absence is proved. Use one
   absolute cleanup deadline, cap every process-inventory subprocess to the

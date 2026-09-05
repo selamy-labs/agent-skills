@@ -575,6 +575,23 @@ def test_permission_denied_group_probe_is_unknown_unless_snapshot_proves_zombies
     assert runner.process_group_state(123, runner.ProcessInventory(zombies, True)) == "absent"
 
 
+def test_successful_group_probe_uses_inventory_to_distinguish_live_and_zombie_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner.os, "killpg", lambda _process_group_id, _signum: None)
+    live = {
+        123: runner.ProcessInfo(1, 123, "S", "Mon Jan  1 00:00:00 2024"),
+    }
+    zombies = {
+        123: runner.ProcessInfo(1, 123, "Z", "Mon Jan  1 00:00:00 2024"),
+    }
+
+    assert runner.process_group_state(123, runner.ProcessInventory(live, True)) == "alive"
+    assert runner.process_group_state(123, runner.ProcessInventory(zombies, False)) == "unknown"
+    assert runner.process_group_state(123, runner.ProcessInventory(zombies, True)) == "absent"
+
+
 def test_unknown_group_state_is_a_harvest_failure(tmp_path: Path) -> None:
     runner = _load_runner_module()
     result = runner.ProcessResult(
