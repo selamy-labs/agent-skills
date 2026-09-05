@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "goal_id": "replace-with-reviewed-goal-id",
+  "objective": "Replace with one concrete, bounded outcome.",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "allowed_paths": [
+    "replace/with/allowed/path/"
+  ],
+  "verification_commands": [
+    {
+      "argv": [
+        "replace-with-project-test-command"
+      ],
+      "timeout_seconds": 120
+    }
+  ],
+  "stop_conditions": [
+    "The requested outcome requires changing an unlisted path.",
+    "The intended identity, quota route, or sandbox cannot be proven."
+  ],
+  "max_attempts": 3,
+  "auth_type": "gemini-api-key",
+  "credential_identity": "replace-with-reviewed-non-secret-quota-owner-id",
+  "allow_paid_generation": false,
+  "sandbox_image": "registry.example/gemini-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}
