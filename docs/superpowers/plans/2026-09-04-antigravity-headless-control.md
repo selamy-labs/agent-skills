@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Extend `orchestrate-agy`; do not create a duplicate skill or generalize unrelated orchestrators.
+- Extend `orchestrate-agy`; do not create a duplicate skill or generalize unrelated CLI skills.
 - Require absolute paths, a new evidence directory, an explicit model, `plan|accept-edits`, and a positive timeout.
 - Always use `--sandbox`, JSON output, AGY's log file, an internal print timeout, and a slightly longer wall timeout.
 - Prefer scoped AGY permission rules; blanket bypass requires a runner flag plus `ORCHESTRATE_AGY_PERMISSION_BYPASS_ACK=authorized`.
@@ -171,7 +171,7 @@
 
   Run: `python scripts/lint_skills.py`
 
-  Expected: all tests pass and every skill validates.
+  Expected: all tests succeed and every skill validates.
 
 - [ ] **Step 5: Commit the guidance**
 

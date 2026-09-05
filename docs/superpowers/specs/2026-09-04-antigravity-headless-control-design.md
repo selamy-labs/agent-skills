@@ -23,7 +23,7 @@ terminal sandbox:
 
 Extend the existing skill with one Python standard-library runner,
 `scripts/run_headless.py`. Do not add a second Antigravity skill and do not
-generalize the change across unrelated CLI orchestrators.
+generalize the change across unrelated CLI skills.
 
 The runner accepts absolute paths for a new evidence directory, worktree,
 prompt file, and AGY executable. It also requires a positive timeout, an
@@ -89,7 +89,7 @@ The skill distinguishes:
   worktree with scoped permissions.
 
 If AGY is unavailable or cannot prove the intended model, mode, permission, or
-artifact state, stop or use a separately authorized orchestrator skill. Never
+artifact state, stop or use a separately authorized worker-control skill. Never
 silently translate flags or treat a fallback worker's narrative as acceptance.
 
 ## Verification
