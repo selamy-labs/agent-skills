@@ -235,3 +235,21 @@ def test_runner_allows_explicitly_acknowledged_permission_bypass(tmp_path: Path)
 
     assert result.returncode == 0, result.stderr
     assert "--dangerously-skip-permissions" in json.loads(argv_path.read_text())
+
+
+def test_skill_documents_the_headless_control_contract() -> None:
+    skill = (REPO_ROOT / "skills" / "orchestrate-agy" / "SKILL.md").read_text().lower()
+    required_guidance = (
+        "run_headless.py",
+        "headless `plan`",
+        "headless `accept-edits`",
+        "permissions.allow",
+        "--dangerously-skip-permissions",
+        "permission_blocked",
+        "fallback",
+        "one writer",
+        "independently inspect",
+    )
+
+    missing = [item for item in required_guidance if item not in skill]
+    assert not missing, f"missing AGY headless guidance: {missing}"
