@@ -108,7 +108,9 @@
   nonempty but partial snapshot. Ignore repeated termination signals until
   cleanup finishes, record group state as `absent|alive|unknown`, prove a
   zombie-only group's `EPERM` as absent, treat ambiguous `EPERM` as a harvest
-  failure, and never signal a stale PID whose start time changed.
+  failure, and never signal a stale PID whose start time changed. Use one
+  absolute cleanup deadline, cap every process-inventory subprocess to the
+  remaining time, and start no new inventory probe after the deadline.
   `write_status` must write mode `0600` to a
   sibling temporary file and replace `status.json` atomically.
   `advertised_models` must return the first whitespace-delimited field from

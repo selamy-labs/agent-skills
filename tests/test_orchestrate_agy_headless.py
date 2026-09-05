@@ -398,7 +398,7 @@ def test_run_process_harvests_owned_group_when_process_listing_fails(tmp_path: P
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
         "time.sleep(0.2)"
     )
-    runner.process_snapshot = lambda: {}
+    runner.process_snapshot = lambda _timeout_seconds=2: {}
 
     try:
         result = runner.run_process(
@@ -427,7 +427,7 @@ def test_run_process_times_out_cleanly_without_process_listing(tmp_path: Path) -
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
         "time.sleep(60)"
     )
-    runner.process_snapshot = lambda: {}
+    runner.process_snapshot = lambda _timeout_seconds=2: {}
 
     try:
         result = runner.run_process(
@@ -514,7 +514,7 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
             started_at="Mon Jan  1 00:00:00 2024",
         )
     }
-    runner.process_snapshot = lambda: unrelated_snapshot
+    runner.process_snapshot = lambda _timeout_seconds=2: unrelated_snapshot
 
     try:
         result = runner.run_process(
@@ -531,6 +531,29 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
         assert not _pid_is_running(child_pid)
     finally:
         _kill_known_pids(known_pids)
+
+
+def test_slow_process_inventory_cannot_exceed_the_wall_deadline(tmp_path: Path) -> None:
+    runner = _load_runner_module()
+    slow_ps = tmp_path / "slow-ps.py"
+    slow_ps.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n")
+    slow_ps.chmod(0o755)
+    runner.shutil.which = lambda _name: str(slow_ps)
+    runner.WALL_TIMEOUT_GRACE_SECONDS = 0.5
+    runner.TERMINATION_GRACE_SECONDS = 0.2
+
+    started = time.monotonic()
+    result = runner.run_process(
+        ["/bin/sleep", "60"],
+        tmp_path,
+        tmp_path / "stdout.log",
+        tmp_path / "stderr.log",
+        0.1,
+    )
+
+    assert time.monotonic() - started < 0.9
+    assert result.timed_out is True
+    assert result.process_group_state_after_harvest in {"absent", "unknown"}
 
 
 def test_runner_records_sigint_during_capability_probe_as_interrupted(tmp_path: Path) -> None:

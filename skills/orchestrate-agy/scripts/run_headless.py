@@ -127,9 +127,9 @@ def signal_process(pid: int, signum: signal.Signals) -> bool:
     return True
 
 
-def process_snapshot() -> dict[int, ProcessInfo]:
+def process_snapshot(timeout_seconds: float = 2) -> dict[int, ProcessInfo]:
     ps = shutil.which("ps")
-    if not ps:
+    if not ps or timeout_seconds <= 0:
         return {}
     try:
         completed = subprocess.run(
@@ -137,7 +137,7 @@ def process_snapshot() -> dict[int, ProcessInfo]:
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=min(2, timeout_seconds),
         )
     except (OSError, subprocess.SubprocessError):
         return {}
@@ -153,6 +153,13 @@ def process_snapshot() -> dict[int, ProcessInfo]:
             continue
         snapshot[pid] = ProcessInfo(parent_pid, process_group_id, fields[3], fields[4])
     return snapshot
+
+
+def snapshot_before(deadline: float) -> dict[int, ProcessInfo] | None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    return process_snapshot(remaining)
 
 
 def descendant_pids(root_pid: int, snapshot: dict[int, ProcessInfo]) -> set[int]:
@@ -207,49 +214,68 @@ def group_is_alive(
     )
 
 
+def wait_for_harvest(
+    root_pid: int,
+    process_group_id: int,
+    tracked_processes: dict[int, str],
+    deadline: float,
+    snapshot: dict[int, ProcessInfo],
+) -> tuple[str, list[int], dict[int, ProcessInfo]]:
+    while True:
+        alive = sorted(live_pids(tracked_processes, snapshot))
+        group_state = process_group_state(process_group_id, snapshot)
+        if not alive and group_state == "absent":
+            return group_state, alive, snapshot
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return group_state, alive, snapshot
+        time.sleep(min(POLL_INTERVAL_SECONDS, remaining))
+        next_snapshot = snapshot_before(deadline)
+        if next_snapshot is None:
+            return process_group_state(process_group_id, snapshot), alive, snapshot
+        snapshot = next_snapshot
+        remember_process_tree(root_pid, snapshot, tracked_processes)
+
+
 def harvest_process_tree(
     root_pid: int,
     process_group_id: int,
     tracked_processes: dict[int, str],
+    cleanup_deadline: float,
 ) -> tuple[bool, str, list[int]]:
-    snapshot = process_snapshot()
+    group_signaled = signal_process_group(process_group_id, signal.SIGTERM)
+    term_deadline = min(time.monotonic() + TERMINATION_GRACE_SECONDS, cleanup_deadline)
+    snapshot = snapshot_before(term_deadline) or {}
     remember_process_tree(root_pid, snapshot, tracked_processes)
     live_before = live_pids(tracked_processes, snapshot)
-    group_signaled = signal_process_group(process_group_id, signal.SIGTERM)
     harvested = bool(live_before or group_signaled)
 
     for pid in live_before:
         signal_process(pid, signal.SIGTERM)
 
-    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        snapshot = process_snapshot()
-        remember_process_tree(root_pid, snapshot, tracked_processes)
-        alive = live_pids(tracked_processes, snapshot)
-        group_state = process_group_state(process_group_id, snapshot)
-        if not alive and group_state == "absent":
-            return harvested, "absent", []
-        time.sleep(POLL_INTERVAL_SECONDS)
+    group_state, alive, snapshot = wait_for_harvest(
+        root_pid,
+        process_group_id,
+        tracked_processes,
+        term_deadline,
+        snapshot,
+    )
+    if group_state == "absent" and not alive:
+        return harvested, group_state, alive
 
-    snapshot = process_snapshot()
-    remember_process_tree(root_pid, snapshot, tracked_processes)
-    if process_group_state(process_group_id, snapshot) != "absent":
+    if group_state != "absent":
         signal_process_group(process_group_id, signal.SIGKILL)
-    for pid in live_pids(tracked_processes, snapshot):
+    for pid in alive:
         signal_process(pid, signal.SIGKILL)
 
-    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        snapshot = process_snapshot()
-        alive = live_pids(tracked_processes, snapshot)
-        group_state = process_group_state(process_group_id, snapshot)
-        if not alive and group_state == "absent":
-            return harvested, "absent", []
-        time.sleep(POLL_INTERVAL_SECONDS)
-
-    snapshot = process_snapshot()
-    alive = sorted(live_pids(tracked_processes, snapshot))
-    return harvested, process_group_state(process_group_id, snapshot), alive
+    group_state, alive, _snapshot = wait_for_harvest(
+        root_pid,
+        process_group_id,
+        tracked_processes,
+        cleanup_deadline,
+        snapshot,
+    )
+    return harvested, group_state, alive
 
 
 @contextmanager
@@ -294,20 +320,22 @@ def launch_process(
 
 def monitor_process(
     process: subprocess.Popen[bytes],
-    timeout_seconds: float,
+    process_deadline: float,
     tracked_processes: dict[int, str],
 ) -> tuple[int, bool, int | None]:
-    deadline = time.monotonic() + timeout_seconds
     try:
         while True:
-            snapshot = process_snapshot()
-            remember_process_tree(process.pid, snapshot, tracked_processes)
             returncode = process.poll()
             if returncode is not None:
                 return returncode, False, None
-            if time.monotonic() >= deadline:
+            snapshot = snapshot_before(process_deadline)
+            if snapshot is None:
                 return 124, True, None
-            time.sleep(POLL_INTERVAL_SECONDS)
+            remember_process_tree(process.pid, snapshot, tracked_processes)
+            remaining = process_deadline - time.monotonic()
+            if remaining <= 0:
+                return 124, True, None
+            time.sleep(min(POLL_INTERVAL_SECONDS, remaining))
     except SupervisorInterrupted as error:
         return 128 + error.signum, False, error.signum
 
@@ -338,6 +366,8 @@ def run_process(
     on_start: Callable[[int, int], None] | None = None,
 ) -> ProcessResult:
     tracked_processes: dict[int, str] = {}
+    process_deadline = time.monotonic() + timeout_seconds
+    cleanup_deadline = process_deadline + WALL_TIMEOUT_GRACE_SECONDS
 
     with open_private(stdout_path, "wb") as stdout, open_private(stderr_path, "wb") as stderr:
         stdin = stdin_path.open("rb") if stdin_path else open(os.devnull, "rb")
@@ -350,7 +380,7 @@ def run_process(
                     on_start(process.pid, process.pid)
                 returncode, timed_out, interrupted_signal = monitor_process(
                     process,
-                    timeout_seconds,
+                    process_deadline,
                     tracked_processes,
                 )
             finally:
@@ -358,12 +388,16 @@ def run_process(
                     process.pid,
                     process.pid,
                     tracked_processes,
+                    cleanup_deadline,
                 )
-                try:
-                    returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
+                if process.poll() is None:
                     signal_process(process.pid, signal.SIGKILL)
-                    returncode = process.wait(timeout=TERMINATION_GRACE_SECONDS)
+                remaining = cleanup_deadline - time.monotonic()
+                if remaining > 0:
+                    try:
+                        returncode = process.wait(timeout=remaining)
+                    except subprocess.TimeoutExpired:
+                        returncode = process.poll() or returncode
         finally:
             stdin.close()
     return ProcessResult(
