@@ -1,60 +1,63 @@
 ---
 name: codegraph-worktree-startup
-description: Use when starting or resuming code work in a repository worktree. Initialize or sync CodeGraph, keep its cache uncommitted, and prefer CodeGraph for code navigation before grep or broad file reads.
+description: Use when starting or resuming code work in a repository. Verify CodeGraph, initialize or sync the local graph, keep indexes uncommitted, and prefer graph queries before broad file reads.
 ---
 
 # CodeGraph Worktree Startup
 
-Use CodeGraph as repository startup hygiene for coding tasks. The goal is faster, more accurate code navigation without committing `.codegraph/` cache artifacts.
+Use CodeGraph as repository startup hygiene for coding tasks. The goal is
+faster, more accurate code navigation without committing local index artifacts.
 
 ## Startup
 
-1. Confirm the tool and repository root:
+Confirm the tool and repository root:
 
 ```bash
 command -v codegraph
 git rev-parse --show-toplevel
 ```
 
-If `codegraph` is unavailable, say so briefly and use normal repo exploration.
+If `codegraph` is unavailable and the user has not authorized installing it,
+say so briefly and use normal repository exploration.
 
-2. If an index exists, sync it:
-
-```bash
-codegraph sync "$(git rev-parse --show-toplevel)"
-codegraph status "$(git rev-parse --show-toplevel)"
-```
-
-3. If no index exists, initialize one before code exploration unless disk, memory, or repo size makes that unreasonable:
+Keep the generated index out of source control:
 
 ```bash
-/usr/bin/time -f 'elapsed=%E cpu=%P maxrss_kb=%M' codegraph init "$(git rev-parse --show-toplevel)"
-codegraph status "$(git rev-parse --show-toplevel)"
+root="$(git rev-parse --show-toplevel)"
+grep -qxF '.codegraph/' "$(git rev-parse --git-path info/exclude)" || printf '\n.codegraph/\n' >> "$(git rev-parse --git-path info/exclude)"
 ```
 
-Local calibration has shown small and medium repositories can index in seconds, so prefer measuring once over assuming indexing is expensive.
-
-4. Keep CodeGraph out of source control:
+If an index already exists, sync it before relying on it:
 
 ```bash
-printf '\n.codegraph/\n' >> "$(git rev-parse --git-path info/exclude)"
-git status --short --branch
+codegraph sync "$root"
+codegraph status "$root"
 ```
 
-Use local git excludes instead of editing `.gitignore` unless the repository explicitly wants a shared ignore rule. `git rev-parse --git-path info/exclude` works in linked worktrees because it resolves the real git metadata path.
+If no index exists, initialize one before code exploration unless the repository
+is clearly too large for the current disk/time budget, the task is not code
+work, or the user asked not to create an index:
+
+```bash
+codegraph init "$root"
+codegraph status "$root"
+```
 
 ## Usage
 
-Use CodeGraph before grep or broad file reads when locating code, call paths, blast radius, or likely tests:
+Use CodeGraph before grep or broad file reads when locating code, call paths,
+blast radius, likely tests, or a symbol's implementation:
 
 ```bash
-codegraph explore "<symbol, file, behavior, or bug area>"
-codegraph node "<symbol-or-file>"
+codegraph explore "<symbol, file, behavior, or bug area>" --path "$root"
+codegraph node "<symbol-or-file>" --path "$root"
 codegraph affected <changed-files>
 ```
 
 Prefer:
 
+- `codegraph_explore` MCP when it is available, because it returns relevant
+  source, call paths, and blast radius in one tool call.
 - `codegraph explore` for relevant symbols, line-numbered source, call paths, and blast radius.
 - `codegraph node` for one exact file or symbol.
 - `codegraph affected` after edits when choosing focused tests.
@@ -64,4 +67,6 @@ Run `codegraph sync` after meaningful edits before relying on impact or affected
 
 ## Reporting
 
-When timing a new repository class, record wall time, indexed files, DB size, memory, and whether the first query was useful. If indexing is slow or low-value for that class, document the exception instead of making the startup step performative.
+If CodeGraph cannot be installed, initialized, or queried, state the specific
+blocker and fall back to ordinary repo exploration. Treat `.codegraph/` as
+local generated state unless a repository explicitly asks to version it.
