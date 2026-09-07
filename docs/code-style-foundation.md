@@ -27,7 +27,7 @@ reproducible, and enforceable by ordinary open-source tools.
 | --- | --- | --- | --- |
 | Cross-language | EditorConfig for whitespace, final newline, charset, and end-of-line defaults | reviewdog or native annotations for PR feedback | Repository status checks remain authoritative |
 | Python | Ruff formatter | Ruff lint with `C901` or equivalent complexity rules enabled; complexipy for cognitive-complexity budgets | Pyright for fast standards-based typing; keep mypy when a repo already depends on plugins; coverage.py with feature fixtures |
-| TypeScript / JavaScript | Biome for low-customization repos; Prettier where established | ESLint with `@typescript-eslint` type-aware rules for typed apps; Biome lint for simpler packages | TypeScript `tsc --noEmit`; Vitest or Jest coverage thresholds plus feature tests |
+| TypeScript / JavaScript | Biome for low-customization repos; Prettier where established | ESLint with `@typescript-eslint` type-aware rules for typed apps; Biome lint for simpler packages; `@genese/complexity` for cognitive/cyclomatic complexity reports when function-level budgets are needed | TypeScript `tsc --noEmit`; Vitest or Jest coverage thresholds plus feature tests |
 | Go | `gofmt` and `goimports` | `golangci-lint` with complexity linters such as `gocyclo` or `gocognit` | `go test ./...` with package coverage where meaningful |
 | Java | `google-java-format` | Checkstyle for style and complexity; SpotBugs for bug patterns | Build-tool test and coverage gates |
 | Kotlin | ktlint | detekt for complexity and code-smell rules | Gradle test and coverage gates |
@@ -44,6 +44,9 @@ reproducible, and enforceable by ordinary open-source tools.
 - complexipy project: cognitive complexity analysis for Python with CLI,
   JSON/SARIF output, diff mode, and refactor suggestions,
   https://github.com/rohaquinlop/complexipy.
+- @genese/complexity package: cognitive and cyclomatic complexity reports for
+  TypeScript, JavaScript, TSX, JSX, and Java, exposed through the `complexity`
+  and `genese cpx` CLIs, https://www.npmjs.com/package/@genese/complexity.
 - Pyright project: standards-based Python type checker designed for high
   performance, https://github.com/microsoft/pyright.
 - mypy project: optional static typing for Python with PEP 484 annotations,
