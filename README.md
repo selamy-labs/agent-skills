@@ -68,6 +68,9 @@ their own license terms; they should not be republished in this repository.
 - `table-driven-tests`: cover one behavior across named input/output cases.
 - `complexity-budgets`: enforce branching, nesting, and function-size limits
   with standard linters.
+- `codegraph-worktree-startup`: initialize or sync CodeGraph at repository
+  startup, keep local indexes uncommitted, and use graph queries before broad
+  file reads.
 - `single-responsibility`: when a unit is hard to reason about, decompose it
   into single-responsibility units that collaborate through clear interfaces.
 - `feature-coverage-not-just-line-coverage`: pair coverage percentages with

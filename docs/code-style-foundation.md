@@ -26,7 +26,7 @@ reproducible, and enforceable by ordinary open-source tools.
 | Scope | Formatter | Lint / Static Analysis | Type / Coverage Gate |
 | --- | --- | --- | --- |
 | Cross-language | EditorConfig for whitespace, final newline, charset, and end-of-line defaults | reviewdog or native annotations for PR feedback | Repository status checks remain authoritative |
-| Python | Ruff formatter | Ruff lint with `C901` or equivalent complexity rules enabled | Pyright for fast standards-based typing; keep mypy when a repo already depends on plugins; coverage.py with feature fixtures |
+| Python | Ruff formatter | Ruff lint with `C901` or equivalent complexity rules enabled; complexipy for cognitive-complexity budgets | Pyright for fast standards-based typing; keep mypy when a repo already depends on plugins; coverage.py with feature fixtures |
 | TypeScript / JavaScript | Biome for low-customization repos; Prettier where established | ESLint with `@typescript-eslint` type-aware rules for typed apps; Biome lint for simpler packages | TypeScript `tsc --noEmit`; Vitest or Jest coverage thresholds plus feature tests |
 | Go | `gofmt` and `goimports` | `golangci-lint` with complexity linters such as `gocyclo` or `gocognit` | `go test ./...` with package coverage where meaningful |
 | Java | `google-java-format` | Checkstyle for style and complexity; SpotBugs for bug patterns | Build-tool test and coverage gates |
@@ -41,6 +41,9 @@ reproducible, and enforceable by ordinary open-source tools.
   https://spec.editorconfig.org/.
 - Ruff configuration and formatter docs: Black-compatible formatting defaults
   and explicit McCabe complexity rule selection, https://docs.astral.sh/ruff/.
+- complexipy project: cognitive complexity analysis for Python with CLI,
+  JSON/SARIF output, diff mode, and refactor suggestions,
+  https://github.com/rohaquinlop/complexipy.
 - Pyright project: standards-based Python type checker designed for high
   performance, https://github.com/microsoft/pyright.
 - mypy project: optional static typing for Python with PEP 484 annotations,
