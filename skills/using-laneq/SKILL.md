@@ -67,6 +67,28 @@ Change priority on the fly when new evidence arrives:
 laneq reprioritize <id> P0
 ```
 
+## One Change, One Queue Item
+
+One logical code change owns one queued directive from allocation through
+cleanup. Attempts, corrections, and independent reviews are children of that
+same item, not new top-level directives. Never allocate a second writable
+task item for a review or a retry of the same change.
+
+```bash
+laneq push -p P1 -b "add retry to the upload worker"   # e.g. item #15
+laneq push -p P1 -b "independent review of the upload retry" --parent 15
+laneq thread-status 15   # review still belongs to #15: thread from it, do not
+# push a second top-level item for the same change
+# the parent stays open while the review child is unfinished
+# If a claimed item stalls, laneq requeue <id> returns it to pending.
+# Evidence-before-done is policy: record artifact evidence in the completion
+# note. A bare laneq done with no evidence is accepted natively and is
+# rejected only where an optional environment-specific guard is explicitly configured.
+```
+
+Read-only reviews may drain from an immutable snapshot with a private cache
+instead of claiming the writable task item.
+
 ## Pushing Well-Formed Directives
 
 A good directive has one clear goal plus enough context for the consumer to
@@ -77,6 +99,11 @@ act without asking follow-up questions.
 - A single, specific objective (not a vague wish).
 - Context: relevant file paths, error messages, prior attempts, or links.
 - Evidence: logs, stack traces, or reproduction steps that ground the request.
+
+**Register ownership and cleanup up front:**
+
+- Task ID, repository, owner, and the single worktree/branch/PR identity.
+- Who owns cleanup, and the terminal receipt that closes the obligation.
 
 **Use file-based push for long bodies:**
 
@@ -99,15 +126,31 @@ laneq thread-status 42   # see open/done status of the whole thread
 
 ## Queue Hygiene
 
-### Partial completion: requeue a scoped tail
+### Partial completion: queue the scoped tail first, then close the finished stage
 
-When a directive is partially done, do not hold it open. Mark it done and push
-a new, narrower follow-up for the remaining work:
+When a directive is partially done, the logical task stays open until the
+remainder has a tracked tail. Queue the narrower follow-up for the remaining
+work first, name its link or ID in the current item, then close only the
+finished stage — never mark the logical parent done before its remaining-work
+child exists:
 
 ```bash
-laneq done 15
 laneq push -p P1 -b "remaining: update integration tests for new schema" --parent 15
+laneq thread-status 15   # remainder is tracked; item #15 stays open
+# while the remainder child is unfinished — never laneq done 15 here
 ```
+
+### Cleanup is a queued tail, not an assumption
+
+When a change reaches its terminal state (merged, closed, cancelled, or
+superseded), the same task queues one idempotent cleanup item before the
+parent obligation closes. Cleanup verifies the worktree, branch, and scratch
+state natively and records a `removed`, `retained`, or `blocked` receipt with
+evidence. Product delivery and cleanup completion are distinct; a merge, a
+closed PR, or a producer exit never closes the cleanup obligation by itself.
+
+For work that never allocated a writable resource (read-only review, audit,
+or admin note), record `worktree/branch/PR: N/A` instead of queuing cleanup.
 
 ### Superseded items: drop with a note
 
@@ -146,6 +189,9 @@ Recover items that consumers abandoned without completing:
 laneq reap --expired-leases     # reclaim items whose lease has passed
 laneq reap --stale-seconds 7200 # reclaim items taken more than 2 hours ago
 ```
+
+A missing heartbeat or an old timestamp never proves a task is terminal;
+reconcile a stale lease with the owning task record before reaping it.
 
 ## Inspecting the Queue
 

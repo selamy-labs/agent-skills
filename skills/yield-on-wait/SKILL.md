@@ -8,6 +8,11 @@ description: Use when CI, deploys, image builds, infrastructure applies, certifi
 Do not spend agent time watching a spinner. If the only remaining action is a
 long wait, checkpoint the wait and move to other useful work.
 
+A yield parks the current stage; it never completes the parent task. Name the
+tail that owns the remainder so the parent delivery and cleanup obligations
+stay tracked. See `process-aware-done` for the done standard and
+`ephemeral-workspace-lifecycle` for the cleanup disposition.
+
 ## Trigger
 
 Use this skill when a wait is likely to exceed about two minutes:
@@ -30,6 +35,7 @@ Before switching away, write a durable checkpoint with:
 - resume condition for success
 - failure condition and first diagnostic step
 - exact next action after success or failure
+- the tail that owns the remainder: queue item, review thread, or receipt
 - owner and deadline if the wait can stall indefinitely
 
 The checkpoint is the working memory. It must be specific enough that another
@@ -42,6 +48,7 @@ agent can resume without the original conversation.
   far and creating a scoped verification tail. The tail body should be the
   checkpoint: awaited artifact, check location, resume condition, and
   success/failure actions.
+- Name the tail link or ID in the current item before switching away.
 - Switch to the next queued or unblocked work item.
 - Prefer work that is independent of the parked wait.
 - At natural boundaries, poll parked waits before pulling more work.
@@ -78,6 +85,7 @@ When the wait completes:
 - checkpointing only "waiting on CI" with no run link, resume condition, or
   next action
 - leaving parked waits without a stall alarm or bounded follow-up
+- parking a wait and calling the parent delivery done with no tracked tail
 - holding a broad directive open when the only remaining step is a long wait
   that could be represented as a scoped verification tail
 - treating green CI as a product or deploy verification when the user asked for
@@ -87,4 +95,5 @@ When the wait completes:
 
 A yielded wait is complete only when the real awaited artifact has been checked
 or a scoped blocker tail exists with enough evidence for someone else to
-resume.
+resume. The parent delivery stays open until its own artifact and cleanup
+receipts exist.

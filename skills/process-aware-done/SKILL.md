@@ -31,8 +31,25 @@ answer is not trustworthy without source lineage.
   overfit/lookahead, no hallucinated route or feature, no unverified send.
 - Record gaps explicitly. If verification is queued or blocked, call it
   waiting or blocked, not done.
+- Name the tail that owns any yielded or handed-off remainder, with its link
+  or ID; a note that names only the handed-off stage is incomplete.
 - Apply `ephemeral-workspace-lifecycle` when the task created worktrees,
   temporary clones, scratch directories, build outputs, or local caches.
+
+## Handoff Is Not Done
+
+A stage may yield — park a wait, hand work to another worker, open a PR for
+review — but the parent delivery and cleanup obligations stay tracked until
+their own evidence exists. Closing a queue item, opening a PR, or parking a
+wait completes at most the stage; it never completes the task.
+
+- When yielding, name the tail that owns the remainder: queued verification
+  item, review thread, or cleanup receipt.
+- A merged or closed change is not done while its worktree, clone, scratch
+  directory, or cache has no verified disposition; apply
+  `ephemeral-workspace-lifecycle` and report `removed`, `retained`, or
+  `blocked` with evidence.
+- Record the tail link and the pending cleanup owner in the completion note.
 
 ## Hard Stops
 
@@ -42,3 +59,4 @@ answer is not trustworthy without source lineage.
 - A fix PR for a reproduced failure without its regression ratchet is
   incomplete.
 - A task that leaves unowned ephemeral resources with no expiry is incomplete.
+- A handed-off stage with no tracked tail is incomplete.
