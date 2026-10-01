@@ -16,13 +16,13 @@
     {
       "id": 3,
       "prompt": "Edit this chat message for clarity and concision while keeping the request collegial: 'Hey Alex, I hope your week is going well. I wanted to quickly check in with you about the dashboard draft that we discussed. I have finished the charts and put them in the shared folder. There are still two labels that I am waiting on Finance to confirm. If you have a chance, would you be able to review the charts by Thursday at 3 p.m. so I can incorporate your feedback before Friday's meeting? Thanks so much!'",
-      "expected_output": "A brief collegial message retaining the completed charts, shared-folder location, two pending Finance labels, Alex's review request and Thursday 3 p.m. deadline, and Friday meeting rationale.",
+      "expected_output": "A brief collegial message retaining the dashboard as the subject, completed charts, shared-folder location, two pending Finance labels, Alex's review request and Thursday 3 p.m. deadline, and Friday meeting rationale.",
       "files": []
     },
     {
       "id": 4,
       "prompt": "Edit only the prose in this diff for clarity and concision. Keep the code unchanged: '+// This function is responsible for making sure that we do not accidentally send a duplicate invoice when the retry logic invokes this handler more than one time.\n+if (!invoice.sentAt) sendInvoice(invoice);\n+// It is important to note that this call can return a timeout after the invoice was already sent, so this flag alone does not prove that retrying is safe.'",
-      "expected_output": "The code remains byte-for-byte unchanged. The prose is shorter but retains the non-obvious timeout-after-send warning and avoids claiming the sentAt flag provides idempotency.",
+      "expected_output": "The code remains byte-for-byte unchanged. The prose is shorter but retains the duplicate-invoice rationale and timeout-after-send warning without claiming the sentAt flag provides idempotency.",
       "files": []
     }
   ]
