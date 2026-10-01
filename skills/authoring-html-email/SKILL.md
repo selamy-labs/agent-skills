@@ -7,6 +7,8 @@ description: Build client-facing HTML email that actually renders — correct mu
 
 Email is not the web. Clients (Gmail, Outlook, Apple Mail) strip `<head>`/`<style>`, ignore most CSS, and some show only plain text. A "looks fine in my browser" HTML email arrives broken or as raw tags. Build for the medium.
 
+Use `radical-brevity` to edit the message text before building the HTML and plain-text parts.
+
 ## The non-negotiable: multipart/alternative with BOTH parts
 EVERY client-facing email MUST be `multipart/alternative` carrying **both** a `text/html` part AND a `text/plain` fallback — always, no exceptions. Clients that can't/won't render HTML show the plain part; a missing plain part = some recipients see nothing useful (or your HTML as raw source). Order matters: plain-text first, HTML second (clients pick the LAST part they support).
 

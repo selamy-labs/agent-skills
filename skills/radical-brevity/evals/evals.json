@@ -1,0 +1,29 @@
+{
+  "skill_name": "radical-brevity",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Edit this customer email for clarity and concision. Keep its factual limits and respectful tone: 'Hi Morgan, I wanted to take a moment to provide an update on today's import issue. The import stopped at 9:10 a.m. We restarted the worker at 9:42 a.m., and new imports are now processing. We are still checking whether any records from the interrupted batch need to be retried, so I cannot yet say that all records are present. I will send you the result of that check by 11 a.m. Thank you for your patience.'",
+      "expected_output": "A short, courteous email retaining the 9:10 stop, 9:42 restart, resumed new imports, unresolved record check, and 11 a.m. update. It must not claim all records are present.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Edit this pull request description for clarity and concision: 'We are excited to announce that this PR introduces a highly useful improvement to the upload process. Before, a network timeout meant an upload failed immediately. Now, the worker retries timeouts up to three times with backoff. This change is important because users on unstable connections can finish uploads. I ran pytest tests/test_upload.py: 18 passed. I did not run the full suite. One thing worth noting is that permanent failures still need a manual retry. In conclusion, this PR makes uploads more robust.'",
+      "expected_output": "A concise PR body retaining the old and new behavior, reason, retry limit and backoff, exact test result and scope, and manual retry limitation. No unsupported assurance or ceremonial introduction/conclusion.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Edit this chat message for clarity and concision while keeping the request collegial: 'Hey Alex, I hope your week is going well. I wanted to quickly check in with you about the dashboard draft that we discussed. I have finished the charts and put them in the shared folder. There are still two labels that I am waiting on Finance to confirm. If you have a chance, would you be able to review the charts by Thursday at 3 p.m. so I can incorporate your feedback before Friday's meeting? Thanks so much!'",
+      "expected_output": "A brief collegial message retaining the dashboard as the subject, completed charts, shared-folder location, two pending Finance labels, Alex's review request and Thursday 3 p.m. deadline, and Friday meeting rationale.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Edit only the prose in this diff for clarity and concision. Keep the code unchanged: '+// This function is responsible for making sure that we do not accidentally send a duplicate invoice when the retry logic invokes this handler more than one time.\n+if (!invoice.sentAt) sendInvoice(invoice);\n+// It is important to note that this call can return a timeout after the invoice was already sent, so this flag alone does not prove that retrying is safe.'",
+      "expected_output": "The code remains byte-for-byte unchanged. The prose is shorter but retains the duplicate-invoice rationale and timeout-after-send warning without claiming the sentAt flag provides idempotency.",
+      "files": []
+    }
+  ]
+}
