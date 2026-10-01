@@ -30,6 +30,8 @@ their own license terms; they should not be republished in this repository.
   proxy such as logs or CI alone.
 - `grounded-generation`: generate from verified inputs with explicit source
   lineage.
+- `radical-brevity`: revise prose on any communication surface to remove waste
+  while preserving meaning, context, tone, and action.
 - `wiki-building`: compile immutable evidence and normative sources into a
   durable, provenance-aware knowledge base without laundering synthesis into
   authority.

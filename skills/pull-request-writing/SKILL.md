@@ -76,6 +76,7 @@ failed-item state keeps one bad upload from stalling the rest.
 
 ## Pairs with
 
+- `radical-brevity`: make a final meaning-preserving cut after the required context and evidence are in place.
 - `gate-before-push`: run the repository's own gates locally first so the described validation is already green.
 - `github-pr-shepherding`: classify the PR from GitHub state and drive it to merged or explicitly blocked.
 - `stacked-diff-discipline`: keep each stacked member small and drafted so each description stays truthful.
