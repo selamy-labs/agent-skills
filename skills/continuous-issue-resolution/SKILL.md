@@ -20,6 +20,11 @@ outside the user's authority, record the missing decision and continue other
 independent authorized work. Keep completion criteria, dependencies, and
 evidence in the existing item or PR; avoid a second planning layer.
 
+For routine, reversible choices within standing user authorization, use an
+existing valid route and proceed. An unavailable preferred route does not itself
+require parent approval for another authorized route. Preserve explicit holds,
+required human gates, and decisions that actually need new authority.
+
 Before claiming work, inspect existing branches and PRs. An open PR for the
 same outcome belongs in review or repair, not in a second implementation lane.
 Adopt the exact existing PR when authorized and its source is sound: inspect
@@ -43,6 +48,14 @@ Workers repeat this loop while authorized backlog remains:
 4. Open or update the PR with its exact head, evidence, and remaining gaps;
    hand it to the shepherd and release the implementation claim.
 5. Select the next disjoint ready item within the work-in-progress limit.
+
+Allocation is not execution. Once the claim and workspace are ready, deliver
+the bound item, workspace/branch, acceptance criteria, and validation path to
+the assigned worker once through the existing channel. Confirm task-specific
+work has started; an allocation receipt or queued message alone does not prove
+startup. If the worker remains idle, inspect delivery and its actual state,
+then resume that worker without creating an overlapping replacement. Use
+[[yield-on-wait]] when startup remains pending after bounded observation.
 
 An implementation handoff is not merged, deployed, or accepted completion.
 The shepherd retains delivery ownership while workers continue useful work.

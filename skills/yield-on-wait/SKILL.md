@@ -8,8 +8,8 @@ description: Use when CI, deploys, image builds, infrastructure applies, certifi
 Do not spend agent time watching a spinner. If the only remaining action is a
 long wait, checkpoint the wait and move to other useful work.
 
-A yield parks the current stage; it never completes the parent task. Name the
-tail that owns the remainder so the parent delivery and cleanup obligations
+A yield parks the current stage; it never completes the parent task. Retain the
+existing continuation and owner so the parent delivery and cleanup obligations
 stay tracked. See `process-aware-done` for the done standard and
 `ephemeral-workspace-lifecycle` for the cleanup disposition.
 
@@ -35,36 +35,50 @@ Before switching away, write a durable checkpoint with:
 - resume condition for success
 - failure condition and first diagnostic step
 - exact next action after success or failure
-- the tail that owns the remainder: queue item, review thread, or receipt
+- the existing item or continuation and owner responsible for the remainder
 - owner and deadline if the wait can stall indefinitely
 
 The checkpoint is the working memory. It must be specific enough that another
 agent can resume without the original conversation.
 
+## Wait Identity
+
+Prefer the existing native wait or push mechanism. Bind observation to the
+producer's task, run, or job handle. When only process observation is available,
+record the producer's PID and start time, including its wrapper/child relation
+when relevant. A substring search can match the observer itself or miss a
+wrapped producer; distinguish the watcher from the work it watches.
+
+An observation timeout or watcher exit does not prove producer termination and
+does not authorize a restart. Verify the producer's terminal result or actual
+termination, then check the resulting artifact before advancing dependent work.
+If the result remains unknown, preserve the existing run and checkpoint the
+uncertainty instead of launching a duplicate or adding a polling service.
+
 ## Yield
 
 - For short waits, use a bounded in-turn poll.
-- For longer waits, prefer closing or pausing the current item with evidence so
-  far and creating a scoped verification tail. The tail body should be the
-  checkpoint: awaited artifact, check location, resume condition, and
-  success/failure actions.
-- Name the tail link or ID in the current item before switching away.
+- For longer waits, mark the current stage waiting using the existing queue or
+  continuation convention, with completed evidence and the checkpoint.
+- Reuse the existing continuation and owner; link them from the current item.
+  Create a separate continuation only when needed by that queue's convention,
+  not a new issue or controller for every wait. Keep unmet parent work open.
 - Switch to the next queued or unblocked work item.
 - Prefer work that is independent of the parked wait.
-- At natural boundaries, poll parked waits before pulling more work.
-- If a parked wait becomes the only remaining work, requeue a scoped
-  verification tail instead of holding the original directive open.
+- At natural boundaries, check parked waits through their existing handles.
+- If a parked wait becomes the only remaining work, yield through its existing
+  continuation or native wait; retain the parent until its criteria are met.
 
 ## Checkpoint As Queue Item
 
 When a queue exists, the durable queue item is usually a better carrier than
 the current turn's memory. Use this shape:
 
-- close or mark the broad item with evidence completed so far
-- create a narrow verification tail at the right priority
+- update the existing item with evidence completed so far and waiting status
+- retain its owner and priority, or use its existing continuation
 - include the exact artifact link or ID, check command, success condition,
   failure condition, and next action
-- let the next worker resume from the tail without needing the original thread
+- let the assigned worker resume from the checkpoint without the original thread
 
 This prevents a wait from becoming "work in progress" that survives only in a
 single process or conversation.
@@ -85,15 +99,15 @@ When the wait completes:
 - checkpointing only "waiting on CI" with no run link, resume condition, or
   next action
 - leaving parked waits without a stall alarm or bounded follow-up
-- parking a wait and calling the parent delivery done with no tracked tail
-- holding a broad directive open when the only remaining step is a long wait
-  that could be represented as a scoped verification tail
+- closing unmet parent work because a wait was checkpointed
+- creating duplicate continuations, workers, or controllers for the same wait
+- treating watcher exit or an observation timeout as the producer's completion
 - treating green CI as a product or deploy verification when the user asked for
   a real artifact
 
 ## Done Standard
 
-A yielded wait is complete only when the real awaited artifact has been checked
-or a scoped blocker tail exists with enough evidence for someone else to
-resume. The parent delivery stays open until its own artifact and cleanup
-receipts exist.
+A checkpoint makes a wait resumable; it does not complete the awaited work.
+Complete that work only after its terminal result and real artifact have been
+verified. The parent delivery stays open until its own acceptance criteria and
+cleanup obligations are met.
