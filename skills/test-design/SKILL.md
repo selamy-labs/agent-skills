@@ -22,6 +22,14 @@ Each test verifies **ONE behavior**, so a failure localizes precisely and the te
 ## 3. Small, focused cases with descriptive, sentence-like names
 The **name is the spec.** `returns_404_when_run_id_is_unknown`, not `test3`. A reader should know what broke from the failed test's name alone, without opening the body.
 
+For a workflow or transition test, invoke the production entrypoint and its real
+collaborators through the boundary named by the test. Keep relevant adapters,
+parsers and predicates composed; fake external effects at their boundary (see
+[[prefer-fakes-over-mocks]]). Separate helper tests, source-text order checks and
+fixtures never passed to the entrypoint do not prove that composition. Choose
+inputs that expose a broken hand-off, and keep each test's name and conclusion
+within the boundary it actually exercises.
+
 ## 4. Parameterize data variation; separate methods for different behaviors
 - **Parameterize (table-driven)** across DATA variation of ONE behavior — many inputs, same rule. Give **each case a descriptive label** so a failure names the offending case.
 - Use **separate test methods for DIFFERENT behaviors** — don't cram two rules into one parameterized table.
