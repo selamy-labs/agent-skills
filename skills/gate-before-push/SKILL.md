@@ -33,6 +33,12 @@ path is checked. Reuse valid results for unchanged inputs where repository
 policy permits; do not repeat a full suite merely to rerun a cheap enumeration
 check.
 
+For changes to a shared boundary, identify its affected consumers and run their
+relevant existing suites, even outside the edited package. A success fixture
+must satisfy the boundary's production contract; use small valid artifacts and
+reserve malformed data for rejection cases. Passing each gate category does
+not establish that the affected test scope ran.
+
 ## Why bespoke-first
 
 Generic checks rarely fail twice; the **repo-specific** scanners and validators are where push-and-pray loses. Those are exactly the cheap-to-run, expensive-to-discover-remotely gates — running them locally is the highest-leverage minute you spend.
