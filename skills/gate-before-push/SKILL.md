@@ -27,6 +27,13 @@ after the local commit and before pushing or opening the PR: a scanner using
 `git ls-tree HEAD` cannot see an uncommitted addition. When CI validates a
 composed merge tree, use the repository's existing check for that result.
 
+For qualification or preparation, follow wrappers and package scripts to the
+gate they actually invoke. Verify its input preconditions, including base/head
+identity and required ancestry; accepted CLI arguments alone do not establish
+valid inputs. A receipt consumer's narrower predicate does not waive an
+invoked gate's requirement. Preserve valid evidence and use the repository's
+supported branch-history preparation.
+
 Prefer existing cheap native filename, structure, and metadata validators.
 When file inclusion is unclear, use a focused control to verify the changed
 path is checked. Reuse valid results for unchanged inputs where repository
