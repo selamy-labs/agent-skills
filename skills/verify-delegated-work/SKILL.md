@@ -39,11 +39,13 @@ chain more work onto it.
 
 ## Verification Checklist
 
-Run the checks that fit the artifact; do not stop at the report.
+Independently inspect the checks and artifact that fit the task; do not stop at a worker summary. Verification does not require repeating identical expensive proof when a trusted system of record already binds it to the exact source tree, tool/configuration versions, relevant inputs, and environment, and governing repository policy permits reuse. Live or time-sensitive behavior still needs current evidence at its real boundary.
 
-- **Re-run the reported checks yourself.** Execute the tests, lint, and build
-  on the actual tree, do not trust pasted output. Confirm they succeed in the
-  place that matters, not wherever the worker happened to run them.
+- **Verify authoritative check evidence yourself.** Read actual run IDs, exact
+  heads/trees, commands, and terminal results from the system of record. Rerun
+  affected checks when evidence is missing, stale, opaque, or bound to different
+  code, tools, configuration, inputs, or environment, or when policy requires it.
+  A worker's pasted output alone cannot establish any of these facts.
 - **Read the real diff.** For anything security- or safety-sensitive — shell or
   process execution, file writes, credential or secret handling, network
   egress, deletes — read the code and confirm the claimed guard actually exists
@@ -88,6 +90,7 @@ Run the checks that fit the artifact; do not stop at the report.
 ## Done Standard
 
 Delegated work counts as accepted only when you have checked the real artifact
-yourself — re-ran the checks, read the safety-sensitive diff, launched what
-should launch, and confirmed the change is exactly what was intended — not when
+yourself — independently verified applicable checks, read the safety-sensitive
+diff, exercised the required real behavior, and confirmed the change is exactly
+what was intended — not when
 the worker reported it complete.
