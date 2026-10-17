@@ -38,6 +38,26 @@ Prefer this compact form:
 
 `Readiness landed: <artifact/check>. Supports: <future claim it can verify>. Not claimed: <live/human/hardware/deployment outcome still missing>.`
 
+## Preserve Completed Packages
+
+Keep a completed execution's frozen package and manifest inputs unchanged.
+Prepare follow-on edits and outputs in a separate package outside the recorded
+scope, including any directory or prefix entries; reuse immutable inputs.
+
+If later preparation changes a recorded input, preserve both versions and the
+accepted result. When existing evidence establishes that the accepted execution
+used verified original bytes and the drift happened afterward, restore those
+bytes and verify their recorded identity. Record the drift and restoration
+identities and observed timing; restoring bytes must not erase the intervening
+event. Retain that acceptance instead of replaying accepted effects to repair
+file drift. If the originals cannot be
+verified, the executed inputs differed, or the effects are uncertain, use the
+existing recovery or affected requalification path.
+
+Carry out routine reversible artifact repairs covered by standing authority
+without repeated per-file escalation. Preserve explicit holds, source custody,
+and human gates; changed executed artifacts still need their affected checks.
+
 ## Human-Gated Outcomes
 
 For manual or human-gated acceptance, stop at "ready for human attempt" until
