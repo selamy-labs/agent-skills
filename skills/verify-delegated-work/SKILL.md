@@ -54,8 +54,16 @@ Independently inspect the checks and artifact that fit the task; do not stop at 
   endpoint, open the page, run the binary. A green unit suite routinely coexists
   with a packaging, dependency, or wiring defect that only a real launch
   reveals.
+- **Check acceptance against current authority.** Compare the artifact and
+  tests with the governing spec or user requirement. Tests that restate the
+  implementation can agree with each other while missing the intended behavior.
 - **Confirm the file list is exactly the intended change.** No stray edits, no
   unrelated files, no scope creep beyond what was delegated.
+- **Adopt sound existing work without recreating it.** Verify the existing PR's
+  exact head, diff, authorship, and remaining gaps. Preserve attribution and the
+  PR's review history; a preferred branch name is not a reason to replace it.
+  Head qualification does not by itself qualify the combined or resulting main
+  tree; apply the repository's integration and post-merge policy.
 - **For infrastructure, confirm the plan is non-destructive.** Read the plan or
   diff for replacements, deletes, and data loss before any apply.
 - **Get the actual result from async workers.** When a worker reports idle or

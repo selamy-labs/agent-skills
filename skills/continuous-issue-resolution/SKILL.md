@@ -1,123 +1,105 @@
 ---
 name: continuous-issue-resolution
-description: Use when an agent should treat GitHub issues as an ongoing work queue, including triage, decomposition of oversized issues into smaller child issues, PR-based implementation, verification, and evidence-backed issue closure.
+description: Use when an agent should continuously resolve an authorized backlog through bounded implementation, tested PRs, independent review, and evidence-backed closure. GitHub Issues may hold the queue; an existing authoritative backlog works too.
 ---
 
 # Continuous Issue Resolution
 
-Use GitHub issues as the durable queue and audit log. The loop is:
-
-1. Pull the highest-priority ready issue.
-2. Triage before implementing.
-3. Implement if the issue is independently shippable.
-4. Decompose if it is too broad, ambiguous, or spans multiple independent outcomes.
-5. Record progress and blockers on the issue.
-6. Close only with linked PR and real verification evidence.
-7. Pull the next ready issue.
+Drain the user's current authorized backlog. Use GitHub Issues when they are
+the repository's source of truth; otherwise use its existing task list, spec,
+or work queue. Do not require issue creation or a second ledger to start work.
+Refresh priorities, existing PRs, active owners, and blockers before selecting
+the next item. A historical report is context, not current queue state.
 
 ## Ready Contract
 
-Only take an issue that is explicitly ready by label, assignment, milestone, or
-another repo-defined signal. Do not infer readiness from an interesting title.
-An issue is available iff it has no open PR referencing it AND no fresh claim
-by another worker (see Worker Claims). If no ready issues exist, report idle
-state and any blocked/non-ready work.
+Take a bounded item with a clear outcome, current acceptance criteria, an
+authorized target branch, and a meaningful validation path. Honor the queue's
+existing readiness and ownership signals. If its scope is ambiguous or
+outside the user's authority, record the missing decision and continue other
+independent authorized work. Keep completion criteria, dependencies, and
+evidence in the existing item or PR; avoid a second planning layer.
 
-## Worker Claims (multi-worker locking)
+Before claiming work, inspect existing branches and PRs. An open PR for the
+same outcome belongs in review or repair, not in a second implementation lane.
+Adopt the exact existing PR when authorized and its source is sound: inspect
+its current head, diff, authorship, acceptance evidence, and remaining work.
+Preserve honest attribution. Branch-name preferences alone do not justify
+closing and recreating it. Use [[verify-delegated-work]] before accepting it.
 
-Multiple autonomous workers (Claude conductor, Codex lanes, humans) drain the
-same queues. Before implementing an issue, claim it; never work an issue
-another worker holds.
+## Bounded Workers And A Dedicated Shepherd
 
-- **Claim**: add label `claimed` and post:
-  `🔒 CLAIM worker=<worker-id> ts=<UTC ISO8601> ttl-minutes=90`. worker-id must
-  be unique per worker/run (e.g. `codex-lane-3`, `claude-cir-wf123`).
-- **Verify after claiming** (comments are not atomic): re-read the issue's
-  claim comments. The FRESH claim with the LOWEST comment id wins. If that is
-  not you, post `🔓 RELEASE worker=<id> outcome=lost-race` and move on.
-- **A claim is valid only while its newest CLAIM or HEARTBEAT comment is
-  younger than its ttl-minutes.** For work longer than the TTL, post
-  `🔒 HEARTBEAT worker=<id> ts=<UTC ISO8601>` to renew.
-- **Stale claims are broken, not respected**: if the newest lock comment is
-  older than the TTL, post `🔓 STALE-BREAK worker=<id> prior=<old-worker-id>`
-  and claim normally. This is how dead workers' issues return to the pool — no
-  separate reaper.
-- **Release**: when you stop working an issue for any reason, post
-  `🔓 RELEASE worker=<id> outcome=<pr-opened|decomposed|blocked|abandoned>` and
-  remove the `claimed` label. Once an open PR references the issue, the PR
-  supersedes the claim (workers already skip issues with open PRs).
-- **Readiness**: an issue is available iff it has no open PR referencing it AND
-  no fresh claim. `claimed` label + fresh lock comment = in progress. `claimed`
-  label + expired lock = stale, available via STALE-BREAK.
+For parallel work, keep one writer per concern in isolated workspaces. Assign
+one shepherd to own PR review coordination, CI failures, conflicts, qualified
+merges, and post-merge follow-through. Existing user authorization and explicit
+holds govern that role; assigning it grants no extra merge or deploy authority.
 
-## Triage Decision
+Workers repeat this loop while authorized backlog remains:
 
-Implement now when the issue has:
+1. Claim one ready item using the existing ownership mechanism. Confirm the
+   claim and its file/interface scope before editing; do not race another owner.
+2. Implement the smallest coherent, independently reviewable change.
+3. Run the required local checks and meaningful acceptance tests.
+4. Open or update the PR with its exact head, evidence, and remaining gaps;
+   hand it to the shepherd and release the implementation claim.
+5. Select the next disjoint ready item within the work-in-progress limit.
 
-- one clear outcome
-- acceptance criteria or a small obvious fix
-- a repo owner and target branch
-- a validation path that fits in one PR
+An implementation handoff is not merged, deployed, or accepted completion.
+The shepherd retains delivery ownership while workers continue useful work.
+CI or review waiting on one PR must not become a controller-wide wait for
+unrelated workers. Dependent work may be stacked when repository policy permits;
+preserve one writer per concern and refresh affected evidence after changes.
 
-Decompose when the issue has:
+Set work-in-progress limits from actual implementation capacity, review and CI
+service rates, conflict frequency, and main health. Count waiting PRs as WIP.
+When the queue backs up, finish or unblock existing work before admitting more;
+do not choose a large PR count as a throughput target. Reserve capacity to
+repair main when unhealthy, and obey any repository-wide stop-the-line policy.
 
-- multiple separable outcomes
-- vague scope or missing acceptance criteria
-- cross-repo or cross-system work
-- a roadmap/epic/platform shape
-- risk that would make one PR hard to review or verify
+## Triage And Decomposition
 
-## Decomposition
+Implement now when one clear outcome fits one reviewable PR. Split only when
+there are separable outcomes, excessive risk, or a validation boundary too broad
+for one change. Give each slice acceptance criteria, dependencies, ownership,
+and a validation expectation in the existing backlog. Create child issues only
+when that is the queue's convention. Avoid tiny PRs that merely move incomplete
+behavior across files or increase integration work.
 
-When decomposing:
+## Acceptance And Verification
 
-- create 2-5 child issues, each independently shippable
-- link each child back to the parent
-- give every child acceptance criteria and a validation expectation
-- carry priority only when still justified
-- remove the parent from the ready queue and mark it as tracking/blocked-by-children
-- comment on the parent with the child issue links and why decomposition was chosen
+Anchor acceptance tests to the current governing spec, user requirement, or
+observed bug. A test that restates the new implementation can preserve the
+wrong behavior. Exercise the real boundary the claim depends on, including
+positive controls and failure recovery when relevant.
 
-Decomposition counts as completed work for the current cycle because it turns
-unworkable queue input into executable backlog.
-
-## Implementation
-
-For a workable issue:
-
-- comment that you are taking it, including the intended branch/worktree
-- create an isolated branch
-- record the workspace owner and terminal cleanup contract
-- add or update tests where practical before implementation
-- open a PR against the default branch
-- enable auto-merge only when branch protection and required checks are real
-- keep one writer per repo/concern
+Read exact-artifact qualification from the system of record. Reuse valid
+evidence only when repository policy permits and source, tools, configuration,
+inputs, and environment still match; rerun affected or time-sensitive checks
+when they do not. Keep required CI intact. Do not skip, weaken, or relabel
+failing checks to improve apparent throughput. A green PR alone does not prove
+the combined tree, main health, deployed behavior, or the user's full journey.
 
 ## Blockers
 
-If blocked, comment on the issue with:
+Record the exact blocker, observed evidence, legitimate next action, and owner
+on the existing item or PR. Distinguish ordinary CI/review waiting from a real
+permission, credential, or external decision blocker. Do not repeat an unchanged
+failing action; repair its cause or move to independent ready work. Release or
+hand off the claim using the existing convention.
 
-- exact blocker
-- evidence observed
-- next legitimate unblock path
-- whether work should be retried, decomposed further, or reassigned
-
-Then label or mark it blocked and move to the next ready issue. Remove a clean
-disposable workspace, or record its path, owner, dirty state, and expiry in the
-blocker handoff.
+Use [[ephemeral-workspace-lifecycle]] to remove a clean disposable workspace or
+record its retained path, owner, reason, dirty state, and review deadline.
 
 ## Closure
 
-Close an issue only after the real artifact is verified. The closing comment
-must include:
+Close a backlog item only after its acceptance criteria are verified. Record:
 
-- PR URL and merge state
-- tests/checks run
-- deployed or produced artifact checked, when applicable
-- any residual gap or follow-up issue
-- workspace disposition: removed, or retained with owner, reason, and expiry
+- exact PR and merge state, head and resulting main commit;
+- authoritative checks and meaningful behavior evidence;
+- deployed or produced artifact verification when the item requires it;
+- remaining gaps, next owner, and continuation for pending verification;
+- workspace disposition: removed, or retained with owner, reason, and expiry.
 
-Do not use green CI alone as proof of completion when the issue requires a
-runtime, user-visible, sent, deployed, or externally landed artifact.
-Use `ephemeral-workspace-lifecycle` for the creation, handoff, and removal
-checks.
+Use repository-required post-merge qualification. Auto-merge requests, queued
+merges, and checkpoints are intermediate states. Keep delivery ownership until
+the required outcome is verified, while independent authorized work continues.

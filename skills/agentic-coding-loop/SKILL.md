@@ -26,9 +26,12 @@ Before changing code, name:
 - **Authority boundary:** actions the agent may take autonomously and actions
   that require a human decision.
 
-If the acceptance criteria are missing, infer the smallest reasonable set from
-the request and surrounding code. If the choice is high-impact or ambiguous,
-ask for the missing decision instead of inventing product direction.
+Derive acceptance criteria from the current governing spec, user request, and
+observed behavior; use code and existing tests as evidence, not as the authority
+for what the product should do. If criteria are missing, infer only a small,
+unambiguous set. Ask for a high-impact missing decision while continuing
+independent authorized work. A regression check should fail for the reported
+bug and retain a valid positive control, rather than mirror the proposed fix.
 
 ## The Loop
 
@@ -68,6 +71,16 @@ Passing a lower layer does not prove a higher-layer claim. A green unit test
 does not prove a browser flow works; a successful build does not prove the
 deployed artifact changed. Use [[verify-real-artifact]] and
 [[process-aware-done]] for final claims.
+
+## Continuous Backlog Handoff
+
+In a multi-worker backlog, hand the tested PR, exact head, acceptance evidence,
+and gaps to the existing PR shepherd. That role owns review, CI, conflicts,
+qualified merges, and post-merge verification; the worker may take the next
+disjoint authorized slice within the WIP limit. One PR's CI wait does not stall
+unrelated workers. Preserve holds and repository-required checks, and use
+[[verify-delegated-work]] for policy-permitted exact-artifact evidence reuse.
+PR handoff alone does not complete acceptance that requires merge or runtime proof.
 
 ## Stop Conditions
 
