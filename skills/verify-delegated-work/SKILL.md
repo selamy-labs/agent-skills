@@ -41,6 +41,16 @@ chain more work onto it.
 
 Independently inspect the checks and artifact that fit the task; do not stop at a worker summary. Verification does not require repeating identical expensive proof when a trusted system of record already binds it to the exact source tree, tool/configuration versions, relevant inputs, and environment, and governing repository policy permits reuse. Live or time-sensitive behavior still needs current evidence at its real boundary.
 
+If a reviewer cannot continue, fill the required role through the existing
+review mechanism with available, authorized, qualified capacity. Preserve the
+required review count, independence from authors and each other, and explicit
+model, provider or named-reviewer gates; a session handle alone need not bind
+the role. Carry forward findings, original verdicts and actual reviewer/model
+provenance. Distinguish unfinished review from completed old-head review; retain
+the latter as historical evidence and refresh affected review for the current
+head under repository policy. Bind the successor's review to its actual
+identity/model and the head reviewed, preserving prior review history.
+
 - **Verify authoritative check evidence yourself.** Read actual run IDs, exact
   heads/trees, commands, and terminal results from the system of record. Rerun
   affected checks when evidence is missing, stale, opaque, or bound to different
