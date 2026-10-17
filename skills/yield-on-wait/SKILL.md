@@ -60,9 +60,11 @@ uncertainty instead of launching a duplicate or adding a polling service.
 - For short waits, use a bounded in-turn poll.
 - For longer waits, mark the current stage waiting using the existing queue or
   continuation convention, with completed evidence and the checkpoint.
-- Reuse the existing continuation and owner; link them from the current item.
-  Create a separate continuation only when needed by that queue's convention,
-  not a new issue or controller for every wait. Keep unmet parent work open.
+- Reuse the existing continuation and owner. Name the tail link or ID in the
+  current item before switching away when an existing tail owns the wait;
+  otherwise retain the checkpoint and owner in the current item. Create a
+  separate continuation only when needed by that queue's convention, not a new
+  issue or controller for every wait. Keep unmet parent work open.
 - Switch to the next queued or unblocked work item.
 - Prefer work that is independent of the parked wait.
 - At natural boundaries, check parked waits through their existing handles.
@@ -99,7 +101,7 @@ When the wait completes:
 - checkpointing only "waiting on CI" with no run link, resume condition, or
   next action
 - leaving parked waits without a stall alarm or bounded follow-up
-- closing unmet parent work because a wait was checkpointed
+- parking a wait and calling the parent delivery done with unmet criteria
 - creating duplicate continuations, workers, or controllers for the same wait
 - treating watcher exit or an observation timeout as the producer's completion
 - treating green CI as a product or deploy verification when the user asked for
@@ -109,5 +111,5 @@ When the wait completes:
 
 A checkpoint makes a wait resumable; it does not complete the awaited work.
 Complete that work only after its terminal result and real artifact have been
-verified. The parent delivery stays open until its own acceptance criteria and
-cleanup obligations are met.
+verified. The parent delivery stays open until its own artifact and cleanup
+receipts exist and its acceptance criteria are met.
