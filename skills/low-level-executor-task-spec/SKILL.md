@@ -71,6 +71,24 @@ Include every item the executor cannot infer on its own:
 - **What NOT to assume.** Call out the boundaries: which files to leave
   untouched, which scope not to widen, which adjacent work is out of bounds.
 
+## Preserve authorization scope in handoffs
+
+Carry each cap or permission with its primary authorization reference and its
+stated actor/account, provider, activity, unit, and time window, including any
+explicit timezone. Mark omitted dimensions unknown rather than inventing them.
+Preserve distinctions such as per author initiative, per campaign, and aggregate
+daily spend when summarizing, delegating, or continuing after compaction.
+
+For example, a $5 author-inference cap on one provider does not establish a $5
+cap for an entire product-test journey. An application's per-campaign
+reservation ceiling is another distinct limit, not spending authorization.
+
+If a summary added an unsupported restriction, correct the handoff against the
+primary source rather than repeating it or asking to raise an invented cap.
+Preserve genuine caps, lower limits, and unknown liabilities. Missing authority
+still does not authorize paid calls. Reuse existing approvals, clarify only the
+missing decision, and continue independently authorized work.
+
 ## Before / After
 
 Vague delegation, which forces guessing:
