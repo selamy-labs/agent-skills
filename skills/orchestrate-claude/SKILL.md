@@ -54,6 +54,20 @@ Classify every observation explicitly:
 - **quota-blocked:** the intended account cannot continue;
 - **dead:** the pane or process exited.
 
+Quota is a provider state, not proof of quiescence. Retain its recorded
+response and account/model/reset scope when available, distinct from wrapped
+or clipped TUI text. Inspect the bound parent, subagent, tool and queued-launcher
+handles; preserve active producers rather than treating an observer timeout as
+termination.
+
+When quota blocks progress, retain admitted tasks, exact source proofs and
+authorship. Distinguish substituting an authorized operational executor from
+transferring source custody; use the existing supported handoff for the role
+that changes. Prove the old writer quiescent before assigning the same scope to
+already available authorized capacity, then confirm actual startup. Continue
+independent work within current limits and holds, without duplicate authors or
+another controller.
+
 Answer safe in-scope choices, repair trust/auth under the intended identity, or restart from the recorded lane. Preserve the session ID/name and use current `--resume`, `--continue`, or `--session-id` semantics from help. Use subagents or agent teams only for collision-free bounded work with one integrator. Never infer liveness from tmux session existence alone.
 
 ## Accept the result
