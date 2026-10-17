@@ -35,6 +35,16 @@ The test name and AAA structure tell the story. Reserve comments for the **WHY**
 ## 7. Honest cost
 Single-concept tests **multiply the test count** → more suite time + maintenance. State the tradeoff; don't pretend it's free. **Mitigate** with: parameterization (one method, many cases), **cheap arrange** (builders, fixtures), and **soft assertions** (one arrange/act, many checks). The goal is precise failure localization at acceptable cost — not maximum test count.
 
+## 8. Recovery across lifecycle and context changes
+
+Test replay after a lost response both while the original operation is pending
+and after its effect has committed or completed. Assert recovery of the original
+operation identity and outcome without applying its effect again.
+Also leave a context with unresolved work, visit another, then return; verify
+that recovery remains available in its original context. Keep controls for a
+deliberate new operation and a foreign context, so replay safety does not
+collapse distinct operations or reuse another context's state.
+
 ## When to use / not
 - **Use** for designing or reviewing test *structure/quality*.
 - **Not** the place for the red-green-refactor loop, or test-double strategy (fakes-vs-mocks) — see the upstream TDD skills and [[prefer-fakes-over-mocks]].
