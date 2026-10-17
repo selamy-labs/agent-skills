@@ -16,6 +16,23 @@ The trap is running the obvious checks (build, unit tests) and missing the **bes
 3. **Fix locally until all are green.** A bespoke scanner often false-positives on innocent text (e.g. a phrase that resembles a secret pattern); reword and re-run rather than pushing and hoping.
 4. **Match the metadata gates too** — if CI validates the PR title or commit format (conventional commits, squash-release prefixes), confirm yours conforms before opening the PR.
 
+## Validate the input each check actually reads
+
+Before trusting a passing result, identify whether the check reads the working
+tree, the index, committed `HEAD`, or a composed merge tree. Confirm that its
+file selection includes every new or renamed path in its scope.
+
+Stage intended paths before index-based checks. Run `HEAD`-enumerating checks
+after the local commit and before pushing or opening the PR: a scanner using
+`git ls-tree HEAD` cannot see an uncommitted addition. When CI validates a
+composed merge tree, use the repository's existing check for that result.
+
+Prefer existing cheap native filename, structure, and metadata validators.
+When file inclusion is unclear, use a focused control to verify the changed
+path is checked. Reuse valid results for unchanged inputs where repository
+policy permits; do not repeat a full suite merely to rerun a cheap enumeration
+check.
+
 ## Why bespoke-first
 
 Generic checks rarely fail twice; the **repo-specific** scanners and validators are where push-and-pray loses. Those are exactly the cheap-to-run, expensive-to-discover-remotely gates — running them locally is the highest-leverage minute you spend.
