@@ -39,6 +39,31 @@ def test_roundtrip(payload):
     assert decode(encode(payload)) == payload     # holds for ALL payloads
 ```
 
+## Stateful histories and read-only observations
+
+For history-bearing stores, generate valid **action sequences** against a small
+reference model: repeated updates, ownership changes, observations and reloads.
+Check required state, proofs and unrelated fields after every action; shrink the
+sequence, not just its final input.
+
+- **Growth:** bound encoded bytes, retained-record counts and nesting against
+  the required retained payload at increasing sequence lengths. Include an
+  increasing-payload control. If each event should be retained once, repeated
+  fixed-size changes must not recursively embed earlier histories.
+- **Observation:** when an API promises read-only inspection, assert no store
+  write, replacement or fsync. Unchanged decoded state or bytes alone can hide
+  a same-byte rewrite. Check file identity/mtime or spy persistence calls;
+  account separately for declared cache or telemetry effects.
+- **Controls:** exercise updates alone, transfers alone, interleaved actions,
+  repeated reads and reloads. Retain legitimate history and required evidence;
+  a smaller file obtained by losing records is not a passing result.
+
+If stored state is unexpectedly large, inspect metadata and the serialization
+and mutation paths first. Reproduce with a tiny owned fixture under event,
+byte and time limits before loading, copying or hashing the full store. Keep
+any necessary production inspection within existing ownership and resource
+bounds; synthetic timings do not measure production latency.
+
 ## Discipline
 
 - **Assert behavior, not the implementation** — a property restating the code
