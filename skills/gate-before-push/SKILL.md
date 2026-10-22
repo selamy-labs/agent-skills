@@ -1,11 +1,22 @@
 ---
 name: gate-before-push
 description: Use before opening a pull request. Reproduce the repository's OWN CI gates locally and make them green first — including its bespoke checks — so the PR arrives green and merges first-try instead of burning scarce CI iterations.
+metadata:
+  audience: universal
+  helpers: scripts/repository_preflight.py
 ---
 
 # gate-before-push
 
 Open a PR only after it would already go green. Every red CI iteration costs a full runner cycle plus review latency; when runner capacity is constrained, a push-and-pray PR steals capacity from everyone. The fix is to run the **repository's own gates** locally before the push — not "I ran some tests," but the exact checks CI will run.
+
+
+## Deterministic helper
+
+Call the bundled helper from this skill directory; see `references/helper.md`
+for input contracts and examples. It collects mechanical evidence. Keep readiness,
+authority and semantic decisions with the reviewer. Missing evidence remains pending.
+
 
 ## Read the gate list from CI — don't guess
 
