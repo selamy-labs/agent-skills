@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "checks": [
+    {"name": "catalog", "scope": "worktree", "argv": ["python3", "scripts/lint_skills.py"]},
+    {"name": "privacy", "scope": "worktree", "argv": ["python3", "scripts/privacy_scan.py"]},
+    {"name": "hosted-quality", "scope": "hosted"}
+  ]
+}

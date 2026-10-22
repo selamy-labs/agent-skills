@@ -59,7 +59,7 @@ jobs:
         # goal of the format gate (#101).
         run: pip install pytest pytest-cov ruff==0.15.21
       - name: Lint with ruff
-        run: ruff check tools/ tests/
+        run: ruff check tools/ tests/ skills/github-pr-shepherding/scripts/ skills/gate-before-push/scripts/
       - name: Check formatting with ruff
         run: ruff format --check --diff .
       - name: Run tests with coverage

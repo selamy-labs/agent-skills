@@ -102,6 +102,25 @@ def _validate_name(name: str, skill_path: Path, known_names: set[str]) -> list[s
     return errors
 
 
+AUDIENCES = {"control-plane-only", "worker", "universal"}
+AUDIENCE_ALIASES = {"agent": "worker"}
+
+
+def validate_metadata(data: dict, skill_path: Path) -> list[str]:
+    """Missing audience remains compatible; explicit values and packaged helpers are enforced."""
+    metadata = data.get("metadata", {})
+    errors = []
+    audience = metadata.get("audience")
+    if audience is not None and AUDIENCE_ALIASES.get(audience, audience) not in AUDIENCES:
+        errors.append(f"{skill_path}: invalid metadata audience: {audience}")
+    helpers = metadata.get("helpers", "")
+    for helper in helpers.split():
+        candidate = (skill_path.parent / helper).resolve()
+        if not candidate.is_relative_to(skill_path.parent.resolve()) or not candidate.is_file():
+            errors.append(f"{skill_path}: missing or uncontained packaged helper: {helper}")
+    return errors
+
+
 def validate_skill(text: str, skill_path: Path, known_names: set[str]) -> list[str]:
     """Validate a single skill file. Returns list of error strings."""
     errors: list[str] = []
@@ -114,6 +133,7 @@ def validate_skill(text: str, skill_path: Path, known_names: set[str]) -> list[s
         if not description:
             errors.append(f"{skill_path}: missing description")
         errors.extend(_validate_name(name, skill_path, known_names))
+        errors.extend(validate_metadata(data, skill_path))
         if len(description.split()) > 45:
             errors.append(f"{skill_path}: description should stay concise (<=45 words)")
         if "<" in description and ">" in description:
