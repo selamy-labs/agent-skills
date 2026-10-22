@@ -82,6 +82,29 @@ unrelated workers. Preserve holds and repository-required checks, and use
 [[verify-delegated-work]] for policy-permitted exact-artifact evidence reuse.
 PR handoff alone does not complete acceptance that requires merge or runtime proof.
 
+## Unattended Worker Loops
+
+When a script restarts a worker until its unit of work is done, keep the
+judgment in the model and the control flow in deterministic code:
+
+- **Directive vs feedback.** Give the worker a persistent directive, re-read
+  every iteration, and a separate feedback channel consumed once. Rules that
+  must outlive one iteration (decisions, scope, blocker rules) go in the
+  directive; individual review comments go in feedback.
+- **Mechanical exit.** A script, not the model, decides completion: the PR
+  exists, required checks are green on its exact head commit, no feedback or
+  unresolved review thread is pending, and the branch contains its base's
+  current head. A model's claim of "done" changes nothing.
+- **Narrow blocker contract.** Only a missing contract owned by another unit of
+  work is a blocker. Merge conflicts, missing pins or tools, scaffolding, and
+  failing gates are work. A blocked worker writes one line with a fixed prefix
+  and stops; the coordinator verifies the claim before accepting it.
+- **Isolation.** One worktree, branch, and state directory per loop. Bound
+  every external call with a timeout, and stop processes only by the exact
+  process IDs the loop recorded.
+- **Move judgment left.** When the same correction recurs across loops, promote
+  it into the shared directive, then into a script check or required gate.
+
 ## Stop Conditions
 
 Stop and report success only when:

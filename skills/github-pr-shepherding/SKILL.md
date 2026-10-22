@@ -34,6 +34,9 @@ Shepherd a pull request from current GitHub state to either merged or explicitly
    - Bound CI using actual workflow and runner controls. Drafts suppress jobs only when workflows implement that behavior. Promote all members of a ready merge prefix within capacity; parent merge is not a universal prerequisite for child review or CI.
    - A lower-head, trunk, order, or membership change requires fresh applicable evidence. For a queued stack's normal trunk advancement, verify the queue's current merge-group SHA/checks without competing branch rewrites. Queue admission remains `queued` until GitHub confirms actual merges.
    - For long waits, checkpoint with timestamped evidence and the next planned recheck instead of repeatedly polling without new information.
+   - Gate human review behind an independent reviewer: a different model or identity reviews a green, up-to-date PR against its spec and recorded decisions, with a fixed cap on rounds per head commit. A rejection goes back to the owning worker as feedback and the PR returns to draft. Mark a PR ready for humans only when it is green, current with its base, and passed review.
+   - Where repository policy allows carrying an approval forward, carry it only when the PR's own change is patch-identical to the approved commit (compare `git diff <merge-base> <commit> | git patch-id --stable`); otherwise request review again.
+   - Resolve a review thread only after its owner has answered it in the thread.
 5. Leave blocker comments only when useful and evidenced.
    - State the exact blocker, observed GitHub status, and next legitimate unblock path.
    - Keep comments concise and omit sensitive details, credentials, private logs, or speculative blame.
