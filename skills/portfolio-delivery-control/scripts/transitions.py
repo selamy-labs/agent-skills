@@ -13,7 +13,9 @@ from admission import verify_mandatory_gates
 from providers import (
     ALLOWED_MERGE_IDENTITIES,
     fetch_ci_checks_from_provider,
+    fetch_commit_check_runs_from_provider,
     fetch_pr_base_branch,
+    has_app_pinned_checks,
     is_hex_40,
     is_hex_64,
     iso_timestamp,
@@ -345,7 +347,12 @@ def _guard_live_provider_ci(
         return False, "MISSING_EXACT_HEAD_CI"
     if not live_checks:
         return False, "CI_CHECK_MISSING"
-    v_ok, v_err = verify_live_status_rollup(live_checks, commit_sha, required_checks=req_checks)
+    check_runs = None
+    if has_app_pinned_checks(req_checks):
+        check_runs = fetch_commit_check_runs_from_provider(repo, commit_sha, runner=command_runner, cwd=wt_path)
+        if check_runs is None:
+            return False, "MISSING_EXACT_HEAD_CI"
+    v_ok, v_err = verify_live_status_rollup(live_checks, commit_sha, required_checks=req_checks, check_runs=check_runs)
     if not v_ok:
         return False, v_err
     return True, ""
@@ -471,9 +478,11 @@ def _guard_action_ci(
         if not pr_ref:
             return False, {"status": "refused", "reason_code": "CI_CHECK_FAILED", "observed_at": iso_now}, None
         pr_base = fetch_pr_base_branch(repo, pr_ref, runner=command_runner, cwd=wt_path)
-        if pr_base and pr_base != expected_base_branch:
+        if not pr_base:
+            return False, {"status": "refused", "reason_code": "PR_VIEW_FAILED", "observed_at": iso_now}, None
+        if pr_base != expected_base_branch:
             return False, {"status": "refused", "reason_code": "BASE_BRANCH_MISMATCH", "observed_at": iso_now}, None
-        target_base = pr_base or expected_base_branch
+        target_base = pr_base
         req_checks = resolve_required_checks(
             repo,
             base_branch=target_base,

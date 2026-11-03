@@ -93,6 +93,7 @@ def _pr_view_resp(cmd_str: str, c_sha: str) -> tuple[int, str]:
     payload = {
         "state": state,
         "headRefOid": c_sha,
+        "baseRefName": "main",
         "statusCheckRollup": [{"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}],
     }
     if is_merged:
@@ -135,6 +136,8 @@ class _RepoCaptureRunner:
     def __call__(self, cmd: list[str], cwd: Any = None) -> tuple[int, str]:
         self.captured_cmds.append(list(cmd))
         cmd_str = " ".join(cmd)
+        if "baseRefName" in cmd_str and "statusCheckRollup" not in cmd_str:
+            return 0, json.dumps({"baseRefName": "main"})
         if "required_status_checks" in cmd_str:
             return 0, json.dumps({"contexts": ["test-gate"]})
         if "statusCheckRollup" in cmd_str:
@@ -361,6 +364,8 @@ class TestTransitions(unittest.TestCase):
 
         def live_failing_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["ci/test"]})
             if "statusCheckRollup" in cmd_str:
@@ -428,6 +433,8 @@ class TestTransitions(unittest.TestCase):
 
         def live_failing_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
             if "statusCheckRollup" in cmd_str:
@@ -464,6 +471,8 @@ class TestTransitions(unittest.TestCase):
 
         def live_failing_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
             if "statusCheckRollup" in cmd_str:
@@ -524,6 +533,8 @@ class TestTransitions(unittest.TestCase):
 
         def mock_live_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
             if "statusCheckRollup" in cmd_str:
@@ -568,6 +579,8 @@ class TestTransitions(unittest.TestCase):
 
         def live_failing_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
             if "statusCheckRollup" in cmd_str:
@@ -875,6 +888,8 @@ class TestTransitions(unittest.TestCase):
 
         def live_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
             if "statusCheckRollup" in cmd_str:
@@ -1315,6 +1330,10 @@ class TestTransitions(unittest.TestCase):
         fake_gh = fake_bin / "gh"
         fake_gh_content = f"""#!/bin/sh
 case "$*" in
+  *baseRefName*)
+    echo '{{"baseRefName": "main"}}'
+    exit 0
+    ;;
   *required_status_checks*)
     echo '{{"contexts": ["test"]}}'
     exit 0
@@ -1352,6 +1371,8 @@ exit 0
 
         def unrelated_only_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["Quality"]})
             if "statusCheckRollup" in cmd_str:
@@ -1376,12 +1397,14 @@ exit 0
         self.assertEqual(res.get("status"), "refused")
         self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
 
-    def test_required_checks_fetch_error_and_empty_list_fail_closed(self) -> None:
-        """Negative tests for WFM14-01: provider fetch error or empty required list fail-closed."""
+    def test_required_checks_fetch_error_fail_closed(self) -> None:
+        """Negative test for WFM14-01: provider fetch error fails closed."""
         self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
 
         def fetch_error_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str or "rules/branches" in cmd_str:
                 return 1, "API rate limit or branch protection not configured"
             if "statusCheckRollup" in cmd_str:
@@ -1406,8 +1429,14 @@ exit 0
         self.assertEqual(res_err.get("status"), "refused")
         self.assertEqual(res_err.get("reason_code"), "CI_CHECK_MISSING")
 
+    def test_required_checks_empty_list_fail_closed(self) -> None:
+        """Negative test for WFM14-01: empty required list fails closed."""
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+
         def empty_list_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": []})
             if "statusCheckRollup" in cmd_str:
@@ -1432,17 +1461,19 @@ exit 0
         self.assertEqual(res_empty.get("status"), "refused")
         self.assertEqual(res_empty.get("reason_code"), "CI_CHECK_MISSING")
 
-    def test_required_checks_policy_fallback_success_and_negative_control(self) -> None:
-        """Tests policy fallback when provider fetch fails, plus negative control for missing check."""
+    def test_required_checks_policy_fallback_success(self) -> None:
+        """Tests policy fallback when provider fetch fails."""
         self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
         policy_file = self.state_dir / "delivery-policy.json"
         policy_file.write_text(
-            json.dumps({"required_checks": {"agent-skills": ["policy-gate"]}}),
+            json.dumps({"authoritative": True, "required_checks": {"agent-skills": ["policy-gate"]}}),
             encoding="utf-8",
         )
 
         def runner_with_policy_gate(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str or "rules/branches" in cmd_str:
                 return 1, "Provider protection endpoint unavailable"
             if "statusCheckRollup" in cmd_str:
@@ -1471,8 +1502,19 @@ exit 0
         )
         self.assertEqual(res_ok.get("status"), "transitioned")
 
+    def test_required_checks_policy_fallback_negative_control(self) -> None:
+        """Negative control for missing check under policy fallback."""
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+        policy_file = self.state_dir / "delivery-policy.json"
+        policy_file.write_text(
+            json.dumps({"authoritative": True, "required_checks": {"agent-skills": ["policy-gate"]}}),
+            encoding="utf-8",
+        )
+
         def runner_missing_policy_gate(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str or "rules/branches" in cmd_str:
                 return 1, "Provider protection endpoint unavailable"
             if "statusCheckRollup" in cmd_str:
@@ -1687,6 +1729,83 @@ exit 0
         self.assertEqual(res.get("status"), "refused")
         self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
 
+    def test_execute_transition_passes_when_check_app_id_matches(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return _app_id_match_runner(cmd, self.c_sha)
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "transitioned")
+
+    def test_execute_transition_refuses_when_base_branch_read_fails(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 1, "Failed to read PR"
+            return 0, ""
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "PR_VIEW_FAILED")
+
+    def test_execute_transition_refuses_when_provider_unreachable_and_policy_not_authoritative(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+        policy_file = self.state_dir / "delivery-policy.json"
+        policy_file.write_text(
+            json.dumps({"authoritative": False, "required_checks": {"agent-skills": ["policy-gate"]}}),
+            encoding="utf-8",
+        )
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "baseRefName" in cmd_str:
+                return 0, json.dumps({"baseRefName": "main"})
+            if "required_status_checks" in cmd_str or "rules/branches" in cmd_str:
+                return 1, "Provider unreachable"
+            if "statusCheckRollup" in cmd_str:
+                return 0, json.dumps(
+                    {
+                        "headRefOid": self.c_sha,
+                        "statusCheckRollup": [
+                            {
+                                "name": "policy-gate",
+                                "status": "COMPLETED",
+                                "conclusion": "SUCCESS",
+                                "head_sha": self.c_sha,
+                            }
+                        ],
+                    }
+                )
+            return 0, ""
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
+
     def test_execute_transition_skipped_unrelated_check_passes(self) -> None:
         self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
 
@@ -1773,6 +1892,21 @@ def _app_id_mismatch_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
         return 0, json.dumps({"checks": [{"context": "Quality", "app_id": 12345}]})
     if "rules/branches" in cmd_str:
         return 0, json.dumps([])
+    if "check-runs" in cmd_str:
+        return 0, json.dumps(
+            {
+                "total_count": 1,
+                "check_runs": [
+                    {
+                        "name": "Quality",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": c_sha,
+                        "app": {"id": 99999, "slug": "wrong-app"},
+                    }
+                ],
+            }
+        )
     if "pr view" in cmd_str:
         return 0, json.dumps(
             {
@@ -1785,7 +1919,46 @@ def _app_id_mismatch_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
                         "status": "COMPLETED",
                         "conclusion": "SUCCESS",
                         "head_sha": c_sha,
-                        "app": None,
+                    }
+                ],
+            }
+        )
+    return 0, ""
+
+
+def _app_id_match_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"checks": [{"context": "Quality", "app_id": 12345}]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
+    if "check-runs" in cmd_str:
+        return 0, json.dumps(
+            {
+                "total_count": 1,
+                "check_runs": [
+                    {
+                        "name": "Quality",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": c_sha,
+                        "app": {"id": 12345, "slug": "pinned-app"},
+                    }
+                ],
+            }
+        )
+    if "pr view" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "state": "OPEN",
+                "baseRefName": "main",
+                "statusCheckRollup": [
+                    {
+                        "name": "Quality",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "head_sha": c_sha,
                     }
                 ],
             }

@@ -28,15 +28,18 @@ from providers import (  # noqa: E402
     _verify_merge_pr_view,
     check_existing_pr,
     fetch_ci_checks_from_provider,
+    fetch_commit_check_runs_from_provider,
     fetch_pr_base_branch,
     fetch_required_checks_from_provider,
     get_commit_modified_paths,
     get_remote_branch_sha,
+    has_app_pinned_checks,
     inspect_git_commit,
     is_approved_identity,
     is_ci_check_passing,
     is_hex_40,
     is_hex_64,
+    is_policy_authoritative,
     iso_timestamp,
     load_policy_required_checks,
     parse_required_checks,
@@ -67,6 +70,59 @@ def _init_git_repo(repo_dir: Path) -> str:
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True)
     res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True)
     return res.stdout.strip()
+
+
+def _make_app_pinned_merge_runner(c_sha: str, merged: list[bool], fail_check_runs: bool = False) -> Any:
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if fail_check_runs and "check-runs" in cmd_str:
+            return 1, "failed check-runs"
+        if "api user" in cmd_str:
+            return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+        if "required_status_checks" in cmd_str:
+            return 0, json.dumps({"checks": [{"context": "Quality", "app_id": 15368}]})
+        if "rules/branches" in cmd_str:
+            return 0, json.dumps([])
+        if "check-runs" in cmd_str:
+            return 0, json.dumps(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        {
+                            "name": "Quality",
+                            "status": "completed",
+                            "conclusion": "success",
+                            "head_sha": c_sha,
+                            "app": {"id": 15368},
+                        }
+                    ],
+                }
+            )
+        if "pr view" in cmd_str:
+            if merged[0]:
+                return 0, json.dumps(
+                    {
+                        "state": "MERGED",
+                        "headRefOid": c_sha,
+                        "baseRefName": "main",
+                        "mergedAt": "2026-11-03T18:00:00Z",
+                        "mergeCommit": {"oid": "4" * 40},
+                    }
+                )
+            return 0, json.dumps(
+                {
+                    "state": "OPEN",
+                    "headRefOid": c_sha,
+                    "baseRefName": "main",
+                    "statusCheckRollup": [{"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+                }
+            )
+        if "pr merge" in cmd_str:
+            merged[0] = True
+            return 0, "Merged"
+        return 0, ""
+
+    return runner
 
 
 class TestProviders(unittest.TestCase):
@@ -1165,6 +1221,185 @@ class TestProviders(unittest.TestCase):
         ok2, code2 = _is_named_check_passing("test-gate", rollup_both_passed, self.c_sha)
         self.assertTrue(ok2)
         self.assertEqual(code2, "")
+
+    def test_fetch_commit_check_runs_from_provider(self) -> None:
+        def ok_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        {
+                            "id": 123456,
+                            "name": "Quality",
+                            "head_sha": self.c_sha,
+                            "status": "completed",
+                            "conclusion": "success",
+                            "app": {"id": 15368, "slug": "github-actions"},
+                        }
+                    ],
+                }
+            )
+
+        runs = fetch_commit_check_runs_from_provider("selamy-labs/agent-skills", self.c_sha, runner=ok_runner)
+        self.assertIsNotNone(runs)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["name"], "Quality")
+        self.assertEqual(runs[0]["app"]["id"], 15368)
+
+        self.assertIsNone(
+            fetch_commit_check_runs_from_provider(
+                "selamy-labs/agent-skills", self.c_sha, runner=lambda cmd, cwd=None: (1, "fail")
+            )
+        )
+        self.assertIsNone(
+            fetch_commit_check_runs_from_provider(
+                "selamy-labs/agent-skills", self.c_sha, runner=lambda cmd, cwd=None: (0, "not json")
+            )
+        )
+        self.assertIsNone(
+            fetch_commit_check_runs_from_provider(
+                "selamy-labs/agent-skills", self.c_sha, runner=lambda cmd, cwd=None: (0, "[]")
+            )
+        )
+        self.assertIsNone(
+            fetch_commit_check_runs_from_provider(
+                "selamy-labs/agent-skills", self.c_sha, runner=lambda cmd, cwd=None: (0, "{}")
+            )
+        )
+        runs_empty = fetch_commit_check_runs_from_provider("", self.c_sha, runner=ok_runner)
+        self.assertIsNotNone(runs_empty)
+
+    def test_has_app_pinned_checks(self) -> None:
+        self.assertTrue(has_app_pinned_checks([{"context": "Quality", "app_id": 15368}]))
+        self.assertTrue(has_app_pinned_checks([{"context": "Quality", "integration_id": 15368}]))
+        self.assertFalse(has_app_pinned_checks([{"context": "Quality"}]))
+        self.assertFalse(has_app_pinned_checks([]))
+        self.assertFalse(has_app_pinned_checks(None))
+
+    def test_is_policy_authoritative(self) -> None:
+        p_dir = Path(self.temp_dir.name) / "policy_test"
+        p_dir.mkdir(parents=True, exist_ok=True)
+        self.assertFalse(is_policy_authoritative("selamy-labs/agent-skills", None))
+        self.assertFalse(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
+
+        p_file = p_dir / "delivery-policy.json"
+        p_file.write_text(json.dumps({"authoritative": True}), encoding="utf-8")
+        self.assertTrue(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
+
+        p_file.write_text(json.dumps({"authoritative_policy": True}), encoding="utf-8")
+        self.assertTrue(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
+
+        p_file.write_text(json.dumps({"authoritative_repositories": ["agent-skills"]}), encoding="utf-8")
+        self.assertTrue(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
+        self.assertFalse(is_policy_authoritative("other-org/other-repo", p_dir))
+
+        p_file.write_text(json.dumps({"authoritative": {"agent_skills": True}}), encoding="utf-8")
+        self.assertTrue(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
+        p_file.write_text(json.dumps({"authoritative": {"agent_skills": False}}), encoding="utf-8")
+        self.assertFalse(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
+
+    def test_resolve_required_checks_policy_authoritative(self) -> None:
+        p_dir = Path(self.temp_dir.name) / "policy_auth_test"
+        p_dir.mkdir(parents=True, exist_ok=True)
+        p_file = p_dir / "delivery-policy.json"
+        p_file.write_text(
+            json.dumps({"authoritative": False, "required_checks": {"agent-skills": ["gate"]}}),
+            encoding="utf-8",
+        )
+
+        res1 = resolve_required_checks(
+            "selamy-labs/agent-skills", runner=lambda cmd, cwd=None: (1, "fail"), control_dir=p_dir
+        )
+        self.assertIsNone(res1)
+
+        p_file.write_text(
+            json.dumps({"authoritative": True, "required_checks": {"agent-skills": ["gate"]}}),
+            encoding="utf-8",
+        )
+        res2 = resolve_required_checks(
+            "selamy-labs/agent-skills", runner=lambda cmd, cwd=None: (1, "fail"), control_dir=p_dir
+        )
+        self.assertEqual(res2, [{"context": "gate", "app_id": None}])
+
+    def test_verify_live_status_rollup_app_pinned_checks(self) -> None:
+        req = [{"context": "Quality", "app_id": 15368}]
+        rollup_real_gh = [{"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}]
+        check_runs_ok = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 15368},
+            }
+        ]
+
+        ok, code = verify_live_status_rollup(rollup_real_gh, self.c_sha, required_checks=req, check_runs=check_runs_ok)
+        self.assertTrue(ok)
+        self.assertEqual(code, "")
+
+        check_runs_wrong_app = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 99999},
+            }
+        ]
+        ok_w, code_w = verify_live_status_rollup(
+            rollup_real_gh, self.c_sha, required_checks=req, check_runs=check_runs_wrong_app
+        )
+        self.assertFalse(ok_w)
+        self.assertEqual(code_w, "CI_CHECK_MISSING")
+
+        ok_m, code_m = verify_live_status_rollup(rollup_real_gh, self.c_sha, required_checks=req, check_runs=[])
+        self.assertFalse(ok_m)
+        self.assertEqual(code_m, "CI_CHECK_MISSING")
+
+        ok_n, code_n = verify_live_status_rollup(rollup_real_gh, self.c_sha, required_checks=req, check_runs=None)
+        self.assertFalse(ok_n)
+        self.assertEqual(code_n, "CI_CHECK_MISSING")
+
+        check_runs_failed = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": self.c_sha,
+                "app": {"id": 15368},
+            }
+        ]
+        ok_fl, code_fl = verify_live_status_rollup(
+            rollup_real_gh, self.c_sha, required_checks=req, check_runs=check_runs_failed
+        )
+        self.assertFalse(ok_fl)
+        self.assertEqual(code_fl, "CI_CHECK_FAILED")
+
+    def test_reconcile_and_merge_pr_with_app_pinned_checks_success(self) -> None:
+        merged = [False]
+        runner = _make_app_pinned_merge_runner(self.c_sha, merged)
+        ok, res = reconcile_and_merge_pr(
+            self.worktree,
+            "152",
+            self.c_sha,
+            runner=runner,
+            required_checks=[{"context": "Quality", "app_id": 15368}],
+        )
+        self.assertTrue(ok)
+
+    def test_reconcile_and_merge_pr_with_app_pinned_checks_fetch_fails(self) -> None:
+        merged = [False]
+        runner = _make_app_pinned_merge_runner(self.c_sha, merged, fail_check_runs=True)
+        ok_bad, res_bad = reconcile_and_merge_pr(
+            self.worktree,
+            "152",
+            self.c_sha,
+            runner=runner,
+            required_checks=[{"context": "Quality", "app_id": 15368}],
+        )
+        self.assertFalse(ok_bad)
+        self.assertEqual(res_bad.get("reason_code"), "MISSING_EXACT_HEAD_CI")
 
 
 if __name__ == "__main__":

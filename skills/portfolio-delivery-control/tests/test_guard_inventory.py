@@ -234,6 +234,8 @@ def _mod_ci_check_failed(ctx: dict[str, Any]) -> None:
 
     def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
         cmd_str = " ".join(cmd)
+        if "baseRefName" in cmd_str:
+            return 0, json.dumps({"baseRefName": "main"})
         if "required_status_checks" in cmd_str:
             return 0, json.dumps({"contexts": ["ci/test"]})
         if "statusCheckRollup" in cmd_str:
@@ -256,6 +258,8 @@ def _mod_ci_check_missing(ctx: dict[str, Any]) -> None:
 
     def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
         cmd_str = " ".join(cmd)
+        if "baseRefName" in cmd_str:
+            return 0, json.dumps({"baseRefName": "main"})
         if "required_status_checks" in cmd_str:
             return 0, json.dumps({"contexts": ["Quality"]})
         if "statusCheckRollup" in cmd_str:
@@ -359,6 +363,14 @@ def _merge_pr_view_cmd(
     )
 
 
+def _handle_pr_merge_cmd(merge_fail: bool, merged_flag: list[bool] | None) -> tuple[int, str]:
+    if merge_fail:
+        return 1, "Merge conflict or branch protected"
+    if merged_flag is not None:
+        merged_flag[0] = True
+    return 0, "Merged"
+
+
 def _merge_pr_driver_runner(
     cmd: list[str],
     c_sha: str,
@@ -371,6 +383,8 @@ def _merge_pr_driver_runner(
     merged_flag: list[bool] | None = None,
 ) -> tuple[int, str]:
     cmd_str = " ".join(cmd)
+    if view_fail and "pr view" in cmd_str:
+        return 1, "pr view query failed"
     if "api user" in cmd_str:
         return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
     if "auth status" in cmd_str:
@@ -388,12 +402,10 @@ def _merge_pr_driver_runner(
                 ],
             }
         )
+    if "baseRefName" in cmd_str:
+        return 0, json.dumps({"baseRefName": "main"})
     if "pr merge" in cmd_str:
-        if merge_fail:
-            return 1, "Merge conflict or branch protected"
-        if merged_flag is not None:
-            merged_flag[0] = True
-        return 0, "Merged"
+        return _handle_pr_merge_cmd(merge_fail, merged_flag)
     return 0, ""
 
 
@@ -403,6 +415,8 @@ def _mod_provider_auth_failed(ctx: dict[str, Any]) -> None:
 
     def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
         cmd_str = " ".join(cmd)
+        if "baseRefName" in cmd_str:
+            return 0, json.dumps({"baseRefName": "main"})
         if "api user" in cmd_str:
             return 1, "unauthorized"
         if "auth status" in cmd_str:
@@ -435,8 +449,12 @@ def _mod_missing_exact_head_ci(ctx: dict[str, Any]) -> None:
             return 0, "Logged in to github.com as selamy-labs-bot"
         if "required_status_checks" in cmd_str:
             return 0, json.dumps({"contexts": ["test"]})
-        if "pr view" in cmd_str:
-            return 0, json.dumps({"headRefOid": c_sha, "state": "OPEN", "statusCheckRollup": None})
+        if "statusCheckRollup" in cmd_str:
+            return 0, json.dumps(
+                {"headRefOid": c_sha, "state": "OPEN", "baseRefName": "main", "statusCheckRollup": None}
+            )
+        if "baseRefName" in cmd_str:
+            return 0, json.dumps({"baseRefName": "main"})
         return 0, ""
 
     ctx["cmd_runner"] = runner
@@ -1190,15 +1208,44 @@ class _CodeVisitor(ast.NodeVisitor):
         self.var_map: dict[str, str] = {}
         self.codes: set[str] = set()
 
+    def _extract_string_value(self, node: ast.expr) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            resolved = self._resolve_joined_str(node)
+            return resolved[0] if resolved else None
+        return None
+
     def visit_Assign(self, node: ast.Assign) -> None:
-        val = None
-        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            val = node.value.value
+        val = self._extract_string_value(node.value)
         if val:
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     self.var_map[target.id] = val
         self.generic_visit(node)
+
+    def _resolve_formatted_part(self, part: ast.FormattedValue) -> str | None:
+        if isinstance(part.value, ast.Constant) and isinstance(part.value.value, str):
+            return part.value.value
+        if isinstance(part.value, ast.Name):
+            return self.var_map.get(part.value.id)
+        return None
+
+    def _resolve_joined_part(self, part: ast.AST) -> str | None:
+        if isinstance(part, ast.Constant) and isinstance(part.value, str):
+            return part.value
+        if isinstance(part, ast.FormattedValue):
+            return self._resolve_formatted_part(part)
+        return None
+
+    def _resolve_joined_str(self, node: ast.JoinedStr) -> list[str]:
+        parts: list[str] = []
+        for part in node.values:
+            resolved = self._resolve_joined_part(part)
+            if resolved is None:
+                return []
+            parts.append(resolved)
+        return ["".join(parts)]
 
     def _resolve_codes(self, node: ast.AST | None) -> list[str]:
         if node is None:
@@ -1209,6 +1256,8 @@ class _CodeVisitor(ast.NodeVisitor):
             return [self.var_map[node.id]]
         if isinstance(node, ast.IfExp):
             return self._resolve_codes(node.body) + self._resolve_codes(node.orelse)
+        if isinstance(node, ast.JoinedStr):
+            return self._resolve_joined_str(node)
         return []
 
     def _add_if_valid(self, node: ast.AST | None) -> None:
@@ -1727,6 +1776,10 @@ def sample_kwarg_dict():
 def sample_dict_get():
     res = {}
     return res.get("reason_code", "MUTANT_GET_CODE")
+
+def sample_fstring():
+    s_suffix = "CODE"
+    return False, f"MUTANT_FSTRING_{s_suffix}"
 """
         extracted = extract_refusal_codes_from_ast(mutant_src)
         expected_mutants = {
@@ -1738,6 +1791,7 @@ def sample_dict_get():
             "MUTANT_IFEXP_B",
             "MUTANT_KWARG_DICT",
             "MUTANT_GET_CODE",
+            "MUTANT_FSTRING_CODE",
         }
         self.assertEqual(extracted, expected_mutants)
         self.assertTrue(bool(expected_mutants - TRANSITION_REFUSAL_CODES))
