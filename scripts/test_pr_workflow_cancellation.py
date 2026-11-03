@@ -591,6 +591,8 @@ def _check_step_if(path_name: str, job_name: str, step_name: str, step: dict[str
 def _get_tests_or_verify_env(job_name: str, step_name: str, run_cmd: str) -> frozenset[str]:
     if job_name == "verify" and ("tools/release_gate.py" in run_cmd or step_name == "Enforce Release Gate"):
         return frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
+    if "go vet" in run_cmd:
+        return frozenset({"GOTOOLCHAIN", "GOWORK", "GOFLAGS"})
     if any(k in run_cmd for k in ("pytest", "test_coverage_threshold")):
         return frozenset({"COVERAGE_SESSION_ID"})
     return frozenset()
@@ -628,9 +630,9 @@ def _check_step_uses_inputs(
         assert _is_pinned_action(uses, "actions/setup-go"), (
             f"{path_name} job {job_name} step {step_name!r} setup-go must be pinned by commit SHA: {uses!r}"
         )
-        assert step.get("with") == {"go-version-file": "tools/hclblocks/go.mod"}, (
+        assert step.get("with") == {"go-version": "1.26.10"}, (
             f"{path_name} job {job_name} step {step_name!r} invalid setup-go 'with:': "
-            f"expected {{'go-version-file': 'tools/hclblocks/go.mod'}}, got {step.get('with')!r}"
+            f"expected {{'go-version': '1.26.10'}}, got {step.get('with')!r}"
         )
 
 
@@ -643,6 +645,15 @@ def _validate_step(
     step_name = step.get("name", step.get("id", "unnamed step"))
     validate_shell_configuration(f"{path_name} job {job_name} step {step_name!r}", step)
     run_cmd = step.get("run", "")
+    if "go vet" in run_cmd:
+        assert step.get("working-directory") == "tools/hclblocks", (
+            f"{path_name} job {job_name} step {step_name!r} go vet must specify working-directory: tools/hclblocks"
+        )
+        assert step.get("env") == {
+            "GOTOOLCHAIN": "local",
+            "GOWORK": "off",
+            "GOFLAGS": "-mod=readonly",
+        }, f"{path_name} job {job_name} step {step_name!r} go vet env must specify local, off, -mod=readonly"
     _check_step_coe(path_name, job_name, step_name, step)
     _check_step_if(path_name, job_name, step_name, step, run_cmd)
     _check_step_env(path_name, job_name, step_name, step, run_cmd)
@@ -892,11 +903,19 @@ def _validate_verify_go_steps(verify_steps: list[Any]) -> None:
         s for s in verify_steps if isinstance(s, dict) and _is_pinned_action(s.get("uses"), "actions/setup-go")
     ]
     assert len(setup_go_steps) == 1, "verify job must use pinned actions/setup-go"
-    assert setup_go_steps[0].get("with", {}).get("go-version-file") == "tools/hclblocks/go.mod", (
-        "verify job actions/setup-go must specify go-version-file: tools/hclblocks/go.mod"
+    assert setup_go_steps[0].get("with", {}).get("go-version") == "1.26.10", (
+        "verify job actions/setup-go must specify go-version: '1.26.10'"
     )
     go_vet_steps = [s for s in verify_steps if isinstance(s, dict) and "go vet" in s.get("run", "")]
     assert len(go_vet_steps) == 1, "verify job must run go vet"
+    assert go_vet_steps[0].get("working-directory") == "tools/hclblocks", (
+        "verify job go vet step must specify working-directory: tools/hclblocks"
+    )
+    assert go_vet_steps[0].get("env") == {
+        "GOTOOLCHAIN": "local",
+        "GOWORK": "off",
+        "GOFLAGS": "-mod=readonly",
+    }, "verify job go vet step env must specify GOTOOLCHAIN=local, GOWORK=off, GOFLAGS=-mod=readonly"
 
 
 def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:

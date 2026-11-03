@@ -31,10 +31,15 @@ def _make_valid_verify_job() -> dict[str, Any]:
             {"uses": "actions/checkout@v7.0.0"},
             {
                 "uses": "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
-                "with": {"go-version-file": "tools/hclblocks/go.mod"},
+                "with": {"go-version": "1.26.10"},
             },
             {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
-            {"name": "Verify Go helper", "working-directory": "tools/hclblocks", "run": "go vet ./..."},
+            {
+                "name": "Verify Go helper",
+                "working-directory": "tools/hclblocks",
+                "env": {"GOTOOLCHAIN": "local", "GOWORK": "off", "GOFLAGS": "-mod=readonly"},
+                "run": "go vet ./...",
+            },
             {"run": "python -m ruff check ."},
             {"run": "python -m ruff format --check --diff ."},
             {"run": "python tools/validate_skills.py"},

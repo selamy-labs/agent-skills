@@ -118,6 +118,18 @@ helpers. Repository-wide linting and formatting gates (`ruff check` and
 `scripts/privacy_scan.py`, and `scripts/security_scan.py`, ensuring markdown-heavy
 documentation is not used to inflate the test coverage metric.
 
+To execute the coverage gate locally, export a synchronized session identifier across
+both commands, or invoke the automated wrapper script:
+
+```bash
+# Automated wrapper (generates a shared session ID and runs both commands):
+python scripts/run_coverage_gate.py
+
+# Or manually via two steps:
+COVERAGE_SESSION_ID="local-run-$(date +%s)" pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
+COVERAGE_SESSION_ID="local-run-$(date +%s)" python -m tests.test_coverage_threshold coverage.json
+```
+
 ## Versioning
 
 Consumers should pin this repository by semantic version tag, not by a raw

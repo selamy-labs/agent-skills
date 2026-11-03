@@ -634,9 +634,9 @@ def _validate_step_uses(step: dict[str, Any], uses: str, step_name: str, prefix:
         assert _is_pinned_action(uses, "actions/setup-go"), (
             f"{prefix} step {step_name!r} actions/setup-go must be pinned by commit SHA: {uses!r}"
         )
-        assert step.get("with") == {"go-version-file": "tools/hclblocks/go.mod"}, (
+        assert step.get("with") == {"go-version": "1.26.10"}, (
             f"{prefix} step {step_name!r} actions/setup-go 'with:' must be exactly "
-            f"{{'go-version-file': 'tools/hclblocks/go.mod'}}, got: {step.get('with')!r}"
+            f"{{'go-version': '1.26.10'}}, got: {step.get('with')!r}"
         )
 
 
@@ -649,11 +649,18 @@ def _inspect_quality_tests_step(
 ) -> None:
     step_name = str(step.get("name", "unnamed step"))
     validate_shell_configuration(f"quality tests step {step_name!r}", step)
-    allowed_env = (
-        frozenset({"COVERAGE_SESSION_ID"})
-        if any(k in str(step.get("run", "")) for k in ("pytest", "test_coverage_threshold"))
-        else frozenset()
-    )
+    if "go vet" in str(step.get("run", "")):
+        allowed_env = frozenset({"GOTOOLCHAIN", "GOWORK", "GOFLAGS"})
+        assert step.get("working-directory") == "tools/hclblocks"
+        assert step.get("env") == {
+            "GOTOOLCHAIN": "local",
+            "GOWORK": "off",
+            "GOFLAGS": "-mod=readonly",
+        }
+    elif any(k in str(step.get("run", "")) for k in ("pytest", "test_coverage_threshold")):
+        allowed_env = frozenset({"COVERAGE_SESSION_ID"})
+    else:
+        allowed_env = frozenset()
     validate_env_configuration(f"quality tests step {step_name!r}", step, allowed_keys=allowed_env)
     assert step.get("if") is None, f"quality tests step {step_name!r} must be unconditional"
     assert step.get("continue-on-error") in (None, False, "false", "${{ false }}"), (
@@ -1062,6 +1069,18 @@ def _validate_verify_job_step_guards(steps: list[Any]) -> None:
                 f"step {step_name!r}",
                 step,
                 allowed_keys=frozenset({"GH_TOKEN", "GITHUB_TOKEN"}),
+            )
+        elif "go vet" in step.get("run", ""):
+            assert step.get("working-directory") == "tools/hclblocks"
+            assert step.get("env") == {
+                "GOTOOLCHAIN": "local",
+                "GOWORK": "off",
+                "GOFLAGS": "-mod=readonly",
+            }
+            validate_env_configuration(
+                f"step {step_name!r}",
+                step,
+                allowed_keys=frozenset({"GOTOOLCHAIN", "GOWORK", "GOFLAGS"}),
             )
         elif "pytest" in step.get("run", ""):
             validate_env_configuration(
@@ -2517,9 +2536,9 @@ def _find_setup_go_step(steps: list[Any]) -> dict[str, Any]:
     return step
 
 
-def test_setup_go_is_pinned_by_sha_and_uses_go_mod_file() -> None:
-    """TS25-01 / AS-TS-R25-SOL61-01 / ARGON-TS-R25-001: CI workflows must pin actions/setup-go
-    by 40-hex commit SHA and specify go-version-file: tools/hclblocks/go.mod.
+def test_setup_go_is_pinned_by_sha_and_exact_version() -> None:
+    """TS25-01 / AS-TS-R25-SOL61-01 / AS-TS-R26-SOL61-01: CI workflows must pin actions/setup-go
+    by 40-hex commit SHA and specify exact go-version: '1.26.10'.
     """
     quality_doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     go_step = _find_setup_go_step(quality_doc["jobs"]["tests"]["steps"])
@@ -2527,7 +2546,7 @@ def test_setup_go_is_pinned_by_sha_and_uses_go_mod_file() -> None:
     assert re.fullmatch(r"actions/setup-go@[0-9a-fA-F]{40}", uses), (
         f"setup-go must be pinned by 40-hex commit SHA: {uses}"
     )
-    assert go_step.get("with") == {"go-version-file": "tools/hclblocks/go.mod"}
+    assert go_step.get("with") == {"go-version": "1.26.10"}
 
     release_doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
     rel_go_step = _find_setup_go_step(release_doc["jobs"]["verify"]["steps"])
@@ -2535,10 +2554,42 @@ def test_setup_go_is_pinned_by_sha_and_uses_go_mod_file() -> None:
     assert re.fullmatch(r"actions/setup-go@[0-9a-fA-F]{40}", rel_uses), (
         f"release setup-go must be pinned by SHA: {rel_uses}"
     )
-    assert rel_go_step.get("with") == {"go-version-file": "tools/hclblocks/go.mod"}
+    assert rel_go_step.get("with") == {"go-version": "1.26.10"}
 
 
-def test_setup_go_mutants_rejected_by_validator() -> None:
+def test_ci_go_version_matches_toolchain_in_go_mod() -> None:
+    """AS-TS-R26-SOL61-01: CI workflow setup-go go-version must match tools/hclblocks/go.mod toolchain."""
+    go_mod_text = (REPO_ROOT / "tools" / "hclblocks" / "go.mod").read_text(encoding="utf-8")
+    m = re.search(r"^toolchain\s+go(\d+\.\d+\.\d+)", go_mod_text, re.MULTILINE)
+    assert m is not None, "tools/hclblocks/go.mod must declare toolchain directive"
+    expected_version = m.group(1)
+
+    for wf_path in (WORKFLOW, RELEASE_WORKFLOW):
+        doc = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+        job_key = "tests" if wf_path == WORKFLOW else "verify"
+        go_step = _find_setup_go_step(doc["jobs"][job_key]["steps"])
+        assert go_step.get("with", {}).get("go-version") == expected_version, (
+            f"{wf_path.name} actions/setup-go go-version must match go.mod toolchain {expected_version}"
+        )
+
+
+def test_go_vet_step_in_ci_has_isolated_env() -> None:
+    """TS26-02 / AS-TS-R26-SOL61-01: go vet in CI must run with local toolchain and readonly modules."""
+    expected_env = {
+        "GOTOOLCHAIN": "local",
+        "GOWORK": "off",
+        "GOFLAGS": "-mod=readonly",
+    }
+    for wf_path in (WORKFLOW, RELEASE_WORKFLOW):
+        doc = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+        job_key = "tests" if wf_path == WORKFLOW else "verify"
+        steps = doc["jobs"][job_key]["steps"]
+        vet_step = next(s for s in steps if isinstance(s, dict) and "go vet" in s.get("run", ""))
+        assert vet_step.get("working-directory") == "tools/hclblocks"
+        assert vet_step.get("env") == expected_env
+
+
+def test_setup_go_unpinned_mutant_rejected() -> None:
     from tools.validate_skills import validate_quality_workflow as vs_validate
 
     mutant_unpinned = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
@@ -2547,8 +2598,28 @@ def test_setup_go_mutants_rejected_by_validator() -> None:
             s["uses"] = "actions/setup-go@v5"
     assert any("must be pinned by commit SHA" in e for e in vs_validate(mutant_unpinned))
 
-    mutant_wrong_with = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    for s in mutant_wrong_with["jobs"]["tests"]["steps"]:
+
+def test_setup_go_wrong_version_mutant_rejected() -> None:
+    from tools.validate_skills import validate_quality_workflow as vs_validate
+
+    mutant_floating_version = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for s in mutant_floating_version["jobs"]["tests"]["steps"]:
         if "actions/setup-go" in str(s.get("uses", "")):
             s["with"] = {"go-version": "1.26"}
-    assert any("must be exactly" in e for e in vs_validate(mutant_wrong_with))
+    assert any("must be exactly" in e for e in vs_validate(mutant_floating_version))
+
+    mutant_file_version = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for s in mutant_file_version["jobs"]["tests"]["steps"]:
+        if "actions/setup-go" in str(s.get("uses", "")):
+            s["with"] = {"go-version-file": "tools/hclblocks/go.mod"}
+    assert any("must be exactly" in e for e in vs_validate(mutant_file_version))
+
+
+def test_go_vet_env_mutant_rejected() -> None:
+    from tools.validate_skills import validate_quality_workflow as vs_validate
+
+    mutant_vet_env = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for s in mutant_vet_env["jobs"]["tests"]["steps"]:
+        if "go vet" in str(s.get("run", "")):
+            s.pop("env", None)
+    assert any("go vet env must be exactly" in e for e in vs_validate(mutant_vet_env))

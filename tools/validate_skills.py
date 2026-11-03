@@ -551,15 +551,40 @@ def _get_verify_step_allowed_env(job_name: str, step_name: str, run_cmd: str) ->
         return frozenset()
     if "tools/release_gate.py" in run_cmd or step_name == "Enforce Release Gate":
         return frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
+    if "go vet" in run_cmd:
+        return frozenset({"GOTOOLCHAIN", "GOWORK", "GOFLAGS"})
     if "pytest" in run_cmd:
         return frozenset({"COVERAGE_SESSION_ID"})
     return frozenset()
 
 
 def _get_tests_step_allowed_env(run_raw_val: Any) -> frozenset[str]:
-    if run_raw_val and any(k in str(run_raw_val) for k in ("pytest", "test_coverage_threshold")):
+    if not run_raw_val:
+        return frozenset()
+    run_str = str(run_raw_val)
+    if "go vet" in run_str:
+        return frozenset({"GOTOOLCHAIN", "GOWORK", "GOFLAGS"})
+    if any(k in run_str for k in ("pytest", "test_coverage_threshold")):
         return frozenset({"COVERAGE_SESSION_ID"})
     return frozenset()
+
+
+REQUIRED_GO_VET_ENV: dict[str, str] = {
+    "GOTOOLCHAIN": "local",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly",
+}
+
+
+def _check_go_vet_step(step: dict[str, Any], step_name: str, job_name: str, errors: list[str]) -> None:
+    wd = step.get("working-directory") or step.get("working_directory")
+    if wd != "tools/hclblocks":
+        errors.append(f"step {step_name!r} in '{job_name}' go vet must specify working-directory: 'tools/hclblocks'")
+    step_env = step.get("env")
+    if step_env != REQUIRED_GO_VET_ENV:
+        errors.append(
+            f"step {step_name!r} in '{job_name}' go vet env must be exactly {REQUIRED_GO_VET_ENV!r}, got: {step_env!r}"
+        )
 
 
 def _inspect_job_step(
@@ -581,6 +606,9 @@ def _inspect_job_step(
 
     if not run_cmd:
         return
+
+    if "go vet" in run_cmd:
+        _check_go_vet_step(step, step_name, job_name, errors)
 
     is_primary = step is primary_pip_step
     _process_step_run_lines(run_cmd, is_primary, gates_found, errors)
@@ -752,10 +780,10 @@ def _validate_setup_go_inputs(step_with: Any, uses: str, step_name: str, job_nam
         errors.append(
             f"step {step_name!r} in '{job_name}' actions/setup-go must be pinned by commit SHA, got: {uses!r}"
         )
-    if step_with != {"go-version-file": "tools/hclblocks/go.mod"}:
+    if step_with != {"go-version": "1.26.10"}:
         errors.append(
             f"step {step_name!r} in '{job_name}' actions/setup-go 'with:' must be exactly "
-            f"{{'go-version-file': 'tools/hclblocks/go.mod'}}, got: {step_with!r}"
+            f"{{'go-version': '1.26.10'}}, got: {step_with!r}"
         )
 
 
@@ -867,6 +895,8 @@ def _inspect_tests_step(
         return
 
     assert run_cmd is not None
+    if "go vet" in run_cmd:
+        _check_go_vet_step(step, step_name, job_name, errors)
     _check_canonical_run_step(step_name, job_name, run_cmd, CANONICAL_TESTS_RUN_ARGVS, run_argvs_seen, errors)
     is_primary = step is primary_pip_step
     _process_step_run_lines(run_cmd, is_primary, gates_found, errors)
@@ -964,8 +994,8 @@ def _check_verify_job_steps(steps: list[Any], errors: list[str]) -> None:
     setup_go_steps = [s for s in steps if isinstance(s, dict) and _is_pinned_action(s.get("uses"), "actions/setup-go")]
     if not setup_go_steps:
         errors.append("job 'verify' must include pinned actions/setup-go")
-    elif setup_go_steps[0].get("with") != {"go-version-file": "tools/hclblocks/go.mod"}:
-        errors.append("job 'verify' actions/setup-go must specify go-version-file: tools/hclblocks/go.mod")
+    elif setup_go_steps[0].get("with") != {"go-version": "1.26.10"}:
+        errors.append("job 'verify' actions/setup-go must specify go-version: '1.26.10'")
 
 
 def _check_deprecated_install_step(steps: list[Any], job_name: str, errors: list[str]) -> None:

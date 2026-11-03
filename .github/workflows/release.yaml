@@ -40,7 +40,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
         with:
-          go-version-file: tools/hclblocks/go.mod
+          go-version: "1.26.10"
       - name: Install dependencies
         # ruff is pinned (issue #101): `ruff format` output is version-dependent, so an
         # unpinned formatter would let a future release turn main red with no
@@ -49,6 +49,10 @@ jobs:
         run: pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1
       - name: Verify Go helper
         working-directory: tools/hclblocks
+        env:
+          GOTOOLCHAIN: local
+          GOWORK: "off"
+          GOFLAGS: -mod=readonly
         run: go vet ./...
       - name: Full test suite verification on exact commit
         env:

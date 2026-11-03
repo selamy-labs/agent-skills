@@ -206,15 +206,33 @@ def _handle_missing_marker(path: Path, min_mtime: float | None, marker: Path) ->
         )
 
 
-def _resolve_expected_session_id(path: Path, expected_session_id: str | None) -> str | None:
+CANONICAL_MARKER_PATH: Path = REPO_ROOT / ".coverage_session_start"
+
+
+def _is_explicit_session_id(session_id: str | None) -> bool:
+    if not session_id:
+        return False
+    return not (session_id.startswith("cli-nonce-") or session_id.startswith("untrusted-nonce-"))
+
+
+def _resolve_coverage_marker(path: Path, expected_session_id: str | None) -> Path:
+    marker = path.parent / ".coverage_session_start"
+    if expected_session_id is None:
+        if marker.resolve() != CANONICAL_MARKER_PATH.resolve() and marker.is_file():
+            raise AssertionError(
+                f"Refusing coverage session marker at non-canonical path {marker}; "
+                f"default coverage verification trusts only canonical marker at {CANONICAL_MARKER_PATH}."
+            )
+    return marker
+
+
+def _resolve_expected_session_id(expected_session_id: str | None) -> str:
     if expected_session_id is not None:
         return expected_session_id
-    if path.resolve() == (REPO_ROOT / "coverage.json").resolve() or path.resolve() == Path("coverage.json").resolve():
-        env_id = os.environ.get("COVERAGE_SESSION_ID")
-        if env_id:
-            return env_id
-        return f"untrusted-nonce-{uuid.uuid4().hex}"
-    return None
+    env_id = os.environ.get("COVERAGE_SESSION_ID")
+    if env_id:
+        return env_id
+    return f"untrusted-nonce-{uuid.uuid4().hex}"
 
 
 def check_report_freshness(
@@ -226,14 +244,14 @@ def check_report_freshness(
     max_age_seconds: float = 600.0,
 ) -> None:
     """Verify that coverage report is not older than the current test run and matches session marker."""
-    marker = path.parent / ".coverage_session_start"
+    marker = _resolve_coverage_marker(path, expected_session_id)
     if not marker.is_file():
         _handle_missing_marker(path, min_mtime, marker)
         return
 
     marker_data = _read_session_marker(marker, max_age_seconds=max_age_seconds)
     session_start = float(marker_data["timestamp"])
-    target_session_id = _resolve_expected_session_id(path, expected_session_id)
+    target_session_id = _resolve_expected_session_id(expected_session_id)
 
     _check_run_start_bound(path, session_start, min_mtime, marker)
     _check_report_age(path, session_start, max_age_seconds)
@@ -624,7 +642,7 @@ def test_verify_coverage_report_refuses_pre_existing_stale_report(tmp_path: Path
     os.utime(report, (old_time, old_time))
 
     with pytest.raises(AssertionError, match="older than the current pytest run"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="test-sess")
     assert main([str(report)]) == 1
 
 
@@ -694,7 +712,7 @@ def test_verify_coverage_report_refuses_zero_or_negative_timestamp_marker(tmp_pa
     for bad_ts in (0, 0.0, -100.5):
         marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": bad_ts}), encoding="utf-8")
         with pytest.raises(AssertionError, match="Invalid session marker timestamp"):
-            verify_coverage_report(report)
+            verify_coverage_report(report, expected_session_id="test-sess")
 
 
 def test_verify_coverage_report_refuses_tracked_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -720,7 +738,7 @@ def test_verify_coverage_report_refuses_tracked_marker(tmp_path: Path, monkeypat
 
     monkeypatch.setattr("tests.test_coverage_threshold.is_tracked_by_git", _mock_is_tracked)
     with pytest.raises(AssertionError, match="Refusing session marker tracked in git"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="test-sess")
 
 
 def test_verify_coverage_report_refuses_nonfinite_and_ancient_markers(tmp_path: Path) -> None:
@@ -739,12 +757,12 @@ def test_verify_coverage_report_refuses_nonfinite_and_ancient_markers(tmp_path: 
     for bad_ts in ("nan", "NaN", "inf", "-inf"):
         marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": bad_ts}), encoding="utf-8")
         with pytest.raises(AssertionError, match="Invalid (session marker timestamp|timestamp)"):
-            verify_coverage_report(report)
+            verify_coverage_report(report, expected_session_id="test-sess")
 
     for ancient_ts in (1, 1.0, 1000, 999999999):
         marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": ancient_ts}), encoding="utf-8")
         with pytest.raises(AssertionError, match="Ancient or forged marker timestamps are refused"):
-            verify_coverage_report(report)
+            verify_coverage_report(report, expected_session_id="test-sess")
 
 
 def test_verify_coverage_report_refuses_plain_float_or_non_json_marker(tmp_path: Path) -> None:
@@ -763,7 +781,7 @@ def test_verify_coverage_report_refuses_plain_float_or_non_json_marker(tmp_path:
     for bad_content in ("1700000000.0", "1700000100", "not json at all", "[1, 2, 3]"):
         marker.write_text(bad_content, encoding="utf-8")
         with pytest.raises(AssertionError, match="Corrupt session marker in"):
-            verify_coverage_report(report)
+            verify_coverage_report(report, expected_session_id="test-sess")
 
 
 def test_verify_coverage_report_refuses_missing_or_empty_session_id_in_marker(tmp_path: Path) -> None:
@@ -782,7 +800,7 @@ def test_verify_coverage_report_refuses_missing_or_empty_session_id_in_marker(tm
     for payload in ({"timestamp": 1700000000.0}, {"session_id": "", "timestamp": 1700000000.0}):
         marker.write_text(json.dumps(payload), encoding="utf-8")
         with pytest.raises(AssertionError, match="missing required 'session_id'"):
-            verify_coverage_report(report)
+            verify_coverage_report(report, expected_session_id="test-sess")
 
 
 def test_verify_coverage_report_refuses_mismatched_session_id(tmp_path: Path) -> None:
@@ -807,7 +825,7 @@ def test_verify_coverage_report_refuses_mismatched_session_id(tmp_path: Path) ->
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match="does not match pytest session marker session_id"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="session-active")
 
 
 def test_verify_coverage_report_accepts_valid_matching_session(tmp_path: Path) -> None:
@@ -831,7 +849,7 @@ def test_verify_coverage_report_accepts_valid_matching_session(tmp_path: Path) -
         json.dumps({"session_id": "sess-ok", "timestamp": now, "report_digest": digest}),
         encoding="utf-8",
     )
-    percent, branch_pct = verify_coverage_report(report)
+    percent, branch_pct = verify_coverage_report(report, expected_session_id="sess-ok")
     assert percent == 95.0
     assert branch_pct == 95.0
 
@@ -858,12 +876,12 @@ def test_verify_coverage_report_marker_is_single_use(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    percent, _ = verify_coverage_report(report)
+    percent, _ = verify_coverage_report(report, expected_session_id="sess-single-use")
     assert percent == 95.0
 
     # Second call fails because marker was consumed (single-use)
     with pytest.raises(AssertionError, match="missing session marker"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="sess-single-use")
 
 
 def test_verify_coverage_report_refuses_replayed_report_with_mismatched_digest(tmp_path: Path) -> None:
@@ -894,7 +912,7 @@ def test_verify_coverage_report_refuses_replayed_report_with_mismatched_digest(t
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match="does not match session marker report_digest"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="sess-replayed")
 
 
 def test_replaying_older_report_with_forged_marker_fails(tmp_path: Path) -> None:
@@ -922,7 +940,7 @@ def test_replaying_older_report_with_forged_marker_fails(tmp_path: Path) -> None
     )
 
     with pytest.raises(AssertionError, match="older than the current pytest run"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="previous-pytest-session")
 
 
 def test_marker_missing_report_digest_fails(tmp_path: Path) -> None:
@@ -946,7 +964,7 @@ def test_marker_missing_report_digest_fails(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match="report_digest"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="sess-no-digest")
 
 
 def test_sol61_04_forged_marker_ancient_timestamp_replay_fails(tmp_path: Path) -> None:
@@ -979,7 +997,7 @@ def test_sol61_04_forged_marker_ancient_timestamp_replay_fails(tmp_path: Path) -
     )
     expected_err = "Stale, ancient, or future marker timestamps are refused|outside allowed recency window"
     with pytest.raises(AssertionError, match=expected_err):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="previous-pytest-session")
 
 
 def test_stale_report_outside_recency_window_fails(tmp_path: Path) -> None:
@@ -1011,7 +1029,7 @@ def test_stale_report_outside_recency_window_fails(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match="outside allowed recency window|Stale, ancient, or future"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="sess-too-old")
 
 
 def test_marker_unlink_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1040,7 +1058,7 @@ def test_marker_unlink_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(Path, "unlink", _mock_unlink)
     with pytest.raises(AssertionError, match="Failed to consume single-use coverage session marker"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="sess-unlink-fail")
 
 
 def test_is_tracked_by_git_fatal_error_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1094,7 +1112,7 @@ def test_sol61_05_recent_forged_matching_pair_refused(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match="outside allowed recency window|Stale, ancient, or future"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, expected_session_id="previous-pytest-session")
 
 
 def test_sol61_05_independently_supplied_run_bound_refuses_older_marker(tmp_path: Path) -> None:
@@ -1127,7 +1145,7 @@ def test_sol61_05_independently_supplied_run_bound_refuses_older_marker(tmp_path
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match="older than required run start time"):
-        verify_coverage_report(report, min_mtime=run_bound)
+        verify_coverage_report(report, min_mtime=run_bound, expected_session_id="older-session")
 
 
 def test_sol61_04_ci_workflows_pass_coverage_session_id() -> None:
@@ -1235,40 +1253,19 @@ def test_sol_ts_r25_sol61_02_recent_foreign_marker_refused(tmp_path: Path, monke
     # 1. Default CLI invocation without optional identity arguments must exit 1
     assert main([str(report)]) == 1
 
-    # 2. In repository root, default API invocation without optional identity arguments must raise AssertionError
-    root_report = REPO_ROOT / "coverage.json"
-    root_marker = REPO_ROOT / ".coverage_session_start"
-    saved_rep = root_report.read_bytes() if root_report.is_file() else None
-    saved_mark = root_marker.read_bytes() if root_marker.is_file() else None
-    try:
-        root_report.write_text(content, encoding="utf-8")
-        os.utime(root_report, (now - 29.0, now - 29.0))
-        root_marker.write_text(
-            json.dumps(
-                {
-                    "session_id": "previous-pytest-session",
-                    "timestamp": now - 30.0,
-                    "report_digest": digest,
-                }
-            ),
-            encoding="utf-8",
-        )
-        with pytest.raises(AssertionError, match="does not match independently supplied expected_session_id"):
-            verify_coverage_report(root_report)
-    finally:
-        if saved_rep is not None:
-            root_report.write_bytes(saved_rep)
-        elif root_report.is_file():
-            root_report.unlink()
-        if saved_mark is not None:
-            root_marker.write_bytes(saved_mark)
-        elif root_marker.is_file():
-            root_marker.unlink()
+    # 2. Directly on tmp_path/coverage.json, default API invocation must raise AssertionError
+    with pytest.raises(AssertionError, match="Refusing coverage session marker at non-canonical path"):
+        verify_coverage_report(report)
+
+    # 3. Even with COVERAGE_SESSION_ID exported, alternate-path marker must be refused by default API
+    monkeypatch.setenv("COVERAGE_SESSION_ID", "current-session-id")
+    with pytest.raises(AssertionError, match="Refusing coverage session marker at non-canonical path"):
+        verify_coverage_report(report)
 
 
 def test_argon_ts_r25_002_recent_foreign_marker_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """ARGON-TS-R25-002: Argon's 300s forged matching pair with GITHUB_ACTIONS and
-    COVERAGE_SESSION_ID unset must fail closed in default CLI and API.
+    """ARGON-TS-R25-002 / ARGON-TS-R26-001: Argon's 300s forged matching pair with GITHUB_ACTIONS and
+    COVERAGE_SESSION_ID unset must fail closed in default CLI and API directly on tmp_path.
     """
     import hashlib
     import time
@@ -1303,35 +1300,51 @@ def test_argon_ts_r25_002_recent_foreign_marker_refused(tmp_path: Path, monkeypa
     # 1. Default CLI invocation without optional identity arguments must exit 1
     assert main([str(report)]) == 1
 
-    # 2. In repository root, default API invocation without optional identity arguments must raise AssertionError
-    root_report = REPO_ROOT / "coverage.json"
-    root_marker = REPO_ROOT / ".coverage_session_start"
-    saved_rep = root_report.read_bytes() if root_report.is_file() else None
-    saved_mark = root_marker.read_bytes() if root_marker.is_file() else None
-    try:
-        root_report.write_text(content, encoding="utf-8")
-        os.utime(root_report, (now - 299.0, now - 299.0))
-        root_marker.write_text(
-            json.dumps(
-                {
-                    "session_id": "previous-pytest-session",
-                    "timestamp": now - 300.0,
-                    "report_digest": digest,
-                }
-            ),
-            encoding="utf-8",
-        )
-        with pytest.raises(AssertionError, match="does not match independently supplied expected_session_id"):
-            verify_coverage_report(root_report)
-    finally:
-        if saved_rep is not None:
-            root_report.write_bytes(saved_rep)
-        elif root_report.is_file():
-            root_report.unlink()
-        if saved_mark is not None:
-            root_marker.write_bytes(saved_mark)
-        elif root_marker.is_file():
-            root_marker.unlink()
+    # 2. Directly on tmp_path/coverage.json, default API invocation must raise AssertionError
+    with pytest.raises(AssertionError, match="Refusing coverage session marker at non-canonical path"):
+        verify_coverage_report(report)
+
+    # 3. Even with COVERAGE_SESSION_ID exported, alternate-path marker must be refused by default API
+    monkeypatch.setenv("COVERAGE_SESSION_ID", "current-session-id")
+    with pytest.raises(AssertionError, match="Refusing coverage session marker at non-canonical path"):
+        verify_coverage_report(report)
+
+
+def test_sol_ts_r26_sol61_02_alternate_path_marker_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AS-TS-R26-SOL61-02: Default coverage verification trusts only the canonical marker path."""
+    import hashlib
+    import time
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("COVERAGE_SESSION_ID", raising=False)
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "alternate-path-session",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    os.utime(report, (now - 10.0, now - 10.0))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "alternate-path-session",
+                "timestamp": now - 11.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main([str(report)]) == 1
+    with pytest.raises(AssertionError, match="Refusing coverage session marker at non-canonical path"):
+        verify_coverage_report(report)
 
 
 def test_argon_ts_r24_003_malformed_run_start_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
