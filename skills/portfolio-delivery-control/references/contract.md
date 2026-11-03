@@ -162,3 +162,91 @@ The policy file contains `expected_projects`, age thresholds, `max_recheck_horiz
 `required_review_roles` and `implementer_model` are explicit required policy fields; the reusable script does not choose providers or models. Optional `required_controls` lists the control IDs from the governing baseline. Each project supplies `controls[id]` with `status` (`enforced`, `implementing`, `gap`, or `not_applicable`), `owner`, `next_action`, `observed_at`, and evidence references. An enforced control requires a full revision equal to the project row's revision. Non-applicability requires a concrete reason and evidence. Missing/unfinished controls remain visible gaps; independent productive work continues. These records index canonical definitions, not a second specification or a substitute for checking actual rejection and successful execution.
 
 The report is bounded structural evidence. Store its source digest and observation time with the checkpoint. Resolve contradictory legacy aliases instead of periodically refreshing them with old values. Refresh each project's evidence only after checking that project; fresh root timestamps never imply fresh project facts.
+
+## Workflow Management Layer and Receipts (`workflow.py`)
+
+The executable layer maintains `coordinator-status.json.delivery_control.work_items` and projects worker state into `delivery_control.projects`:
+
+```json
+{
+  "delivery_control": {
+    "work_items": {
+      "W-001": {
+        "work_id": "W-001",
+        "project": "example-project",
+        "repository": "owner/repo",
+        "task_id": "TASK-001",
+        "spec_path": "/path/to/tasks.md",
+        "base_sha": "0123456789abcdef0123456789abcdef01234567",
+        "stage": "review",
+        "prerequisites": [],
+        "approval_ref": "/path/to/directive.md:sha256",
+        "admitted_at": "2026-11-03T01:00:00Z",
+        "owner": "lane-session-1",
+        "claim_token": "cryptographic-hex-token",
+        "worktree": "/path/to/worktree",
+        "write_paths": ["src/module/"],
+        "claimed_at": "2026-11-03T01:05:00Z",
+        "claim_expires_at": "2026-11-03T03:05:00Z",
+        "candidate": {
+          "round": 1,
+          "commit_sha": "1111111111111111111111111111111111111111",
+          "tree_sha": "2222222222222222222222222222222222222222",
+          "parent_sha": "0123456789abcdef0123456789abcdef01234567",
+          "patch_path": "/path/to/patch.patch",
+          "bundle_path": "/path/to/bundle.bundle",
+          "receipt_path": "/path/to/receipt.json",
+          "gate_results": {"test_exit_code": 0},
+          "recorded_at": "2026-11-03T01:30:00Z"
+        },
+        "reviews": [
+          {
+            "reviewer_id": "rev-opus",
+            "model": "claude-3-7-sonnet",
+            "family": "opus",
+            "session_id": "sess-rev-1",
+            "verdict": "SHIP",
+            "report_path": "/path/to/report.json",
+            "report_sha256": "sha256-hex",
+            "recorded_at": "2026-11-03T01:35:00Z"
+          }
+        ],
+        "qualified": true,
+        "remediation_required": false,
+        "defects": [],
+        "transitions": [
+          {
+            "action": "push",
+            "reconciled_existing_effect": false,
+            "transitioned_at": "2026-11-03T01:40:00Z"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+### Durable Receipts
+
+All workflow actions and pre-effect refusals record durable JSON receipts in `<control_dir>/receipts/`:
+
+- `admission_<work_id>.json`: Recorded on successful work admission.
+- `refusal_<work_id>_<reason_code>.json`: Recorded when admission, claim, implementation, review, or transition is refused.
+- `claim_<work_id>.json`: Recorded on successful atomic claim with token and expiry.
+- `implementation_<work_id>_r<round>.json`: Recorded when implementation candidate and artifacts satisfy all verification checks.
+- `review_<work_id>_<family>_<verdict>.json`: Recorded when an independent review report is verified and attached.
+- `transition_<work_id>_<action>.json`: Recorded when an external transition (`push`, `publish_pr`, `merge_pr`, `complete_spec_task`) is executed or reconciled with provider state.
+
+### Review Report Provenance & Unsigned Local Report Trust Boundary
+
+Review reports are read from local filesystem JSON receipts without public-key or GPG cryptographic signatures. To protect against malicious, unverified, or fabricated reviews within this boundary, the workflow layer enforces strict structural and provenance constraints:
+
+1. **Canonical Reviewer Model Allowlist**: Reviewer model identifiers must strictly match a known canonical model per family (`opus`, `argon`, `sol`):
+   - `opus`: `claude-opus-5-5`, `claude-opus-5.5`, `claude-opus-5`, `claude-opus-4-6`, `claude-opus-4.6`, `claude-opus-4-5`, `claude-opus-4.5`, `claude-opus-4`, `claude-3-opus`, `claude-3-opus-20240229`.
+   - `argon`: `gemini-4.0-argon-high`, `gemini-4.0-argon`, `gemini-4-argon-high`, `gemini-4-argon`, `gemini-4.5-argon-high`, `gemini-4.5-argon`, `gemini-4-argon-thought`.
+   - `sol`: `gpt-6.1-sol-high`, `gpt-6.1-sol`, `gpt-6-sol-high`, `gpt-6-sol`, `gpt-5.4`, `gpt-5.4-sol`, `gpt-5.3-codex`, `gpt-5-sol`.
+   Arbitrary model substrings (e.g. `argon-by-anyone`) are rejected with `REPORT_IDENTITY_MISMATCH`.
+2. **Provenance Metadata**: Every review report JSON must contain a non-empty provenance field: `dispatch` (or `dispatch_id`), `session_id` (or `session`), or `attestation` / `sha256`. Reports lacking provenance are refused with `REPORT_IDENTITY_MISMATCH`.
+3. **Anti-Self-Review and Session Isolation**: Embedded report tokens are inspected against claim owners, implementer sessions, candidate models, and flash models to forbid self-review (`SELF_REVIEW_FORBIDDEN`) and detect conflicting session or account IDs (`REPORT_IDENTITY_MISMATCH`).
+4. **Local Trust Boundary Contract**: Until reviews carry verifiable cryptographic signatures (e.g. Sigstore or repository-trusted GPG keys), trust is scoped to the authenticated coordinator process, POSIX filesystem permissions (0644/0755), and coordinator-level atomic file locking.
