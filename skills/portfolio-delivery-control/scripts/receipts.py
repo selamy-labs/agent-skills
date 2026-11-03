@@ -111,6 +111,8 @@ def verify_dispatch_binding(
 def _filter_ship_reviews(reviews: list[dict[str, Any]], commit_sha: str, tree_sha: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for r in reviews:
+        if not isinstance(r, dict):
+            continue
         if r.get("verdict") == "SHIP" and r.get("commit_sha") == commit_sha and r.get("tree_sha") == tree_sha:
             out.append(r)
     return out
@@ -121,7 +123,11 @@ def _collect_family_reviews(
 ) -> tuple[bool, dict[str, dict[str, Any]]]:
     by_family: dict[str, dict[str, Any]] = {}
     for r in ship_revs:
+        if not isinstance(r, dict):
+            return False, {}
         fam = r.get("family")
+        if not isinstance(fam, str) or fam not in VALID_FAMILIES:
+            return False, {}
         if fam in by_family:
             return False, {}
         by_family[fam] = r
@@ -136,6 +142,8 @@ def _verify_distinct_identities(
     sessions: set[str] = set()
     dispatches: set[str] = set()
     for r in reviews:
+        if not isinstance(r, dict):
+            return False
         sess = r.get("reviewer_session_id")
         disp = r.get("dispatch_id")
         if not isinstance(sess, str) or not sess.strip():

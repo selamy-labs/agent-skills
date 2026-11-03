@@ -192,8 +192,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok_bad)
         self.assertEqual(err_bad, "DISALLOWED_MERGE_IDENTITY")
 
-    def test_reconcile_and_merge_pr_paths(self) -> None:
-        # 1. Already merged
+    def test_reconcile_and_merge_pr_already_merged(self) -> None:
         merged_pr_view = {
             "state": "MERGED",
             "mergedAt": "2026-11-03T10:00:00Z",
@@ -216,9 +215,16 @@ class TestProviders(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(res.get("reconciled_existing_effect"))
 
-        # 2. PR head mismatch
-        mismatch_pr_view = dict(merged_pr_view)
-        mismatch_pr_view["headRefOid"] = "e" * 40
+    def test_reconcile_and_merge_pr_head_mismatch(self) -> None:
+        mismatch_pr_view = {
+            "state": "MERGED",
+            "mergedAt": "2026-11-03T10:00:00Z",
+            "mergeCommit": {"oid": "c" * 40},
+            "headRefOid": "e" * 40,
+            "statusCheckRollup": [
+                {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
+            ],
+        }
 
         def mismatch_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
@@ -232,10 +238,12 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok_mis)
         self.assertEqual(res_mis.get("reason_code"), "PR_HEAD_MISMATCH")
 
-        # 3. Missing CI
-        no_ci_pr_view = dict(merged_pr_view)
-        no_ci_pr_view["state"] = "OPEN"
-        no_ci_pr_view["statusCheckRollup"] = []
+    def test_reconcile_and_merge_pr_missing_ci(self) -> None:
+        no_ci_pr_view = {
+            "state": "OPEN",
+            "headRefOid": self.c_sha,
+            "statusCheckRollup": [],
+        }
 
         def no_ci_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
@@ -336,8 +344,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok_c)
         self.assertEqual(res_c.get("reason_code"), "PR_NOT_OPEN")
 
-    def test_reconcile_and_publish_pr_creation_flow(self) -> None:
-        # Remote branch head mismatch
+    def test_reconcile_and_publish_pr_remote_head_mismatch(self) -> None:
         def remote_mismatch_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             if "pr view" in " ".join(cmd):
                 return 1, "no PR found"
@@ -351,7 +358,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok_m)
         self.assertEqual(res_m.get("reason_code"), "REMOTE_HEAD_MISMATCH")
 
-        # Successful creation
+    def test_reconcile_and_publish_pr_creation_success(self) -> None:
         created = [False]
 
         def create_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
@@ -692,8 +699,7 @@ class TestProviders(unittest.TestCase):
         paths_f = get_commit_modified_paths(self.worktree, self.c_sha, runner=fail_runner)
         self.assertEqual(paths_f, [])
 
-    def test_reconcile_and_publish_pr_failures(self) -> None:
-        # PR create fails
+    def test_reconcile_and_publish_pr_create_fails(self) -> None:
         def pr_create_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
             if "pr view" in cmd_str:
@@ -710,7 +716,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("GraphQL error", res.get("error", ""))
 
-        # Created PR verification fails
+    def test_reconcile_and_publish_pr_view_after_create_fails(self) -> None:
         def pr_view_after_create_fail(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
             if "pr view" in cmd_str:
@@ -727,8 +733,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertEqual(res2.get("reason_code"), "CREATED_PR_VIEW_FAILED")
 
-    def test_reconcile_and_merge_pr_failure_branches(self) -> None:  # noqa: C901
-        # Disallowed merge actor
+    def test_reconcile_and_merge_pr_actor_disallowed(self) -> None:
         def disallowed_actor_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             if "api user" in " ".join(cmd):
                 return 0, json.dumps({"login": "attacker", "type": "User"})
@@ -740,7 +745,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok1)
         self.assertEqual(res1.get("reason_code"), "DISALLOWED_MERGE_IDENTITY")
 
-        # PR view failure
+    def test_reconcile_and_merge_pr_view_failed(self) -> None:
         def pr_view_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             if "api user" in " ".join(cmd):
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
@@ -752,7 +757,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertEqual(res2.get("reason_code"), "PR_VIEW_FAILED")
 
-        # Merge CI missing statusCheckRollup list
+    def test_reconcile_and_merge_pr_no_rollup(self) -> None:
         def no_rollup_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             if "api user" in " ".join(cmd):
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
@@ -764,7 +769,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok3)
         self.assertEqual(res3.get("reason_code"), "MISSING_EXACT_HEAD_CI")
 
-        # Already merged PR reconciliation
+    def test_reconcile_and_merge_pr_reconciles_already_merged(self) -> None:
         def already_merged_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             if "api user" in " ".join(cmd):
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
@@ -787,7 +792,7 @@ class TestProviders(unittest.TestCase):
         self.assertTrue(res4.get("reconciled_existing_effect"))
         self.assertEqual(res4.get("merge_commit_sha"), "d" * 40)
 
-        # gh pr merge fails
+    def test_reconcile_and_merge_pr_merge_command_fails(self) -> None:
         def pr_merge_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
             if "api user" in cmd_str:
@@ -810,7 +815,7 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok5)
         self.assertEqual(res5.get("reason_code"), "MERGE_FAILED")
 
-        # Post-merge verify fails (e.g. queued PR)
+    def test_reconcile_and_merge_pr_post_merge_verify_fails(self) -> None:
         def post_merge_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
             if "api user" in cmd_str:

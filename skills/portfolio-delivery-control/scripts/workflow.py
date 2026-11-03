@@ -43,14 +43,18 @@ from providers import (
     ALLOWED_MERGE_IDENTITIES,
     APPROVED_BOT_IDENTITIES,
     fetch_ci_checks_from_provider,
+    fetch_required_checks_from_provider,
     is_approved_identity,
     is_hex_40,
     is_hex_64,
     iso_timestamp,
+    load_policy_required_checks,
+    parse_required_checks,
     reconcile_and_complete_spec_task,
     reconcile_and_merge_pr,
     reconcile_and_publish_pr,
     reconcile_and_push,
+    resolve_required_checks,
     sha256_file,
     verify_provider_bot_actor,
 )
@@ -123,14 +127,17 @@ __all__ = [
     "claim_work",
     "execute_transition",
     "fetch_ci_checks_from_provider",
+    "fetch_required_checks_from_provider",
     "inspect_modified_paths",
     "is_approved_identity",
     "is_hex_40",
     "is_hex_64",
     "iso_timestamp",
     "load_coordinator_status",
+    "load_policy_required_checks",
     "main",
     "make_refusal",
+    "parse_required_checks",
     "paths_overlap",
     "reconcile_and_complete_spec_task",
     "reconcile_and_merge_pr",
@@ -139,6 +146,7 @@ __all__ = [
     "record_dispatch",
     "record_implementation",
     "record_review",
+    "resolve_required_checks",
     "save_coordinator_status",
     "sha256_file",
     "validate_review_receipt",
@@ -405,6 +413,7 @@ def execute_transition(
     merge_identity: str = "selamy-labs-bot",
     command_runner: Any = None,
     now: str | None = None,
+    policy_path: Path | str | None = None,
 ) -> dict[str, Any]:
     with workflow_lock(control_dir):
         return _execute_transition_impl(
@@ -421,6 +430,7 @@ def execute_transition(
             merge_identity=merge_identity,
             command_runner=command_runner,
             now=now,
+            policy_path=policy_path,
         )
 
 
@@ -499,6 +509,7 @@ def _add_trans_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--pr-title")
     p.add_argument("--pr-body")
     p.add_argument("--merge-identity", default="selamy-labs-bot")
+    p.add_argument("--policy", dest="policy_path", help="Path to delivery-policy.json")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -586,6 +597,7 @@ def _dispatch_cli(args: argparse.Namespace) -> dict[str, Any]:
             pr_title=args.pr_title,
             pr_body=args.pr_body,
             merge_identity=args.merge_identity,
+            policy_path=getattr(args, "policy_path", None),
         )
     return {"status": "error", "error": f"Unknown command {cmd}"}
 

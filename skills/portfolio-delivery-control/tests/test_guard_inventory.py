@@ -10,9 +10,9 @@ Guarantees:
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
-import re
 import shutil
 import sys
 import tempfile
@@ -39,24 +39,37 @@ BOT_AUTHOR = "claude-cir <claude-cir@selamy.dev>"
 BOT_COMMITTER = "selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>"
 
 TRANSITION_REFUSAL_CODES = {
-    "INVALID_ACTION",
-    "PROTECTED_BRANCH_PUSH",
-    "DISALLOWED_MERGE_IDENTITY",
-    "WORK_NOT_ADMITTED",
+    # Core stage guards in transitions.py
     "ABSENT_APPROVAL",
+    "APPROVAL_DIGEST_MISMATCH",
     "APPROVAL_FILE_NOT_FOUND",
     "APPROVAL_READ_FAILED",
     "APPROVAL_WITHDRAWN",
-    "APPROVAL_DIGEST_MISMATCH",
-    "UNRESOLVED_REVISE_FINDINGS",
-    "MISSING_OR_EXPIRED_CLAIM",
-    "STALE_CLAIM",
-    "CLAIM_EXPIRED",
-    "MISSING_QUALIFICATION",
-    "STALE_REVIEW_REVISION",
-    "MISSING_MANDATORY_GATE",
-    "MISSING_TRANSITION_EVIDENCE",
     "CI_CHECK_FAILED",
+    "CI_CHECK_MISSING",
+    "CLAIM_EXPIRED",
+    "DISALLOWED_MERGE_IDENTITY",
+    "INVALID_ACTION",
+    "MISSING_MANDATORY_GATE",
+    "MISSING_OR_EXPIRED_CLAIM",
+    "MISSING_QUALIFICATION",
+    "MISSING_TRANSITION_EVIDENCE",
+    "PROTECTED_BRANCH_PUSH",
+    "STALE_CLAIM",
+    "STALE_REVIEW_REVISION",
+    "UNRESOLVED_REVISE_FINDINGS",
+    "WORK_NOT_ADMITTED",
+    # Provider-originated guards returned via execute_transition
+    "CANDIDATE_REVISION_MISMATCH",
+    "CREATED_PR_VIEW_FAILED",
+    "MERGE_FAILED",
+    "MERGE_NOT_COMPLETED",
+    "MISSING_EXACT_HEAD_CI",
+    "PROVIDER_AUTH_FAILED",
+    "PR_HEAD_MISMATCH",
+    "PR_NOT_OPEN",
+    "PR_VIEW_FAILED",
+    "REMOTE_HEAD_MISMATCH",
 }
 
 ADMISSION_REFUSAL_CODES = {
@@ -216,16 +229,245 @@ def _mod_missing_transition_evidence(ctx: dict[str, Any]) -> None:
 def _mod_ci_check_failed(ctx: dict[str, Any]) -> None:
     ctx["action"] = "complete_spec_task"
     c_sha = ctx["c_sha"]
-    ctx["cmd_runner"] = lambda cmd, cwd=None: (
-        0,
-        json.dumps(
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "required_status_checks" in cmd_str:
+            return 0, json.dumps({"contexts": ["ci/test"]})
+        if "statusCheckRollup" in cmd_str:
+            return 0, json.dumps(
+                {
+                    "headRefOid": c_sha,
+                    "statusCheckRollup": [
+                        {"name": "ci/test", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": c_sha}
+                    ],
+                }
+            )
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
+def _mod_ci_check_missing(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "complete_spec_task"
+    c_sha = ctx["c_sha"]
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "required_status_checks" in cmd_str:
+            return 0, json.dumps({"contexts": ["Quality"]})
+        if "statusCheckRollup" in cmd_str:
+            return 0, json.dumps(
+                {
+                    "headRefOid": c_sha,
+                    "statusCheckRollup": [
+                        {"name": "unrelated", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                    ],
+                }
+            )
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
+def _mod_pr_not_open(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "publish_pr"
+    c_sha = ctx["c_sha"]
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "pr view" in cmd_str:
+            return 0, json.dumps(
+                {"number": 123, "state": "CLOSED", "headRefOid": c_sha, "url": "https://github.com/org/repo/pull/123"}
+            )
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
+def _mod_remote_head_mismatch(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "publish_pr"
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "pr list" in cmd_str:
+            return 0, json.dumps([])
+        if "ls-remote" in cmd_str:
+            return 0, f"{'9' * 40}\trefs/heads/feat/inventory\n"
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
+def _mod_created_pr_view_failed(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "publish_pr"
+    c_sha = ctx["c_sha"]
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "pr list" in cmd_str:
+            return 0, json.dumps([])
+        if "ls-remote" in cmd_str:
+            return 0, f"{c_sha}\trefs/heads/feat/inventory\n"
+        if "pr create" in cmd_str:
+            return 0, "https://github.com/org/repo/pull/152"
+        if "pr view" in cmd_str:
+            return 1, "Failed to query created PR"
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
+def _merge_pr_view_cmd(
+    cmd_str: str,
+    c_sha: str,
+    head_mismatch: bool,
+    view_fail: bool,
+    cand_mismatch: bool,
+    queued: bool,
+    merged_flag: list[bool] | None,
+) -> tuple[int, str]:
+    if view_fail:
+        return 1, "pr view query failed"
+    if head_mismatch:
+        return 0, json.dumps({"headRefOid": "0" * 40, "state": "OPEN"})
+    if cand_mismatch and merged_flag and merged_flag[0]:
+        return 0, json.dumps(
+            {
+                "headRefOid": "8" * 40,
+                "state": "MERGED",
+                "mergedAt": "2026-11-03T12:00:00Z",
+                "mergeCommit": {"oid": "3" * 40},
+            }
+        )
+    if queued and merged_flag and merged_flag[0]:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "state": "OPEN",
+                "statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            }
+        )
+    return 0, json.dumps(
+        {
+            "headRefOid": c_sha,
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }
+    )
+
+
+def _merge_pr_driver_runner(
+    cmd: list[str],
+    c_sha: str,
+    *,
+    head_mismatch: bool = False,
+    view_fail: bool = False,
+    merge_fail: bool = False,
+    queued: bool = False,
+    cand_mismatch: bool = False,
+    merged_flag: list[bool] | None = None,
+) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "api user" in cmd_str:
+        return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+    if "auth status" in cmd_str:
+        return 0, "Logged in to github.com as selamy-labs-bot"
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"contexts": ["test"]})
+    if "mergeCommit" in cmd_str:
+        return _merge_pr_view_cmd(cmd_str, c_sha, head_mismatch, view_fail, cand_mismatch, queued, merged_flag)
+    if "statusCheckRollup" in cmd_str:
+        return 0, json.dumps(
             {
                 "headRefOid": c_sha,
                 "statusCheckRollup": [
-                    {"name": "ci/test", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": c_sha}
+                    {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
                 ],
             }
-        ),
+        )
+    if "pr merge" in cmd_str:
+        if merge_fail:
+            return 1, "Merge conflict or branch protected"
+        if merged_flag is not None:
+            merged_flag[0] = True
+        return 0, "Merged"
+    return 0, ""
+
+
+def _mod_provider_auth_failed(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "merge_pr"
+    c_sha = ctx["c_sha"]
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "api user" in cmd_str:
+            return 1, "unauthorized"
+        if "auth status" in cmd_str:
+            return 1, "not logged in"
+        if "required_status_checks" in cmd_str:
+            return 0, json.dumps({"contexts": ["test"]})
+        if "statusCheckRollup" in cmd_str:
+            return 0, json.dumps(
+                {
+                    "headRefOid": c_sha,
+                    "statusCheckRollup": [
+                        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                    ],
+                }
+            )
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
+def _mod_missing_exact_head_ci(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "merge_pr"
+    c_sha = ctx["c_sha"]
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "api user" in cmd_str:
+            return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+        if "auth status" in cmd_str:
+            return 0, "Logged in to github.com as selamy-labs-bot"
+        if "required_status_checks" in cmd_str:
+            return 0, json.dumps({"contexts": ["test"]})
+        if "pr view" in cmd_str:
+            return 0, json.dumps({"headRefOid": c_sha, "state": "OPEN", "statusCheckRollup": None})
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
+def _mod_pr_head_mismatch(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "merge_pr"
+    ctx["cmd_runner"] = lambda cmd, cwd=None: _merge_pr_driver_runner(cmd, ctx["c_sha"], head_mismatch=True)
+
+
+def _mod_pr_view_failed(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "merge_pr"
+    ctx["cmd_runner"] = lambda cmd, cwd=None: _merge_pr_driver_runner(cmd, ctx["c_sha"], view_fail=True)
+
+
+def _mod_merge_failed(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "merge_pr"
+    ctx["cmd_runner"] = lambda cmd, cwd=None: _merge_pr_driver_runner(cmd, ctx["c_sha"], merge_fail=True)
+
+
+def _mod_merge_not_completed(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "merge_pr"
+    merged = [False]
+    ctx["cmd_runner"] = lambda cmd, cwd=None: _merge_pr_driver_runner(
+        cmd, ctx["c_sha"], queued=True, merged_flag=merged
+    )
+
+
+def _mod_candidate_revision_mismatch(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "merge_pr"
+    merged = [False]
+    ctx["cmd_runner"] = lambda cmd, cwd=None: _merge_pr_driver_runner(
+        cmd, ctx["c_sha"], cand_mismatch=True, merged_flag=merged
     )
 
 
@@ -248,6 +490,17 @@ TRANS_MODIFIERS = {
     "MISSING_MANDATORY_GATE": _mod_missing_mandatory_gate,
     "MISSING_TRANSITION_EVIDENCE": _mod_missing_transition_evidence,
     "CI_CHECK_FAILED": _mod_ci_check_failed,
+    "CI_CHECK_MISSING": _mod_ci_check_missing,
+    "CANDIDATE_REVISION_MISMATCH": _mod_candidate_revision_mismatch,
+    "CREATED_PR_VIEW_FAILED": _mod_created_pr_view_failed,
+    "MERGE_FAILED": _mod_merge_failed,
+    "MERGE_NOT_COMPLETED": _mod_merge_not_completed,
+    "MISSING_EXACT_HEAD_CI": _mod_missing_exact_head_ci,
+    "PROVIDER_AUTH_FAILED": _mod_provider_auth_failed,
+    "PR_HEAD_MISMATCH": _mod_pr_head_mismatch,
+    "PR_NOT_OPEN": _mod_pr_not_open,
+    "PR_VIEW_FAILED": _mod_pr_view_failed,
+    "REMOTE_HEAD_MISMATCH": _mod_remote_head_mismatch,
 }
 
 
@@ -298,6 +551,7 @@ def _adm_duplicate_work_admission(tc: Any, code: str) -> dict[str, Any]:
         spec_path=tc.spec_file,
         task_id=task_id,
     )
+    tc.snapshot_doc()
     return admit_work(
         control_dir=tc.state_dir,
         repo="selamy-labs/agent-skills",
@@ -376,6 +630,7 @@ def _adm_session_reused_across_writers(tc: Any, code: str) -> dict[str, Any]:
         session_id="sess-shared",
         worktree=tc.worktree,
     )
+    tc.snapshot_doc()
     return claim_work(
         control_dir=tc.state_dir,
         work_id=w2,
@@ -395,6 +650,7 @@ def _adm_worktree_path_conflict(tc: Any, code: str) -> dict[str, Any]:
         session_id="sess-01",
         worktree=tc.worktree,
     )
+    tc.snapshot_doc()
     return claim_work(
         control_dir=tc.state_dir,
         work_id=w2,
@@ -416,6 +672,7 @@ def _adm_work_item_already_claimed(tc: Any, code: str) -> dict[str, Any]:
         session_id="sess-01",
         worktree=tc.worktree,
     )
+    tc.snapshot_doc()
     return claim_work(
         control_dir=tc.state_dir,
         work_id=w1,
@@ -444,6 +701,7 @@ def _adm_claim_expired(tc: Any, code: str) -> dict[str, Any]:
     doc = json.loads(status_file.read_text(encoding="utf-8"))
     doc["delivery_control"]["work_items"][work_id]["claim"]["expires_at"] = "2020-01-01T00:00:00Z"
     status_file.write_text(json.dumps(doc), encoding="utf-8")
+    tc.snapshot_doc()
     return record_implementation(
         control_dir=tc.state_dir,
         work_id=work_id,
@@ -663,11 +921,13 @@ def _rec_invalid_dispatch_parameters(tc: Any, code: str) -> dict[str, Any]:
 
 def _rec_duplicate_dispatch_id(tc: Any, code: str) -> dict[str, Any]:
     record_dispatch(tc.state_dir, "work_id", "disp-dup", family="opus", reviewer_session_id="sess-01")
+    tc.snapshot_doc()
     return record_dispatch(tc.state_dir, "work_id", "disp-dup", family="sol", reviewer_session_id="sess-02")
 
 
 def _rec_duplicate_reviewer_session(tc: Any, code: str) -> dict[str, Any]:
     record_dispatch(tc.state_dir, "work_id", "disp-01", family="opus", reviewer_session_id="sess-dup")
+    tc.snapshot_doc()
     return record_dispatch(tc.state_dir, "work_id", "disp-02", family="sol", reviewer_session_id="sess-dup")
 
 
@@ -879,6 +1139,60 @@ RECEIPT_DRIVERS = {
 # ==============================================================================
 
 
+class _CodeVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.var_map: dict[str, str] = {}
+        self.codes: set[str] = set()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        val = None
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            val = node.value.value
+        if val:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.var_map[target.id] = val
+        self.generic_visit(node)
+
+    def _resolve_str(self, node: ast.AST | None) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name) and node.id in self.var_map:
+            return self.var_map[node.id]
+        return None
+
+    def visit_Dict(self, node: ast.Dict) -> None:
+        for k, v in zip(node.keys, node.values):
+            if isinstance(k, ast.Constant) and k.value == "reason_code":
+                val = self._resolve_str(v)
+                if val and val.isupper() and "_" in val:
+                    self.codes.add(val)
+        self.generic_visit(node)
+
+    def visit_Return(self, node: ast.Return) -> None:
+        if node.value and isinstance(node.value, ast.Tuple) and len(node.value.elts) >= 2:
+            first = node.value.elts[0]
+            if isinstance(first, ast.Constant) and first.value is False:
+                val = self._resolve_str(node.value.elts[1])
+                if val and val.isupper() and "_" in val:
+                    self.codes.add(val)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name) and node.func.id == "make_refusal" and len(node.args) >= 3:
+            val = self._resolve_str(node.args[2])
+            if val and val.isupper() and "_" in val:
+                self.codes.add(val)
+        self.generic_visit(node)
+
+
+def extract_refusal_codes_from_ast(source_text: str) -> set[str]:
+    tree = ast.parse(source_text)
+    visitor = _CodeVisitor()
+    visitor.visit(tree)
+    return visitor.codes
+
+
 class TestGuardInventory(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.mkdtemp(prefix="pdc-guard-inventory-")
@@ -909,6 +1223,14 @@ class TestGuardInventory(unittest.TestCase):
             "lint_skills": {"exit_code": 0, "passed": True},
             "coverage": 95.0,
         }
+        self.doc_before = None
+
+    def snapshot_doc(self) -> None:
+        status_file = self.state_dir / "coordinator-status.json"
+        if status_file.exists():
+            self.doc_before = json.loads(status_file.read_text(encoding="utf-8"))
+        else:
+            self.doc_before = None
 
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -931,6 +1253,7 @@ class TestGuardInventory(unittest.TestCase):
         session_id: str = "sess-r1",
         reviewer_id: str = "reviewer-01",
     ) -> dict[str, Any]:
+        self.snapshot_doc()
         return record_review(
             control_dir=self.state_dir,
             work_id=work_id,
@@ -953,6 +1276,7 @@ class TestGuardInventory(unittest.TestCase):
             spec_path=self.spec_file,
             task_id=task_id,
         )
+        self.snapshot_doc()
         return res["work_id"]
 
     def _setup_claimed_work(self, code: str) -> tuple[str, str]:
@@ -964,6 +1288,7 @@ class TestGuardInventory(unittest.TestCase):
             session_id="sess-01",
             worktree=self.worktree,
         )
+        self.snapshot_doc()
         return work_id, res["claim_token"]
 
     def _setup_candidate_work(self, code: str) -> str:
@@ -976,6 +1301,7 @@ class TestGuardInventory(unittest.TestCase):
             "tree_sha": self.t_sha,
         }
         status_file.write_text(json.dumps(doc), encoding="utf-8")
+        self.snapshot_doc()
         return work_id
 
     def _add_ledger_entry(self, disp_id: str, work_id: str, family: str, session_id: str) -> None:
@@ -990,6 +1316,7 @@ class TestGuardInventory(unittest.TestCase):
             "session_id": session_id,
         }
         status_file.write_text(json.dumps(doc), encoding="utf-8")
+        self.snapshot_doc()
 
     def _write_report(self, overrides: dict[str, Any]) -> tuple[Path, str]:
         data = {
@@ -1141,81 +1468,61 @@ class TestGuardInventory(unittest.TestCase):
             )
         return work_id
 
-    def _assert_transition_no_side_effects(self, code: str, work_id: str, status_file: Path) -> None:
+    def _assert_transition_no_side_effects(self, code: str, doc_before: dict[str, Any], status_file: Path) -> None:
         spec_content = self.spec_file.read_text(encoding="utf-8")
         self.assertIn("- [ ] TASK_01", spec_content, f"SPEC.md modified during {code}!")
         self.assertNotIn("- [x] TASK_01", spec_content, f"SPEC.md checked during {code}!")
         doc_after = json.loads(status_file.read_text(encoding="utf-8"))
-        if work_id in doc_after["delivery_control"]["work_items"]:
-            wi_after = doc_after["delivery_control"]["work_items"][work_id]
-            self.assertNotEqual(wi_after.get("stage"), "done", f"Stage advanced during {code}!")
-            orig_trans_count = 1 if code != "MISSING_TRANSITION_EVIDENCE" else 0
-            self.assertEqual(len(wi_after.get("transitions", [])), orig_trans_count, f"Transition recorded in {code}!")
+        self.assertEqual(doc_before, doc_after, f"Status doc mutated during refusal of {code}!")
 
-    def _assert_admission_no_side_effects(self, code: str) -> None:
+    def _assert_admission_no_side_effects(self, code: str, doc_before: Any) -> None:
         spec_content = self.spec_file.read_text(encoding="utf-8")
         self.assertNotIn("- [x]", spec_content, f"SPEC.md checked during refusal of {code}!")
         status_file = self.state_dir / "coordinator-status.json"
-        if status_file.exists():
-            doc = json.loads(status_file.read_text(encoding="utf-8"))
-            for wi in doc.get("delivery_control", {}).get("work_items", {}).values():
-                self.assertNotIn(wi.get("stage"), {"review", "merge_ready", "done"}, f"Stage advanced in {code}!")
+        doc_after = json.loads(status_file.read_text(encoding="utf-8")) if status_file.exists() else None
+        self.assertEqual(doc_before, doc_after, f"Status doc mutated during refusal of {code}!")
 
-    def _assert_receipt_no_side_effects(self, code: str) -> None:
+    def _assert_receipt_no_side_effects(self, code: str, doc_before: Any) -> None:
         rec_dir = self.state_dir / "receipts"
         if rec_dir.exists():
             self.assertEqual(list(rec_dir.glob("*.json")), [], f"Receipt files created during refusal of {code}!")
         status_file = self.state_dir / "coordinator-status.json"
-        if status_file.exists():
-            doc = json.loads(status_file.read_text(encoding="utf-8"))
-            for wi in doc.get("delivery_control", {}).get("work_items", {}).values():
-                self.assertNotIn(wi.get("stage"), {"merge_ready", "done"}, f"Stage advanced in {code}!")
+        doc_after = json.loads(status_file.read_text(encoding="utf-8")) if status_file.exists() else None
+        self.assertEqual(doc_before, doc_after, f"Status doc mutated during refusal of {code}!")
 
     def test_bidirectional_sync_transition_refusal_codes(self) -> None:
-        """Enforces that TRANSITION_REFUSAL_CODES matches the exact codes in transitions.py."""
-        transitions_file = SCRIPTS_DIR / "transitions.py"
-        content = transitions_file.read_text(encoding="utf-8")
-        extracted_codes: set[str] = set()
-
-        for match in re.finditer(r'["\']reason_code["\']\s*:\s*["\']([A-Z0-9_]+)["\']', content):
-            code = match.group(1)
-            if code not in {"PROVIDER_EXECUTION_FAILED"}:
-                extracted_codes.add(code)
-
-        for match in re.finditer(r'return\s+False,\s*["\']([A-Z0-9_]+)["\']', content):
-            extracted_codes.add(match.group(1))
-
-        for match in re.finditer(r'make_refusal\([^,]+,\s*[^,]+,\s*["\']([A-Z0-9_]+)["\']', content):
-            extracted_codes.add(match.group(1))
+        """Enforces that TRANSITION_REFUSAL_CODES matches the exact codes in transitions.py and providers.py."""
+        self.assertEqual(
+            set(TRANS_MODIFIERS.keys()),
+            TRANSITION_REFUSAL_CODES,
+            "TRANS_MODIFIERS does not exactly match TRANSITION_REFUSAL_CODES",
+        )
+        t_text = (SCRIPTS_DIR / "transitions.py").read_text(encoding="utf-8")
+        p_text = (SCRIPTS_DIR / "providers.py").read_text(encoding="utf-8")
+        extracted_codes = extract_refusal_codes_from_ast(t_text) | extract_refusal_codes_from_ast(p_text)
 
         missing_in_inventory = extracted_codes - TRANSITION_REFUSAL_CODES
         self.assertEqual(
             missing_in_inventory,
             set(),
-            f"Refusal codes present in transitions.py but missing from inventory: {missing_in_inventory}",
+            f"Refusal codes present in transitions/providers but missing from inventory: {missing_in_inventory}",
         )
-
         missing_in_code = TRANSITION_REFUSAL_CODES - extracted_codes
         self.assertEqual(
             missing_in_code,
             set(),
-            f"Refusal codes present in inventory but missing from transitions.py: {missing_in_code}",
+            f"Refusal codes present in inventory but missing from transitions/providers: {missing_in_code}",
         )
 
     def test_bidirectional_sync_admission_refusal_codes(self) -> None:
         """Enforces that ADMISSION_REFUSAL_CODES matches the exact codes in admission.py."""
-        admission_file = SCRIPTS_DIR / "admission.py"
-        content = admission_file.read_text(encoding="utf-8")
-        extracted_codes: set[str] = set()
-
-        for match in re.finditer(r'["\']reason_code["\']\s*:\s*["\']([A-Z0-9_]+)["\']', content):
-            extracted_codes.add(match.group(1))
-
-        for match in re.finditer(r'return\s+False,\s*["\']([A-Z0-9_]+)["\']', content):
-            extracted_codes.add(match.group(1))
-
-        for match in re.finditer(r'make_refusal\([^,]+,\s*[^,]+,\s*["\']([A-Z0-9_]+)["\']', content):
-            extracted_codes.add(match.group(1))
+        self.assertEqual(
+            set(ADMISSION_DRIVERS.keys()),
+            ADMISSION_REFUSAL_CODES,
+            "ADMISSION_DRIVERS does not exactly match ADMISSION_REFUSAL_CODES",
+        )
+        a_text = (SCRIPTS_DIR / "admission.py").read_text(encoding="utf-8")
+        extracted_codes = extract_refusal_codes_from_ast(a_text)
 
         missing_in_inventory = extracted_codes - ADMISSION_REFUSAL_CODES
         self.assertEqual(
@@ -1223,7 +1530,6 @@ class TestGuardInventory(unittest.TestCase):
             set(),
             f"Refusal codes present in admission.py but missing from inventory: {missing_in_inventory}",
         )
-
         missing_in_code = ADMISSION_REFUSAL_CODES - extracted_codes
         self.assertEqual(
             missing_in_code,
@@ -1233,18 +1539,13 @@ class TestGuardInventory(unittest.TestCase):
 
     def test_bidirectional_sync_receipt_refusal_codes(self) -> None:
         """Enforces that RECEIPT_REFUSAL_CODES matches the exact codes in receipts.py."""
-        receipts_file = SCRIPTS_DIR / "receipts.py"
-        content = receipts_file.read_text(encoding="utf-8")
-        extracted_codes: set[str] = set()
-
-        for match in re.finditer(r'["\']reason_code["\']\s*:\s*["\']([A-Z0-9_]+)["\']', content):
-            extracted_codes.add(match.group(1))
-
-        for match in re.finditer(r'return\s+False,\s*["\']([A-Z0-9_]+)["\']', content):
-            extracted_codes.add(match.group(1))
-
-        for match in re.finditer(r'make_refusal\([^,]+,\s*[^,]+,\s*["\']([A-Z0-9_]+)["\']', content):
-            extracted_codes.add(match.group(1))
+        self.assertEqual(
+            set(RECEIPT_DRIVERS.keys()),
+            RECEIPT_REFUSAL_CODES,
+            "RECEIPT_DRIVERS does not exactly match RECEIPT_REFUSAL_CODES",
+        )
+        r_text = (SCRIPTS_DIR / "receipts.py").read_text(encoding="utf-8")
+        extracted_codes = extract_refusal_codes_from_ast(r_text)
 
         missing_in_inventory = extracted_codes - RECEIPT_REFUSAL_CODES
         self.assertEqual(
@@ -1252,7 +1553,6 @@ class TestGuardInventory(unittest.TestCase):
             set(),
             f"Refusal codes present in receipts.py but missing from inventory: {missing_in_inventory}",
         )
-
         missing_in_code = RECEIPT_REFUSAL_CODES - extracted_codes
         self.assertEqual(
             missing_in_code,
@@ -1289,6 +1589,7 @@ class TestGuardInventory(unittest.TestCase):
                 if modifier:
                     modifier(ctx)
 
+                doc_before = json.loads(status_file.read_text(encoding="utf-8"))
                 res = execute_transition(
                     control_dir=str(self.state_dir),
                     work_id=ctx["work_id"],
@@ -1301,29 +1602,60 @@ class TestGuardInventory(unittest.TestCase):
 
                 self.assertEqual(res.get("status"), "refused", f"Expected refused for {code}, got {res}")
                 self.assertEqual(res.get("reason_code"), code, f"Expected reason_code {code}, got {res}")
-                self._assert_transition_no_side_effects(code, ctx["work_id"], status_file)
+                self._assert_transition_no_side_effects(code, doc_before, status_file)
 
     def test_table_driven_admission_refusals_and_no_side_effects(self) -> None:
         """Table-driven test driving real admission actions to every refusal code and asserting no side effect."""
-        for code in sorted(ADMISSION_DRIVERS):
+        for code in sorted(ADMISSION_REFUSAL_CODES):
             with self.subTest(refusal_code=code):
                 self.setUp()
                 driver = ADMISSION_DRIVERS[code]
                 res = driver(self, code)
                 self.assertEqual(res.get("status"), "refused", f"Expected refused for {code}, got {res}")
                 self.assertEqual(res.get("reason_code"), code, f"Expected {code}, got {res}")
-                self._assert_admission_no_side_effects(code)
+                self._assert_admission_no_side_effects(code, self.doc_before)
 
     def test_table_driven_receipt_refusals_and_no_side_effects(self) -> None:
         """Table-driven test driving real receipt actions to every refusal code and asserting no side effect."""
-        for code in sorted(RECEIPT_DRIVERS):
+        for code in sorted(RECEIPT_REFUSAL_CODES):
             with self.subTest(refusal_code=code):
                 self.setUp()
                 driver = RECEIPT_DRIVERS[code]
                 res = driver(self, code)
                 self.assertEqual(res.get("status"), "refused", f"Expected refused for {code}, got {res}")
                 self.assertEqual(res.get("reason_code"), code, f"Expected {code}, got {res}")
-                self._assert_receipt_no_side_effects(code)
+                self._assert_receipt_no_side_effects(code, self.doc_before)
+
+    def test_ratchet_catches_mutant_spellings(self) -> None:
+        """Mutant tests proving the AST extractor catches non-canonical spellings."""
+        mutant_src = """
+def sample_paren():
+    return (False, "MUTANT_PAREN_CODE")
+
+def sample_var():
+    err_var = "MUTANT_VAR_CODE"
+    return False, err_var
+
+def sample_dict():
+    d_var = "MUTANT_DICT_CODE"
+    return {"status": "refused", "reason_code": d_var}
+
+def sample_call():
+    c_var = "MUTANT_CALL_CODE"
+    make_refusal(doc, wi, c_var)
+"""
+        extracted = extract_refusal_codes_from_ast(mutant_src)
+        expected_mutants = {"MUTANT_PAREN_CODE", "MUTANT_VAR_CODE", "MUTANT_DICT_CODE", "MUTANT_CALL_CODE"}
+        self.assertEqual(extracted, expected_mutants)
+        self.assertTrue(bool(expected_mutants - TRANSITION_REFUSAL_CODES))
+
+    def test_ratchet_fails_when_driver_or_code_dropped(self) -> None:
+        """Proves that dropping an inventory code or a driver causes immediate failure."""
+        fake_drivers = dict(TRANS_MODIFIERS)
+        dropped_code = next(iter(fake_drivers.keys()))
+        del fake_drivers[dropped_code]
+        with self.assertRaises(AssertionError):
+            self.assertEqual(set(fake_drivers.keys()), TRANSITION_REFUSAL_CODES)
 
 
 if __name__ == "__main__":

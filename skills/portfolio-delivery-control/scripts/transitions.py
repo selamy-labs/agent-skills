@@ -13,14 +13,16 @@ from admission import verify_mandatory_gates
 from providers import (
     ALLOWED_MERGE_IDENTITIES,
     fetch_ci_checks_from_provider,
-    is_ci_check_passing,
     is_hex_40,
+    is_hex_64,
     iso_timestamp,
     reconcile_and_complete_spec_task,
     reconcile_and_merge_pr,
     reconcile_and_publish_pr,
     reconcile_and_push,
+    resolve_required_checks,
     sha256_file,
+    verify_live_status_rollup,
 )
 from receipts import check_qualification, validate_review_receipt
 
@@ -95,7 +97,7 @@ def _matches_report_fields(
     rep_sess = rep_data.get("reviewer_session_id")
     if rep_sess != session_id:
         return False
-    if dispatch_id and rep_data.get("dispatch_id") != dispatch_id:
+    if not dispatch_id or not dispatch_id.strip() or rep_data.get("dispatch_id") != dispatch_id:
         return False
     return True
 
@@ -112,12 +114,14 @@ def _check_on_disk_report(
 ) -> bool:
     if not rep_path_str:
         return False
+    if not expected_sha256 or not is_hex_64(expected_sha256):
+        return False
     rep_p = Path(rep_path_str)
     if not rep_p.is_absolute() and control_dir:
         rep_p = Path(control_dir) / rep_p
     if not rep_p.is_file():
         return False
-    if expected_sha256 and sha256_file(rep_p).lower() != expected_sha256.lower():
+    if sha256_file(rep_p).lower() != expected_sha256.lower():
         return False
     try:
         rep_data = json.loads(rep_p.read_text(encoding="utf-8"))
@@ -139,11 +143,14 @@ def _matches_receipt_fields(
 ) -> bool:
     if data.get("verdict") != "SHIP":
         return False
+    rep_sha = data.get("report_sha256")
+    if not rep_sha or not is_hex_64(str(rep_sha)):
+        return False
     rec_sess = data.get("reviewer_session_id")
     rec_fam = data.get("family")
     if rec_fam != family or rec_sess != session_id:
         return False
-    if dispatch_id and data.get("dispatch_id") != dispatch_id:
+    if not dispatch_id or not dispatch_id.strip() or data.get("dispatch_id") != dispatch_id:
         return False
     r_commit = data.get("commit_sha")
     r_tree = data.get("tree_sha")
@@ -158,6 +165,8 @@ def _check_receipt_file_on_disk(
     commit_sha: str,
     tree_sha: str,
     dispatch_id: str = "",
+    expected_report_sha256: str | None = None,
+    expected_report_path: str | None = None,
 ) -> bool:
     rec_path = Path(control_dir) / "receipts" / f"review_{work_id}_{family}_{session_id}.json"
     if not rec_path.exists():
@@ -170,15 +179,47 @@ def _check_receipt_file_on_disk(
         return False
     if not _matches_receipt_fields(data, family, session_id, commit_sha, tree_sha, dispatch_id):
         return False
+    rep_sha = data.get("report_sha256")
+    if not rep_sha or not is_hex_64(str(rep_sha)):
+        return False
+    if expected_report_sha256 and str(expected_report_sha256).lower() != str(rep_sha).lower():
+        return False
+    if expected_report_path and str(expected_report_path) != str(data.get("report_path")):
+        return False
     return _check_on_disk_report(
         data.get("report_path"),
-        data.get("report_sha256"),
+        str(rep_sha),
         control_dir,
         family,
         session_id,
         commit_sha,
         tree_sha,
         dispatch_id,
+    )
+
+
+def _verify_ship_disk_receipt(
+    control_dir: Path | str,
+    work_id: str,
+    r: dict[str, Any],
+    commit_sha: str,
+    tree_sha: str,
+) -> bool:
+    fam = str(r.get("family", ""))
+    sess = str(r.get("reviewer_session_id", ""))
+    disp = str(r.get("dispatch_id", ""))
+    exp_sha = r.get("report_sha256")
+    exp_path = r.get("report_path")
+    return _check_receipt_file_on_disk(
+        control_dir,
+        work_id,
+        fam,
+        sess,
+        commit_sha,
+        tree_sha,
+        dispatch_id=disp,
+        expected_report_sha256=str(exp_sha) if exp_sha else None,
+        expected_report_path=str(exp_path) if exp_path else None,
     )
 
 
@@ -189,16 +230,13 @@ def _check_single_ship_match(
     control_dir: Path | str | None,
     work_id: str,
 ) -> bool:
-    r_commit = r.get("commit_sha")
-    r_tree = r.get("tree_sha")
-    if r_commit != commit_sha or r_tree != tree_sha:
+    if r.get("commit_sha") != commit_sha:
         return False
-    if control_dir and work_id:
-        fam = str(r.get("family") or "")
-        sess = str(r.get("reviewer_session_id") or "")
-        disp = str(r.get("dispatch_id") or "")
-        return _check_receipt_file_on_disk(control_dir, work_id, fam, sess, commit_sha, tree_sha, dispatch_id=disp)
-    return True
+    if r.get("tree_sha") != tree_sha:
+        return False
+    if not (control_dir and work_id):
+        return True
+    return _verify_ship_disk_receipt(control_dir, work_id, r, commit_sha, tree_sha)
 
 
 def _check_ship_reviews_match(
@@ -279,16 +317,34 @@ def _guard_live_provider_ci(
     commit_sha: str,
     command_runner: Callable[..., Any] | None,
     wt_path: Path,
+    repo: str = "",
+    base_branch: str = "main",
+    control_dir: Path | str | None = None,
+    policy_path: Path | str | None = None,
+    required_checks: list[str] | None = None,
 ) -> tuple[bool, str]:
     if not pr_ref:
-        return False, "pr_ref required for exact-head CI query"
-    live_checks = fetch_ci_checks_from_provider("", pr_ref, commit_sha, runner=command_runner, cwd=wt_path)
+        return False, "CI_CHECK_FAILED"
+    req_checks = required_checks
+    if req_checks is None:
+        req_checks = resolve_required_checks(
+            repo,
+            base_branch=base_branch,
+            runner=command_runner,
+            cwd=wt_path,
+            control_dir=control_dir,
+            policy_path=policy_path,
+        )
+    if not req_checks:
+        return False, "CI_CHECK_MISSING"
+    live_checks = fetch_ci_checks_from_provider(repo, pr_ref, commit_sha, runner=command_runner, cwd=wt_path)
     if live_checks is None:
-        return False, "exact-head provider required checks missing or failed: provider returned None"
+        return False, "MISSING_EXACT_HEAD_CI"
     if not live_checks:
-        return False, "required checks are missing"
-    if not all(is_ci_check_passing(c, commit_sha) for c in live_checks):
-        return False, "exact-head provider required checks failed"
+        return False, "CI_CHECK_MISSING"
+    v_ok, v_err = verify_live_status_rollup(live_checks, commit_sha, required_checks=req_checks)
+    if not v_ok:
+        return False, v_err
     return True, ""
 
 
@@ -306,6 +362,8 @@ def _dispatch_action(
     command_runner: Callable[..., Any] | None,
     merge_identity: str = "selamy-labs-bot",
     remote: str = "origin",
+    required_checks: list[str] | None = None,
+    repo: str = "",
 ) -> tuple[bool, dict[str, Any]]:
     if action == "push":
         return reconcile_and_push(wt_path, remote, target_branch, commit_sha, runner=command_runner)
@@ -314,7 +372,15 @@ def _dispatch_action(
             wt_path, target_branch, base_branch, commit_sha, title, body, runner=command_runner, remote=remote
         )
     if action == "merge_pr":
-        return reconcile_and_merge_pr(wt_path, pr_ref, commit_sha, merge_identity=merge_identity, runner=command_runner)
+        return reconcile_and_merge_pr(
+            wt_path,
+            pr_ref,
+            commit_sha,
+            merge_identity=merge_identity,
+            runner=command_runner,
+            required_checks=required_checks,
+            repo=repo,
+        )
     if action == "complete_spec_task":
         return reconcile_and_complete_spec_task(spec_path, task_id)
     return False, {"error": f"Unknown action {action}", "reason_code": "INVALID_ACTION"}
@@ -382,14 +448,35 @@ def _guard_action_ci(
     wt_path: Path,
     pr_ref: str,
     iso_now: str,
+    repo: str = "",
+    base_branch: str = "main",
+    control_dir: Path | str | None = None,
+    policy_path: Path | str | None = None,
 ) -> tuple[bool, dict[str, Any] | None]:
     if action in {"complete_spec_task", "merge_pr"}:
-        ci_ok, ci_err = _guard_live_provider_ci(pr_ref, commit_sha, command_runner, wt_path)
+        req_checks = resolve_required_checks(
+            repo,
+            base_branch=base_branch,
+            runner=command_runner,
+            cwd=wt_path,
+            control_dir=control_dir,
+            policy_path=policy_path,
+        )
+        ci_ok, ci_code = _guard_live_provider_ci(
+            pr_ref,
+            commit_sha,
+            command_runner,
+            wt_path,
+            repo=repo,
+            base_branch=base_branch,
+            control_dir=control_dir,
+            policy_path=policy_path,
+            required_checks=req_checks,
+        )
         if not ci_ok:
             return False, {
                 "status": "refused",
-                "reason_code": "CI_CHECK_FAILED",
-                "error": ci_err,
+                "reason_code": ci_code,
                 "observed_at": iso_now,
             }
     return True, None
@@ -487,6 +574,8 @@ def _dispatch_and_record_transition(
     remote: str,
     status_file: Path,
     iso_now: str,
+    required_checks: list[str] | None = None,
+    repo: str = "",
 ) -> dict[str, Any]:
     target_branch, base_branch, title, body = params
     wt_path = Path(wi.get("claim", {}).get("worktree", "."))
@@ -504,6 +593,8 @@ def _dispatch_and_record_transition(
         command_runner,
         merge_identity=merge_identity,
         remote=remote,
+        required_checks=required_checks,
+        repo=repo,
     )
     if not act_ok:
         reason = act_res.get("reason_code", "PROVIDER_EXECUTION_FAILED")
@@ -536,6 +627,7 @@ def execute_transition(
     merge_identity: str = "selamy-labs-bot",
     command_runner: Callable[..., Any] | None = None,
     now: str | None = None,
+    policy_path: Path | str | None = None,
 ) -> dict[str, Any]:
     iso_now = now or iso_timestamp()
     now_dt = datetime.datetime.fromisoformat(iso_now)
@@ -555,10 +647,35 @@ def execute_transition(
     wt_path = Path(wi.get("claim", {}).get("worktree", "."))
     pr_val = pr_number if pr_number is not None else wi.get("pr_number")
     pr_ref = str(pr_val if pr_val is not None else (target_branch or "")).strip()
+    repo = str(wi.get("repo") or "").strip()
 
-    _, ci_ref = _guard_action_ci(action, commit_sha, command_runner, wt_path, pr_ref, iso_now)
+    _, ci_ref = _guard_action_ci(
+        action,
+        commit_sha,
+        command_runner,
+        wt_path,
+        pr_ref,
+        iso_now,
+        repo=repo,
+        base_branch=base_branch,
+        control_dir=control_dir,
+        policy_path=policy_path,
+    )
     if ci_ref:
         return ci_ref
+
+    req_checks = (
+        resolve_required_checks(
+            repo,
+            base_branch=base_branch,
+            runner=command_runner,
+            cwd=wt_path,
+            control_dir=control_dir,
+            policy_path=policy_path,
+        )
+        if action == "merge_pr"
+        else None
+    )
 
     title, body = _format_pr_text(wi, work_id, pr_title, pr_body)
     return _dispatch_and_record_transition(
@@ -575,4 +692,6 @@ def execute_transition(
         remote,
         status_file,
         iso_now,
+        required_checks=req_checks,
+        repo=repo,
     )
