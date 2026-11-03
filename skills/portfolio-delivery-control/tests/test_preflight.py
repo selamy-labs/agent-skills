@@ -2291,6 +2291,24 @@ class PreflightTests(unittest.TestCase):
         res_impl_absent = self.run_audit()
         self.assertIn("STALE_OR_MISSING_CLAIM", self.codes(res_impl_absent))
 
+    def _resolve_pointer(self, ptr):
+        source = self.doc
+        for token in ptr.split("/")[1:]:
+            source = source[token.replace("~1", "/").replace("~0", "~")]
+        return source
+
+    def _collect_pointer_cids(self, gaps):
+        found_cids = set()
+        for g in gaps:
+            for ptr in g["drilldown_pointers"]:
+                source = self._resolve_pointer(ptr)
+                self.assertIn("status", source)
+                self.assertEqual(source["status"], "gap")
+                if "/controls/" in ptr:
+                    cid = ptr.split("/controls/")[1].replace("~1", "/").replace("~0", "~")
+                    found_cids.add(cid)
+        return found_cids
+
     def test_r4_sol61_003_and_004_compact_control_gap_aggregation_and_exact_pointers(self):
         # 1. Exact control IDs containing colons, leading/trailing whitespace, slashes, tildes
         special_ids = ["quality:lint", " surrounded ", "spec~1/core"]
@@ -2302,20 +2320,11 @@ class PreflightTests(unittest.TestCase):
         res = self.run_audit()
         compact = res["compact_projection"]
         gaps = compact["aggregated_gaps"]
-        found_cids = set()
-        for g in gaps:
-            for ptr in g["drilldown_pointers"]:
-                source = self.doc
-                for token in ptr.split("/")[1:]:
-                    source = source[token.replace("~1", "/").replace("~0", "~")]
-                self.assertIn("status", source)
-                self.assertEqual(source["status"], "gap")
-                if "/controls/" in ptr:
-                    cid = ptr.split("/controls/")[1].replace("~1", "/").replace("~0", "~")
-                    found_cids.add(cid)
+        found_cids = self._collect_pointer_cids(gaps)
         for cid in special_ids:
             self.assertIn(cid, found_cids)
 
+    def test_r4_sol61_003_and_004_missing_required_controls_in_gaps(self):
         # 2. Missing required controls are visible in aggregated_gaps
         self.policy["required_controls"] = ["missing-ctrl-1", "missing-ctrl-2"]
         for r in self.doc["delivery_control"]["projects"].values():

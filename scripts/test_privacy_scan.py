@@ -9,7 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.privacy import findings_for_text
+from tools.privacy import findings_for_text, scan_all
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class PrivacyScanTests(unittest.TestCase):
@@ -44,6 +46,9 @@ class PrivacyScanTests(unittest.TestCase):
         text = "Use reproducible validation, observable traces, and source-backed examples."
         findings = findings_for_text(text, "skills/generic/SKILL.md")
         self.assertEqual([], findings)
+
+    def test_repository_root_clean(self) -> None:
+        self.assertEqual([], scan_all(ROOT))
 
 
 if __name__ == "__main__":

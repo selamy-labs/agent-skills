@@ -21,6 +21,8 @@ jobs:
       - uses: actions/setup-python@v6.3.0
         with:
           python-version: "3.12"
+      - name: Install dependencies
+        run: pip install pyyaml==6.0.1 python-hcl2==7.2.0
       - name: Validate skill frontmatter and naming
         run: python scripts/lint_skills.py
       - name: Block public information leaks
@@ -53,16 +55,25 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        # ruff is pinned: `ruff format` output is version-dependent, so an
+        # ruff is pinned (issue #101): `ruff format` output is version-dependent, so an
         # unpinned formatter would let a future release turn main red with no
         # code change — defeating the "formatter output is the source of truth"
         # goal of the format gate (#101).
-        run: pip install pytest pytest-cov ruff==0.15.21
+        run: pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1 python-hcl2==7.2.0
       - name: Lint with ruff
-        run: ruff check tools/ tests/
+        run: python -m ruff check .
+        # Covers all executable Python across the repository
       - name: Check formatting with ruff
-        run: ruff format --check --diff .
+        run: python -m ruff format --check --diff .
+      - name: Validate skills
+        run: python tools/validate_skills.py
+      - name: Validate marketplace
+        run: python tools/validate_marketplace.py
+      - name: Self-test terraform module layout
+        run: python tools/tf_module_layout.py --self-test
       - name: Test portfolio delivery control
         run: python -m unittest discover -s skills/portfolio-delivery-control/tests -v
       - name: Run tests with coverage
-        run: pytest --cov=tools --cov-report=term-missing --cov-fail-under=90
+        run: pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
+      - name: Verify coverage threshold
+        run: python -m tests.test_coverage_threshold coverage.json

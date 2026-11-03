@@ -11,6 +11,18 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+# Add repository root to sys.path so tools can be imported
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.release_gate import evaluate_check_runs, verify_exact_commit_gate
+
+__all__ = [
+    "Commit",
+    "evaluate_check_runs",
+    "verify_exact_commit_gate",
+    "bump_for",
+    "next_version",
+    "release_notes",
+]
 
 VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 HEADER_RE = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]+\))?(?P<breaking>!)?:")
@@ -33,7 +45,8 @@ def parse_version(tag: str) -> tuple[int, int, int] | None:
     match = VERSION_RE.match(tag)
     if not match:
         return None
-    return tuple(int(part) for part in match.groups())
+    major, minor, patch = (int(part) for part in match.groups())
+    return (major, minor, patch)
 
 
 def latest_semver_tag() -> tuple[str, tuple[int, int, int]] | None:
@@ -58,6 +71,19 @@ def commits_since(tag: str | None) -> list[Commit]:
     return commits
 
 
+def _commit_bump_type(commit: Commit) -> tuple[bool, str | None]:
+    header = HEADER_RE.match(commit.subject)
+    breaking = "BREAKING CHANGE" in commit.body or (header is not None and bool(header.group("breaking")))
+    if breaking:
+        return (True, "major")
+    commit_type = header.group("type") if header else ""
+    if commit_type == "feat":
+        return (False, "minor")
+    if commit_type in {"fix", "perf", "refactor"}:
+        return (False, "patch")
+    return (False, None)
+
+
 def bump_for(commits: list[Commit], has_existing_tag: bool) -> str | None:
     if not commits:
         return None
@@ -66,14 +92,12 @@ def bump_for(commits: list[Commit], has_existing_tag: bool) -> str | None:
 
     bump = None
     for commit in commits:
-        header = HEADER_RE.match(commit.subject)
-        breaking = "BREAKING CHANGE" in commit.body or (header and header.group("breaking"))
-        if breaking:
+        is_major, c_bump = _commit_bump_type(commit)
+        if is_major:
             return "major"
-        commit_type = header.group("type") if header else ""
-        if commit_type == "feat":
+        if c_bump == "minor":
             bump = "minor"
-        elif commit_type in {"fix", "perf", "refactor"} and bump != "minor":
+        elif c_bump == "patch" and bump != "minor":
             bump = "patch"
     return bump
 
@@ -116,10 +140,31 @@ def write_github_output(values: dict[str, str]) -> None:
                 output.write(f"{key}={value}\n")
 
 
+def _verify_release_ci(sha: str) -> bool:
+    passed, reasons = verify_exact_commit_gate(
+        sha,
+        token=os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"),
+        repo=os.environ.get("GITHUB_REPOSITORY"),
+    )
+    if not passed:
+        print(f"Release gate rejected commit {sha}:", file=sys.stderr)
+        for reason in reasons:
+            print(f"  - {reason}", file=sys.stderr)
+        return False
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--notes-file", default="release-notes.md")
+    parser.add_argument(
+        "--verify-ci", action="store_true", help="Fail closed if required CI checks on sha are not green"
+    )
+    parser.add_argument("--sha", default=os.environ.get("GITHUB_SHA", "HEAD"))
     args = parser.parse_args()
+
+    if args.verify_ci and not _verify_release_ci(args.sha):
+        return 1
 
     latest = latest_semver_tag()
     latest_tag = latest[0] if latest else None

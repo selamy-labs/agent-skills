@@ -1048,7 +1048,7 @@ def test_runner_harvests_the_worker_group_on_timeout(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     _set_behavior(fixture, "hang_child")
 
-    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=1)
+    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=2)
 
     assert result.returncode != 0
     assert _status(fixture, "attempt-001")["classification"] == "timed_out"
@@ -1061,7 +1061,7 @@ def test_runner_harvests_an_observed_detached_descendant(tmp_path: Path) -> None
     fixture = _fixture(tmp_path)
     _set_behavior(fixture, "detached_child")
 
-    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=1)
+    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=2)
 
     assert result.returncode != 0
     assert _status(fixture, "attempt-001")["classification"] == "timed_out"

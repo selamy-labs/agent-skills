@@ -4,10 +4,16 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
+from unittest.mock import patch
 
-import public_api_stability
-import semantic_release as release
-import validate_pr_title
+try:
+    from scripts import public_api_stability, validate_pr_title
+    from scripts import semantic_release as release
+except ImportError:
+    import public_api_stability  # type: ignore[no-redef,import-not-found]
+    import semantic_release as release  # type: ignore[no-redef,import-not-found]
+    import validate_pr_title  # type: ignore[no-redef,import-not-found]
 
 
 class SemanticReleasePolicyTest(unittest.TestCase):
@@ -47,6 +53,196 @@ class SemanticReleasePolicyTest(unittest.TestCase):
         self.assertTrue(validate_pr_title.validate("Fix: correct release plan"))
         self.assertTrue(validate_pr_title.validate("correct release plan"))
         self.assertTrue(validate_pr_title.validate("feat: replace manifest", "breaking change: incompatible"))
+
+    def test_evaluate_check_runs_fails_closed_on_missing_or_failed(self) -> None:
+        target_sha = "abc1234"
+        # 1. Missing check fails closed
+        data_missing = [{"name": "Tests", "status": "completed", "conclusion": "success", "head_sha": target_sha}]
+        passed, reasons = release.evaluate_check_runs(data_missing, expected_sha=target_sha)
+        self.assertFalse(passed)
+        self.assertTrue(any("missing required check" in r for r in reasons))
+
+        # 2. In-progress check fails closed
+        data_in_progress: list[dict[str, Any]] = [
+            {"name": "Skill Quality And Privacy", "status": "in_progress", "conclusion": None, "head_sha": target_sha},
+            {"name": "Tests", "status": "completed", "conclusion": "success", "head_sha": target_sha},
+        ]
+        passed, reasons = release.evaluate_check_runs(data_in_progress, expected_sha=target_sha)
+        self.assertFalse(passed)
+
+        # 3. Cancelled check fails closed
+        data_cancelled = [
+            {
+                "name": "Skill Quality And Privacy",
+                "status": "completed",
+                "conclusion": "cancelled",
+                "head_sha": target_sha,
+            },
+            {"name": "Tests", "status": "completed", "conclusion": "success", "head_sha": target_sha},
+        ]
+        passed, reasons = release.evaluate_check_runs(data_cancelled, expected_sha=target_sha)
+        self.assertFalse(passed)
+
+        # 4. Failed check fails closed
+        data_failed = [
+            {
+                "name": "Skill Quality And Privacy",
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": target_sha,
+            },
+            {"name": "Tests", "status": "completed", "conclusion": "success", "head_sha": target_sha},
+        ]
+        passed, reasons = release.evaluate_check_runs(data_failed, expected_sha=target_sha)
+        self.assertFalse(passed)
+
+        # 5. All required checks successful passes
+        data_success = [
+            {
+                "name": "Skill Quality And Privacy",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+            },
+            {
+                "name": "Tests",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+            },
+        ]
+        passed, reasons = release.evaluate_check_runs(data_success, expected_sha=target_sha)
+        self.assertTrue(passed)
+        self.assertEqual(reasons, [])
+
+    def test_evaluate_check_runs_string_ids_sorted_numerically(self) -> None:
+        target_sha = "abc1234"
+        data_failing_later = [
+            {
+                "id": "9",
+                "name": "Tests",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+            },
+            {
+                "id": "10",
+                "name": "Tests",
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+            },
+            {
+                "id": "1",
+                "name": "Skill Quality And Privacy",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+            },
+        ]
+        passed, reasons = release.evaluate_check_runs(data_failing_later, expected_sha=target_sha)
+        self.assertFalse(passed)
+        self.assertTrue(any("did not succeed" in r for r in reasons))
+
+        data_passing_later = [
+            {
+                "id": "9",
+                "name": "Tests",
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+            },
+            {
+                "id": "10",
+                "name": "Tests",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+            },
+            {
+                "id": "1",
+                "name": "Skill Quality And Privacy",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+            },
+        ]
+        passed, reasons = release.evaluate_check_runs(data_passing_later, expected_sha=target_sha)
+        self.assertTrue(passed)
+        self.assertEqual(reasons, [])
+
+    def test_evaluate_check_runs_with_check_suite_filter(self) -> None:
+        target_sha = "abc1234"
+        data = [
+            {
+                "id": 1,
+                "name": "Tests",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+                "check_suite": {"id": 100},
+            },
+            {
+                "id": 2,
+                "name": "Skill Quality And Privacy",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+                "check_suite": {"id": 100},
+            },
+            {
+                "id": 3,
+                "name": "Tests",
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": target_sha,
+                "app": {"slug": "github-actions"},
+                "check_suite": {"id": 200},
+            },
+        ]
+        passed, reasons = release.evaluate_check_runs(data, expected_sha=target_sha, expected_check_suite_id=100)
+        self.assertTrue(passed)
+        self.assertEqual(reasons, [])
+
+        passed, reasons = release.evaluate_check_runs(data, expected_sha=target_sha, expected_check_suite_id=200)
+        self.assertFalse(passed)
+
+    def test_public_api_stability_unmarked_removal_fails(self) -> None:
+        with (
+            patch.object(public_api_stability, "latest_semver_tag", return_value="v0.1.0"),
+            patch.object(public_api_stability, "skill_names_at", side_effect=[{"skill-a", "skill-b"}, {"skill-a"}]),
+            patch.object(public_api_stability, "has_breaking_marker", return_value=False),
+        ):
+            self.assertEqual(public_api_stability.main(), 1)
+
+    def test_public_api_stability_marked_removal_passes(self) -> None:
+        with (
+            patch.object(public_api_stability, "latest_semver_tag", return_value="v0.1.0"),
+            patch.object(public_api_stability, "skill_names_at", side_effect=[{"skill-a", "skill-b"}, {"skill-a"}]),
+            patch.object(public_api_stability, "has_breaking_marker", return_value=True),
+        ):
+            self.assertEqual(public_api_stability.main(), 0)
+
+    def test_public_api_stability_no_removal_passes(self) -> None:
+        with (
+            patch("public_api_stability.latest_semver_tag", return_value="v0.1.0"),
+            patch("public_api_stability.skill_names_at", side_effect=[{"skill-a"}, {"skill-a", "skill-b"}]),
+        ):
+            self.assertEqual(public_api_stability.main(), 0)
+
+    def test_public_api_stability_no_tag_skips(self) -> None:
+        with patch("public_api_stability.latest_semver_tag", return_value=None):
+            self.assertEqual(public_api_stability.main(), 0)
 
 
 if __name__ == "__main__":
