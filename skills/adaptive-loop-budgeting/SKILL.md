@@ -96,6 +96,23 @@ Match confidence to risk:
 Use [[process-aware-done]] for completion claims and [[verify-real-artifact]]
 when the result matters outside the local checkout.
 
+## Model Escalation Ladder
+
+When loops can run on models of different cost, spend most attempts on the
+cheapest model that passes the mechanical checks:
+
+- Order the models from cheapest to strongest. Choose the rung from real
+  attempts: `start rung + floor(real attempts / N)`, with a small fixed `N`
+  such as four.
+- A run that ends unfinished starts the next run one rung higher, so a hard
+  task does not repeat its full climb.
+- Provider rate, quota, or credit limits are waits, not attempts. After a
+  bounded wait, send that iteration to another provider pool instead of
+  escalating the rung.
+- Reserve the strongest models for independent review and the top rung.
+- Record the rung and cost per change so repeated escalation shows up as a
+  signal about the task, the directive, or the checks.
+
 ## Output Shape
 
 ```text
