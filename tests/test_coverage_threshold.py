@@ -64,7 +64,7 @@ def _parse_session_marker_dict(raw: str, marker: Path) -> dict[str, Any]:
     return data
 
 
-def _validate_session_marker_fields(data: dict[str, Any], marker: Path) -> None:
+def _validate_session_marker_fields(data: dict[str, Any], marker: Path, *, max_age_seconds: float = 120.0) -> None:
     session_id = data.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
         raise AssertionError(f"Session marker in {marker} is missing required 'session_id'")
@@ -85,7 +85,6 @@ def _validate_session_marker_fields(data: dict[str, Any], marker: Path) -> None:
             f"Invalid session marker timestamp in {marker}: {ts}. Ancient or forged marker timestamps are refused."
         )
     now = time.time()
-    max_age_seconds = 3600.0
     if not (now - max_age_seconds <= ts <= now + 300.0):
         raise AssertionError(
             f"Session marker in {marker} timestamp {ts} is outside allowed recency window. "
@@ -100,28 +99,24 @@ def _validate_session_marker_fields(data: dict[str, Any], marker: Path) -> None:
         )
 
 
-def _read_session_marker(marker: Path) -> dict[str, Any]:
+def _read_session_marker(marker: Path, *, max_age_seconds: float = 600.0) -> dict[str, Any]:
     if is_tracked_by_git(marker):
         raise AssertionError(f"Refusing session marker tracked in git: {marker}")
     raw = marker.read_text(encoding="utf-8").strip()
     data = _parse_session_marker_dict(raw, marker)
-    _validate_session_marker_fields(data, marker)
+    _validate_session_marker_fields(data, marker, max_age_seconds=max_age_seconds)
     return data
 
 
-def _verify_report_session_binding(path: Path, marker_data: dict[str, Any], report_data: dict[str, Any] | None) -> None:
-    expected_session_id = str(marker_data.get("session_id", ""))
-    if report_data is None:
-        try:
-            report_data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            raise AssertionError(f"Failed to parse coverage report {path} for session binding")
-    report_session_id = report_data.get("session_id")
-    if not report_session_id or report_session_id != expected_session_id:
+def _check_expected_session_id(actual_id: str, expected_id: str | None, label: str) -> None:
+    if expected_id is not None and actual_id != expected_id:
         raise AssertionError(
-            f"Coverage report {path} session_id ({report_session_id!r}) does not match "
-            f"pytest session marker session_id ({expected_session_id!r}). Forged or unbound reports are refused."
+            f"{label} session_id ({actual_id!r}) does not match "
+            f"independently supplied expected_session_id ({expected_id!r})."
         )
+
+
+def _verify_report_digest(path: Path, marker_data: dict[str, Any]) -> None:
     expected_digest = marker_data.get("report_digest")
     if not expected_digest or not isinstance(expected_digest, str):
         raise AssertionError(
@@ -137,42 +132,56 @@ def _verify_report_session_binding(path: Path, marker_data: dict[str, Any], repo
         )
 
 
-def check_report_freshness(
+def _verify_report_session_binding(
     path: Path,
-    min_mtime: float | None = None,
-    report_data: dict[str, Any] | None = None,
+    marker_data: dict[str, Any],
+    report_data: dict[str, Any] | None,
+    *,
+    expected_session_id: str | None = None,
 ) -> None:
-    """Verify that coverage report is not older than the current test run and matches session marker."""
-    if min_mtime is not None:
-        if path.stat().st_mtime < min_mtime - 0.05:
-            raise AssertionError(
-                f"Coverage report {path} is older than required run start time "
-                f"({path.stat().st_mtime:.2f} < {min_mtime:.2f}). Pre-existing reports are refused."
-            )
-        return
+    expected_from_marker = str(marker_data.get("session_id", ""))
+    _check_expected_session_id(expected_from_marker, expected_session_id, "Marker")
 
-    marker = path.parent / ".coverage_session_start"
-    if not marker.is_file():
-        if path.name == "coverage.json":
-            raise AssertionError(
-                f"Coverage report {path} was not produced by a pytest run in the current session "
-                f"(missing session marker {marker}). Pre-existing or unbound reports are refused."
-            )
-        return
+    if report_data is None:
+        try:
+            report_data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            raise AssertionError(f"Failed to parse coverage report {path} for session binding")
+    report_session_id = report_data.get("session_id")
+    if not report_session_id or report_session_id != expected_from_marker:
+        raise AssertionError(
+            f"Coverage report {path} session_id ({report_session_id!r}) does not match "
+            f"pytest session marker session_id ({expected_from_marker!r}). Forged or unbound reports are refused."
+        )
+    _check_expected_session_id(report_session_id, expected_session_id, "Coverage report")
+    _verify_report_digest(path, marker_data)
 
-    marker_data = _read_session_marker(marker)
-    session_start = float(marker_data["timestamp"])
+
+def _check_run_start_bound(path: Path, session_start: float, min_mtime: float | None, marker: Path) -> None:
+    if min_mtime is None:
+        return
+    if path.stat().st_mtime < min_mtime - 0.05:
+        raise AssertionError(
+            f"Coverage report {path} is older than required run start time "
+            f"({path.stat().st_mtime:.2f} < {min_mtime:.2f}). Pre-existing reports are refused."
+        )
+    if session_start < min_mtime - 0.05:
+        raise AssertionError(
+            f"Coverage session marker {marker} is older than required run start time "
+            f"({session_start:.2f} < {min_mtime:.2f}). Pre-existing or replayed markers are refused."
+        )
+
+
+def _check_report_age(path: Path, session_start: float, max_age_seconds: float) -> None:
+    import time
+
     if path.stat().st_mtime < session_start - 0.05:
         raise AssertionError(
             f"Coverage report {path} is older than the current pytest run "
             f"(mtime={path.stat().st_mtime:.2f} < session_start={session_start:.2f}). "
             f"Stale or pre-existing reports are refused."
         )
-
-    import time
-
     now = time.time()
-    max_age_seconds = 3600.0
     report_mtime = path.stat().st_mtime
     if not (now - max_age_seconds <= report_mtime <= now + 300.0):
         raise AssertionError(
@@ -180,7 +189,36 @@ def check_report_freshness(
             "Stale, ancient, or future reports are refused."
         )
 
-    _verify_report_session_binding(path, marker_data, report_data)
+
+def check_report_freshness(
+    path: Path,
+    min_mtime: float | None = None,
+    report_data: dict[str, Any] | None = None,
+    *,
+    expected_session_id: str | None = None,
+    max_age_seconds: float = 600.0,
+) -> None:
+    """Verify that coverage report is not older than the current test run and matches session marker."""
+    marker = path.parent / ".coverage_session_start"
+    if not marker.is_file():
+        if path.name == "coverage.json":
+            raise AssertionError(
+                f"Coverage report {path} was not produced by a pytest run in the current session "
+                f"(missing session marker {marker}). Pre-existing or unbound reports are refused."
+            )
+        if min_mtime is not None and path.stat().st_mtime < min_mtime - 0.05:
+            raise AssertionError(
+                f"Coverage report {path} is older than required run start time "
+                f"({path.stat().st_mtime:.2f} < {min_mtime:.2f}). Pre-existing reports are refused."
+            )
+        return
+
+    marker_data = _read_session_marker(marker, max_age_seconds=max_age_seconds)
+    session_start = float(marker_data["timestamp"])
+
+    _check_run_start_bound(path, session_start, min_mtime, marker)
+    _check_report_age(path, session_start, max_age_seconds)
+    _verify_report_session_binding(path, marker_data, report_data, expected_session_id=expected_session_id)
 
     try:
         marker.unlink()
@@ -192,6 +230,8 @@ def verify_coverage_report(
     report_path: Path | str,
     *,
     min_mtime: float | None = None,
+    expected_session_id: str | None = None,
+    max_age_seconds: float = 600.0,
     check_run: bool = True,
 ) -> tuple[float, float]:
     """Verify coverage report has valid file, percent_covered >= 90.0, num_branches > 0,
@@ -206,7 +246,13 @@ def verify_coverage_report(
 
     data = json.loads(path.read_text(encoding="utf-8"))
     if check_run:
-        check_report_freshness(path, min_mtime, report_data=data)
+        check_report_freshness(
+            path,
+            min_mtime=min_mtime,
+            report_data=data,
+            expected_session_id=expected_session_id,
+            max_age_seconds=max_age_seconds,
+        )
     totals = data.get("totals", {})
     percent_covered = float(totals.get("percent_covered", 0.0))
     num_branches = int(totals.get("num_branches", 0))
@@ -292,8 +338,19 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point to verify coverage report."""
     args = sys.argv[1:] if argv is None else argv
     report_path = args[0] if args else os.environ.get("COVERAGE_JSON_PATH", "coverage.json")
+    expected_session_id = os.environ.get("COVERAGE_SESSION_ID")
+    min_mtime: float | None = None
+    if "COVERAGE_RUN_START" in os.environ:
+        try:
+            min_mtime = float(os.environ["COVERAGE_RUN_START"])
+        except ValueError:
+            pass
     try:
-        percent_covered, raw_branch_pct = verify_coverage_report(report_path)
+        percent_covered, raw_branch_pct = verify_coverage_report(
+            report_path,
+            min_mtime=min_mtime,
+            expected_session_id=expected_session_id,
+        )
         print(
             f"Coverage report verified ({report_path}): "
             f"combined={percent_covered:.2f}%, raw_branch={raw_branch_pct:.2f}%"
@@ -969,6 +1026,73 @@ def test_is_tracked_by_git_unmatched_returns_untracked(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: MockCompletedProcess())
     assert is_tracked_by_git("some_file.json") is False
+
+
+def test_sol61_05_recent_forged_matching_pair_refused(tmp_path: Path) -> None:
+    """AS-TS-R23-SOL61-05: Forged report (mtime=now-1799) with matching forged marker (ts=now-1800)
+    is refused as outside the allowed recency window.
+    """
+    import hashlib
+    import time
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "previous-pytest-session",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    os.utime(report, (now - 1799.0, now - 1799.0))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "previous-pytest-session",
+                "timestamp": now - 1800.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="outside allowed recency window|Stale, ancient, or future"):
+        verify_coverage_report(report)
+
+
+def test_sol61_05_independently_supplied_run_bound_refuses_older_marker(tmp_path: Path) -> None:
+    """AS-TS-R23-SOL61-05: Independently supplied current run bound refuses marker from earlier run."""
+    import hashlib
+    import time
+
+    now = time.time()
+    run_bound = now - 5.0
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "older-session",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    os.utime(report, (now - 30.0, now - 30.0))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "older-session",
+                "timestamp": now - 35.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="older than required run start time"):
+        verify_coverage_report(report, min_mtime=run_bound)
 
 
 if __name__ == "__main__":

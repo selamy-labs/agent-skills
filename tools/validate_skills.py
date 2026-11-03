@@ -68,7 +68,8 @@ PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
     "ruff": "ruff==0.15.21",
 }
 
-GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "python-hcl2", "complexipy", "vulture"})
+GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "complexipy", "vulture"})
+DISALLOWED_PIP_PACKAGES = frozenset({"complexipy", "vulture", "python-hcl2"})
 
 
 def strip_github_expressions(text: str) -> str:
@@ -320,11 +321,10 @@ def _check_single_pip_token(token: str, errors: list[str]) -> None:
     pkg_name = re.split(r"[=<>!~]", token)[0].strip()
     if pkg_name in GATED_PACKAGES:
         expected = PINNED_TOOL_REQUIREMENTS.get(pkg_name)
-        if expected is not None:
-            if token != expected:
-                errors.append(f"Disallowed pip pin for {pkg_name!r}: got {token!r}, expected {expected!r}")
-        elif pkg_name in ("complexipy", "vulture", "python-hcl2"):
-            errors.append(f"Disallowed pip installation of {pkg_name!r} in workflow: {token!r}")
+        if expected is not None and token != expected:
+            errors.append(f"Disallowed pip pin for {pkg_name!r}: got {token!r}, expected {expected!r}")
+    if pkg_name in DISALLOWED_PIP_PACKAGES:
+        errors.append(f"Disallowed pip installation of {pkg_name!r} in workflow: {token!r}")
 
 
 def check_pip_install_tokens(tokens: list[str], is_primary_install_step: bool) -> list[str]:

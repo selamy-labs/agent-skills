@@ -165,7 +165,7 @@ PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
     "ruff": "ruff==0.15.21",
 }
 
-GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "python-hcl2", "complexipy", "vulture"})
+GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "complexipy", "vulture"})
 
 
 def is_pip_install_tokens(tokens: list[str]) -> bool:

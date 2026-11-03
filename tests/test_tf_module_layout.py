@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -238,7 +239,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_unicode_first_char_heredoc_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -248,7 +251,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_unicode_tail_heredoc_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -258,7 +263,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_nested_heredoc_in_interpolation_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -268,7 +275,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_nested_heredoc_with_quote_in_interpolation_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -278,7 +287,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_unicode_combining_mark_heredoc_delimiter_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -288,7 +299,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_unicode_connector_punctuation_heredoc_delimiter_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -298,7 +311,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_devanagari_combining_mark_heredoc_delimiter_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -308,7 +323,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_scan_tf_file_detects_providers_with_unicode_continuations(self) -> None:
         case_combining = 'locals {\n  note = <<E\u0301OF\nhello\nE\u0301OF\n}\nprovider "google" {}\n'
@@ -330,7 +347,9 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_unclosed_heredoc_fails_closed_and_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -341,7 +360,9 @@ class TestLintModuleProviderInChild:
         )
         errors = lint_module(tmp_path, is_root=False)
         assert errors, "Expected errors for unclosed heredoc with provider"
-        assert any("unparseable HCL (refused)" in e or "provider configuration" in e for e in errors), errors
+        assert any("unparseable HCL (refused)" in e for e in errors) and not any(
+            "provider configuration" in e for e in errors
+        ), errors
 
     def test_unclosed_heredoc_without_provider_fails_closed(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -437,7 +458,9 @@ class TestLintModuleProviderInChild:
         )
         (tmp_path / "main.tf").write_text(content, encoding="utf-8")
         errors = lint_module(tmp_path, is_root=False)
-        assert any("unparseable HCL (refused)" in e or "provider configuration" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_nested_heredoc_with_outer_delim_in_body_does_not_prematurely_close(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -445,7 +468,9 @@ class TestLintModuleProviderInChild:
         content = 'locals {\n  x = <<OUTER\n${<<INNER\nOUTER\nINNER\n}\n{{\nOUTER\n}\nprovider "google" {}\n'
         (tmp_path / "main.tf").write_text(content, encoding="utf-8")
         errors = lint_module(tmp_path, is_root=False)
-        assert any("unparseable HCL (refused)" in e or "provider configuration" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_block_comment_in_interp_with_eof_does_not_prematurely_close(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -453,7 +478,9 @@ class TestLintModuleProviderInChild:
         content = 'locals {\n  x = <<EOF\n${/*\nEOF\n*/ "ok"}\n{{\nEOF\n}\nprovider "google" {}\n'
         (tmp_path / "main.tf").write_text(content, encoding="utf-8")
         errors = lint_module(tmp_path, is_root=False)
-        assert any("unparseable HCL (refused)" in e or "provider configuration" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_unclosed_nested_heredoc_in_quoted_string_fails(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -468,7 +495,9 @@ class TestLintModuleProviderInChild:
         content = 'locals { x = "${join(\\"\\", [<<\u2118OF\n{\n\u2118OF\n])}" }\nprovider "google" {}\n'
         (tmp_path / "main.tf").write_text(content, encoding="utf-8")
         errors = lint_module(tmp_path, is_root=False)
-        assert any("unparseable HCL (refused)" in e or "provider configuration" in e for e in errors), errors
+        assert any("unparseable HCL (refused)" in e for e in errors) and not any(
+            "provider configuration" in e for e in errors
+        ), errors
 
     def test_self_test_cli(self) -> None:
         from tools.tf_module_layout import main as tf_main
@@ -477,8 +506,8 @@ class TestLintModuleProviderInChild:
         assert rc == 0
 
 
-class TestHcl2StructuredParser:
-    """Validate python-hcl2 structured parsing integration."""
+class TestHclStructuredParser:
+    """Validate hclblocks structured parsing integration."""
 
     def test_block_header_inline_comments(self) -> None:
         from tools.tf_module_layout import scan_tf_file
@@ -712,7 +741,7 @@ class TestSol61R18HclCases:
         snippet = 'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
             f"Expected provider error, got: {errors}"
         )
 
@@ -738,7 +767,7 @@ class TestSol61R18HclCases:
         snippet = 'locals {\n  a = <<é\nhello\né\n  b = <<u00e9\nworld\nu00e9\n}\nprovider "aws" {}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
             f"Expected provider error, got: {errors}"
         )
 
@@ -766,7 +795,7 @@ class TestArgonR19HclCases:
         )
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
             f"Expected provider error, got: {errors}"
         )
 
@@ -939,7 +968,7 @@ class TestR20ReviewerProbes:
         assert any("provider configuration in non-root module" in e for e in errors), errors
 
     def test_provider_attribute_collision_fails_closed(self, tmp_path: Path) -> None:
-        """SOL61-02: provider "aws" {} followed by provider = {} must fail closed."""
+        """SOL61-02: provider "aws" {} followed by provider = {} must detect provider."""
         mod = tmp_path / "mod_prov_coll"
         mod.mkdir()
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -947,10 +976,12 @@ class TestR20ReviewerProbes:
         snippet = 'provider "aws" {}\nprovider = {}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("provider configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
 
     def test_terraform_attribute_collision_fails_closed(self, tmp_path: Path) -> None:
-        """SOL61-02: terraform { backend "s3" {} } followed by terraform = {} must fail closed."""
+        """SOL61-02: terraform { backend "s3" {} } followed by terraform = {} must detect backend."""
         mod = tmp_path / "mod_tf_coll"
         mod.mkdir()
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -958,7 +989,116 @@ class TestR20ReviewerProbes:
         snippet = 'terraform {\n  backend "s3" {}\n}\nterraform = {}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("backend configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+        assert any("backend configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
+
+    def test_sol61_01_empty_list_attribute_preserves_backend(self, tmp_path: Path) -> None:
+        """AS-TS-R23-SOL61-01: terraform = [] must not erase backend block."""
+        mod = tmp_path / "mod_tf_empty_list"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'terraform {\n  backend "s3" {}\n}\nterraform = []\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
+
+    def test_sol61_01_obj_list_attribute_preserves_backend(self, tmp_path: Path) -> None:
+        """AS-TS-R23-SOL61-01: terraform = [{...}] must not erase backend block."""
+        mod = tmp_path / "mod_tf_obj_list"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'terraform {\n  backend "s3" {}\n}\nterraform = [{required_version = ">= 1.0"}]\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
+
+    def test_argon23_001_empty_dict_list_attribute_preserves_backend(self, tmp_path: Path) -> None:
+        """ARGON-TS-R23-001: terraform = [{}] must not erase backend block."""
+        mod = tmp_path / "mod_argon_empty_dict_list"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'terraform {\n  backend "s3" {\n    bucket = "b"\n  }\n}\nterraform = [{}]\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
+
+    def test_argon23_001_int_list_attribute_preserves_backend(self, tmp_path: Path) -> None:
+        """ARGON-TS-R23-001: terraform = [1] must not erase backend block."""
+        mod = tmp_path / "mod_argon_int_list"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'terraform {\n  backend "s3" {\n    bucket = "b"\n  }\n}\nterraform = [1]\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
+
+    def test_argon23_001_cloud_block_with_empty_list_preserves_backend(self, tmp_path: Path) -> None:
+        """ARGON-TS-R23-001: terraform = [] must not erase cloud block."""
+        mod = tmp_path / "mod_argon_cloud_empty_list"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'terraform {\n  cloud {\n    organization = "org"\n  }\n}\nterraform = []\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors) and not any("unparseable HCL" in e for e in errors), (
+            errors
+        )
+
+    def test_sol61_02_file_level_bare_cr_refused(self, tmp_path: Path) -> None:
+        """AS-TS-R23-SOL61-02: File reading preserves raw bytes without universal newline conversion."""
+        mod = tmp_path / "mod_bare_cr_file"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_bytes(b"# core\n")
+        (mod / "bare_cr.tf").write_bytes(b"locals {\r x = 1\r}\r")
+        errors = lint_module(mod, is_root=False)
+        assert any("unparseable HCL (refused)" in e for e in errors), errors
+
+    def test_sol61_02_file_level_double_bom_refused(self, tmp_path: Path) -> None:
+        """AS-TS-R23-SOL61-02: File reading preserves double BOM without stripping."""
+        mod = tmp_path / "mod_double_bom_file"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_bytes(b"# core\n")
+        (mod / "double_bom.tf").write_bytes(b'\xef\xbb\xbf\xef\xbb\xbfterraform {\n  backend "s3" {}\n}\n')
+        errors = lint_module(mod, is_root=False)
+        assert any("unparseable HCL (refused)" in e for e in errors), errors
+
+    def test_sol61_03_temp_descendant_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """AS-TS-R23-SOL61-03: Temporary-directory descendant binary must be refused."""
+        monkeypatch.setenv("HCL_PARSER_PATH", "/tmp/some_fake_dir/hclblocks")
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b
+
+    def test_sol61_03_world_writable_binary_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """AS-TS-R23-SOL61-03: World-writable binary must be refused."""
+        fake = tmp_path / "fake_writable_bin"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o777)
+        monkeypatch.setenv("HCL_PARSER_PATH", str(fake))
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b
+
+    def test_sol61_04_installer_failure_exits_nonzero(self) -> None:
+        """AS-TS-R23-SOL61-04: Installer returns 1 on unwritable or unsafe target."""
+        from scripts.install_hcl_parser import install_parser
+
+        with pytest.raises(Exception):
+            install_parser(Path("/tmp/hclblocks_cannot_install_here"))
 
     def test_bare_cr_and_double_bom_fail_closed(self) -> None:
         """SOL61-03: Bare carriage returns and double UTF-8 BOM must fail closed as syntax violations."""
@@ -994,6 +1134,59 @@ class TestR20ReviewerProbes:
         v, p, b = scan_tf_file('provider "aws" {}\n')
         assert v and not p and not b, "Missing binary must fail closed as syntax violation"
 
+    def _probe_tmp_location(self) -> None:
+        tmp_bin = Path("/tmp/hclblocks_test_probe_mismatch")
+        try:
+            tmp_bin.write_text("#!/bin/sh\necho '{}'\n")
+            tmp_bin.chmod(0o755)
+            os.environ["HCL_PARSER_PATH"] = str(tmp_bin)
+            v, p, b = scan_tf_file('provider "aws" {}\n')
+            assert v and not p and not b
+        finally:
+            try:
+                tmp_bin.unlink()
+            except OSError:
+                pass
+
+    def _probe_path_lookup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_dir = tmp_path / "bin"
+        fake_dir.mkdir()
+        (fake_dir / "hclblocks").write_text("#!/bin/sh\necho '{}'\n")
+        (fake_dir / "hclblocks").chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_dir}:{os.environ.get('PATH', '')}")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "nonexistent_home")
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b
+
+    def _probe_local_bin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_home = tmp_path / "fake_home"
+        fake_local_bin = fake_home / ".local" / "bin"
+        fake_local_bin.mkdir(parents=True)
+        (fake_local_bin / "hclblocks").write_text("#!/bin/sh\necho '{}'\n")
+        (fake_local_bin / "hclblocks").chmod(0o755)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b
+
+    def _probe_cache_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_home = tmp_path / "fake_home"
+        fake_cache_bin = fake_home / ".cache" / "agent-skills" / "bin"
+        fake_cache_bin.mkdir(parents=True)
+        (fake_cache_bin / "hclblocks").write_text("#!/bin/sh\necho '{}'\n")
+        (fake_cache_bin / "hclblocks").chmod(0o755)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b
+
+    def _probe_tools_bin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_tools_bin = tmp_path / "repo" / "tools" / "bin"
+        fake_tools_bin.mkdir(parents=True)
+        (fake_tools_bin / "hclblocks").write_text("#!/bin/sh\necho '{}'\n")
+        (fake_tools_bin / "hclblocks").chmod(0o755)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "nonexistent_home")
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b
+
     @pytest.mark.parametrize(
         "location_probe",
         ["tmp_hcl2json", "path_lookup", "local_bin", "cache_path", "tools_bin"],
@@ -1001,36 +1194,14 @@ class TestR20ReviewerProbes:
     def test_mismatched_binary_at_probed_locations_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location_probe: str
     ) -> None:
-        """ARGON-TS-R22-001 / TS22-01: Mismatched binary at /tmp or probed locations fails closed."""
-        fake_bin = tmp_path / "fake_hcl2json"
-        fake_bin.write_text("#!/bin/sh\necho '{}'\n")
-        fake_bin.chmod(0o755)
-
-        if location_probe == "tmp_hcl2json":
-            tmp_bin = Path("/tmp/hcl2json_test_probe_mismatch")
-            try:
-                tmp_bin.write_text("#!/bin/sh\necho '{}'\n")
-                tmp_bin.chmod(0o755)
-                monkeypatch.setenv("HCL2JSON_PATH", str(tmp_bin))
-                v, p, b = scan_tf_file('provider "aws" {}\n')
-                assert v and not p and not b
-            finally:
-                try:
-                    tmp_bin.unlink()
-                except OSError:
-                    pass
-        elif location_probe == "path_lookup":
-            import os
-
-            fake_dir = tmp_path / "bin"
-            fake_dir.mkdir()
-            (fake_dir / "hcl2json").write_text("#!/bin/sh\necho '{}'\n")
-            (fake_dir / "hcl2json").chmod(0o755)
-            monkeypatch.setenv("PATH", f"{fake_dir}:{os.environ.get('PATH', '')}")
-            monkeypatch.setenv("HCL2JSON_PATH", str(tmp_path / "nonexistent_hcl2json"))
-            v, p, b = scan_tf_file('provider "aws" {}\n')
-            assert v and not p and not b
-        else:
-            monkeypatch.setenv("HCL2JSON_PATH", str(fake_bin))
-            v, p, b = scan_tf_file('provider "aws" {}\n')
-            assert v and not p and not b
+        """ARGON-TS-R22-001 / ARGON-TS-R23-003: Probed/fallback locations fail closed."""
+        monkeypatch.delenv("HCL_PARSER_PATH", raising=False)
+        monkeypatch.delenv("HCLBLOCKS_PATH", raising=False)
+        dispatch = {
+            "tmp_hcl2json": lambda: self._probe_tmp_location(),
+            "path_lookup": lambda: self._probe_path_lookup(tmp_path, monkeypatch),
+            "local_bin": lambda: self._probe_local_bin(tmp_path, monkeypatch),
+            "cache_path": lambda: self._probe_cache_path(tmp_path, monkeypatch),
+            "tools_bin": lambda: self._probe_tools_bin(tmp_path, monkeypatch),
+        }
+        dispatch[location_probe]()

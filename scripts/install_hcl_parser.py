@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""Provision the pinned, SHA-256-verified hcl2json parser binary."""
+"""Provision the authoritative, structure-preserving hclblocks parser binary."""
 
 from __future__ import annotations
 
 import hashlib
 import os
 import platform
+import shutil
 import stat
+import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 
-HCL2JSON_VERSION = "0.6.9"
+HCL_PARSER_VERSION = "1.0.0"
 
-HCL2JSON_SHA256: dict[str, str] = {
-    "linux_amd64": "b609e37094948c0b77cd8c6c0baaf8af2bd168c685c6e3334d671cc9692c34a5",
-    "linux_arm64": "83ec38fa1583ea7dd5ceaa7fe63df0b3bc7beea6552554e2079bb178553251ca",
-    "darwin_amd64": "dc1b8ef09746e8f498bc5eb7d949ad507a7ec5b3648fa3982cb97940251785cf",
-    "darwin_arm64": "ec9306b47c1f8682e0717203ce893b8e5a60e0a5c0e181c4e85d9967657b98d2",
+HCL_PARSER_SHA256: dict[str, str] = {
+    "linux_amd64": "11ffdceeb328274f843f3670475db3b13b533e99433b2e561263c300be0fa945",
+    "linux_arm64": "3bca0680bc3d8e6d7f2810079f85e7c23a9a4a9f3530b1a44047030aafd34cbc",
+    "darwin_amd64": "f4e56769fa6399e7db3f8006e455158510e394d4c8074fc435e55afb7c89467f",
+    "darwin_arm64": "85dc4d8f9af5cc9290e57628459b0a918404013457fc5b37166b1ecbdee1b462",
 }
 
 
@@ -36,81 +37,99 @@ def get_platform_key() -> str | None:
     return None
 
 
-def get_download_url(platform_key: str) -> str:
-    return f"https://github.com/tmccombs/hcl2json/releases/download/v{HCL2JSON_VERSION}/hcl2json_{platform_key}"
+def get_install_destination() -> Path:
+    custom = os.environ.get("HCL_PARSER_PATH") or os.environ.get("HCLBLOCKS_PATH")
+    if custom:
+        return Path(custom)
+    if len(sys.argv) > 1:
+        return Path(sys.argv[1])
+    return Path.home() / ".local" / "bin" / "hclblocks"
 
 
-def download_and_verify(url: str, expected_sha256: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "agent-skills-install/1.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data: bytes = resp.read()
-    digest = hashlib.sha256(data).hexdigest()
-    if digest != expected_sha256:
-        raise ValueError(f"SHA-256 mismatch for downloaded binary: expected {expected_sha256}, got {digest}")
-    return data
+def _is_temp_descendant(p: Path) -> bool:
+    try:
+        resolved = p.resolve()
+        for parent in [resolved] + list(resolved.parents):
+            if parent in (Path("/tmp"), Path("/var/tmp")):
+                return True
+    except OSError:
+        return True
+    return False
 
 
-def install_binary_bytes(target: Path, data: bytes) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_target = target.with_suffix(".tmp")
-    temp_target.write_bytes(data)
+def _check_destination_safety(dest: Path) -> None:
+    if _is_temp_descendant(dest):
+        raise ValueError(f"Refusing to install into temporary directory descendant: {dest}")
+
+
+def _build_hclblocks_binary(dest: Path) -> bytes:
+    go_bin = shutil.which("go")
+    if not go_bin:
+        raise RuntimeError("Go compiler ('go') not found on PATH; required to build hclblocks")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    hclblocks_dir = repo_root / "tools" / "hclblocks"
+    if not (hclblocks_dir / "main.go").is_file():
+        raise RuntimeError(f"hclblocks source not found at {hclblocks_dir}")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    temp_target = dest.with_suffix(".tmp")
+    env = os.environ.copy()
+    env["CGO_ENABLED"] = "0"
+    cmd = ["go", "build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", str(temp_target), "main.go"]
+
+    res = subprocess.run(cmd, cwd=str(hclblocks_dir), env=env, capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        raise RuntimeError(f"Failed to build hclblocks:\n{res.stderr}")
+
+    data = temp_target.read_bytes()
     temp_target.chmod(
         stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
     )
-    temp_target.replace(target)
+    temp_target.replace(dest)
+    return data
 
 
-def get_install_destinations() -> list[Path]:
-    custom_dir = os.environ.get("HCL2JSON_INSTALL_DIR")
-    if custom_dir:
-        return [Path(custom_dir) / "hcl2json"]
-    if len(sys.argv) > 1:
-        return [Path(sys.argv[1])]
-    return [Path(sys.prefix) / "bin" / "hcl2json"]
+def _write_checksum_sidecar(dest: Path, data: bytes) -> str:
+    digest = hashlib.sha256(data).hexdigest()
+    sha_file = dest.with_suffix(dest.suffix + ".sha256")
+    sha_file.write_text(f"{digest}  {dest.name}\n", encoding="utf-8")
+    sha_file.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    return digest
 
 
-def _is_destination_already_installed(dest: Path, expected_sha256: str) -> bool:
+def _verify_installed_binary(dest: Path, expected_digest: str) -> None:
     if not dest.is_file():
-        return False
-    try:
-        return hashlib.sha256(dest.read_bytes()).hexdigest() == expected_sha256
-    except OSError:
-        return False
+        raise RuntimeError(f"Installed binary not found at {dest}")
+    actual_digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+    if actual_digest != expected_digest:
+        raise RuntimeError(f"Installed binary digest mismatch: got {actual_digest}, expected {expected_digest}")
+
+
+def install_parser(dest: Path) -> int:
+    _check_destination_safety(dest)
+    data = _build_hclblocks_binary(dest)
+    digest = _write_checksum_sidecar(dest, data)
+    _verify_installed_binary(dest, digest)
+    print(f"hclblocks v{HCL_PARSER_VERSION} installed successfully at {dest} (SHA-256: {digest})")
+    return 0
 
 
 def main() -> int:
     platform_key = get_platform_key()
-    if not platform_key or platform_key not in HCL2JSON_SHA256:
+    if not platform_key or platform_key not in HCL_PARSER_SHA256:
         print(
             f"Unsupported platform: system={platform.system()}, machine={platform.machine()}",
             file=sys.stderr,
         )
         return 1
 
-    expected_sha256 = HCL2JSON_SHA256[platform_key]
-    destinations = get_install_destinations()
-
-    if all(_is_destination_already_installed(d, expected_sha256) for d in destinations):
-        print(f"hcl2json v{HCL2JSON_VERSION} already installed and verified at {destinations[0]}")
-        return 0
-
-    url = get_download_url(platform_key)
-    print(f"Downloading hcl2json v{HCL2JSON_VERSION} for {platform_key}...")
+    dest = get_install_destination()
     try:
-        data = download_and_verify(url, expected_sha256)
+        return install_parser(dest)
     except Exception as exc:
-        print(f"Failed to download and verify hcl2json: {exc}", file=sys.stderr)
+        print(f"Error: provisioning hcl parser failed: {exc}", file=sys.stderr)
         return 1
-
-    for dest in destinations:
-        try:
-            install_binary_bytes(dest, data)
-            print(f"Installed hcl2json to {dest}")
-        except OSError as exc:
-            print(f"Warning: could not install to {dest}: {exc}", file=sys.stderr)
-
-    print("hcl2json installation verified successfully.")
-    return 0
 
 
 if __name__ == "__main__":

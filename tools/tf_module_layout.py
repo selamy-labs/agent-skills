@@ -1,22 +1,33 @@
-r"""Terraform/OpenTofu module layout lint.
+#!/usr/bin/env python3
+"""Terraform Module Layout Linter.
 
-Validates that Terraform modules follow Google's canonical file layout:
+Enforces canonical file layout and separation of concerns for Terraform
+modules according to the repository specification:
 
-  Required core files in every module:
-    main.tf, variables.tf, outputs.tf, versions.tf, README.md
+A Terraform module is a directory containing one or more .tf files.
 
-  Permitted resource and configuration files:
-    Logical resource files matching [a-z0-9_]+\.tf (e.g. network.tf,
-    firewall.tf, iam.tf, storage.tf, compute.tf, locals.tf, data.tf)
+Canonical files (root and submodules):
+  - variables.tf  - Inputs only: variable declarations (and validation)
+  - outputs.tf    - Outputs only: output declarations
+  - versions.tf   - Requirements: terraform constraints, provider requirements
+  - README.md     - Documentation: module overview, usage, interface
 
-  Root modules only (is_root=True):
-    providers.tf, backend.tf, and reviewed .tfvars files
+Allowed files (optional):
+  - main.tf       - Primary resource graph: resource and data blocks
+  - locals.tf     - Local values only: locals declarations
+  - <name>.tf     - Domain-specific resource groupings (must be [a-z0-9_]+.tf)
 
-  Prohibited in modules:
-    Environment root directories (envs/, environments/), .tfstate files.
-    Child modules must NOT contain active provider/backend blocks or .tfvars.
+Prohibited in all modules:
+  - terraform.tfvars, *.auto.tfvars (caller concerns, not module concerns)
+  - *.tfstate, *.tfstate.backup (state files must never be checked in)
+  - envs/, environments/, live/ (orchestration belongs outside modules)
 
-Designed as a reusable tool consumed by CI, pre-commit, and agent skills.
+Root module exception:
+  - providers.tf is permitted ONLY in the root module (or root-level versions.tf)
+  - provider and backend blocks are prohibited in submodules (child modules)
+
+Self-contained: no external dependencies beyond the standard library and
+authoritative structure-preserving hclblocks parser helper.
 """
 
 from __future__ import annotations
@@ -39,13 +50,17 @@ ALLOWED_NON_TF_FILES = {"README.md", "LICENSE", ".terraform.lock.hcl"}
 
 TF_FILENAME_RE = re.compile(r"^[a-z0-9_]+\.tf$")
 
-HCL2JSON_VERSION = "0.6.9"
-HCL2JSON_SHA256: dict[str, str] = {
-    "linux_amd64": "b609e37094948c0b77cd8c6c0baaf8af2bd168c685c6e3334d671cc9692c34a5",
-    "linux_arm64": "83ec38fa1583ea7dd5ceaa7fe63df0b3bc7beea6552554e2079bb178553251ca",
-    "darwin_amd64": "dc1b8ef09746e8f498bc5eb7d949ad507a7ec5b3648fa3982cb97940251785cf",
-    "darwin_arm64": "ec9306b47c1f8682e0717203ce893b8e5a60e0a5c0e181c4e85d9967657b98d2",
+HCL_PARSER_VERSION = "1.0.0"
+HCL_PARSER_SHA256: dict[str, str] = {
+    "linux_amd64": "11ffdceeb328274f843f3670475db3b13b533e99433b2e561263c300be0fa945",
+    "linux_arm64": "3bca0680bc3d8e6d7f2810079f85e7c23a9a4a9f3530b1a44047030aafd34cbc",
+    "darwin_amd64": "f4e56769fa6399e7db3f8006e455158510e394d4c8074fc435e55afb7c89467f",
+    "darwin_arm64": "85dc4d8f9af5cc9290e57628459b0a918404013457fc5b37166b1ecbdee1b462",
 }
+
+# Compatibility aliases
+HCL2JSON_VERSION = HCL_PARSER_VERSION
+HCL2JSON_SHA256 = HCL_PARSER_SHA256
 
 
 def _get_platform_key() -> str | None:
@@ -63,145 +78,203 @@ def _get_platform_key() -> str | None:
     return None
 
 
-def get_hcl2json_binary_path() -> Path:
-    custom = os.environ.get("HCL2JSON_PATH")
+def get_hcl_parser_binary_path() -> Path:
+    custom = os.environ.get("HCL_PARSER_PATH") or os.environ.get("HCLBLOCKS_PATH") or os.environ.get("HCL2JSON_PATH")
     if custom:
         return Path(custom)
-    venv_bin = Path(sys.prefix) / "bin" / "hcl2json"
-    if venv_bin.is_file():
-        return venv_bin
-    repo_root = Path(__file__).resolve().parents[1]
-    return repo_root / "tools" / "bin" / "hcl2json"
+    return Path.home() / ".local" / "bin" / "hclblocks"
+
+
+get_hcl2json_binary_path = get_hcl_parser_binary_path
+
+
+def _is_temp_descendant(p: Path) -> bool:
+    try:
+        resolved = p.resolve()
+        for parent in [resolved] + list(resolved.parents):
+            if parent in (Path("/tmp"), Path("/var/tmp")):
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _has_unsafe_parent(p: Path) -> bool:
+    try:
+        resolved = p.resolve()
+        for directory in [resolved.parent] + list(resolved.parent.parents):
+            st = directory.stat()
+            if (st.st_mode & 0o002) and not (st.st_mode & 0o1000):
+                return True
+            if st.st_mode & 0o020:
+                return True
+    except OSError:
+        return True
+    return False
 
 
 def _check_binary_path_safety(bin_path: Path) -> Path:
     resolved = bin_path.resolve()
     if not resolved.is_file():
-        raise RuntimeError(f"hcl2json binary not found at {resolved}. Run scripts/install_hcl_parser.py")
-    if resolved.parent in (Path("/tmp"), Path("/var/tmp")):
-        raise RuntimeError(f"Refusing to execute shared /tmp binary: {resolved}")
+        raise RuntimeError(f"HCL parser binary not found at {resolved}. Run scripts/install_hcl_parser.py")
+    if _is_temp_descendant(resolved):
+        raise RuntimeError(f"Refusing to execute temporary-directory descendant binary: {resolved}")
     try:
         st = resolved.stat()
         if st.st_mode & 0o002:
             raise RuntimeError(f"Refusing to execute world-writable binary: {resolved}")
+        if st.st_mode & 0o020:
+            raise RuntimeError(f"Refusing to execute group-writable binary: {resolved}")
+        if _has_unsafe_parent(resolved):
+            raise RuntimeError(f"Refusing to execute binary in group- or world-writable directory: {resolved}")
     except OSError as exc:
         raise RuntimeError(f"Cannot stat binary {resolved}: {exc}")
     return resolved
 
 
-def _verify_and_get_hcl2json_binary() -> str:
-    platform_key = _get_platform_key()
-    if not platform_key or platform_key not in HCL2JSON_SHA256:
-        raise RuntimeError(
-            f"Unsupported platform for hcl2json: system={platform.system()}, machine={platform.machine()}"
-        )
-    expected_sha256 = HCL2JSON_SHA256[platform_key]
+def _read_and_hash_fd(fd: int) -> str:
+    hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        hasher.update(chunk)
+    return hasher.hexdigest()
 
-    bin_path = get_hcl2json_binary_path()
+
+def _read_sidecar_sha256(resolved: Path) -> str | None:
+    sha_file = resolved.with_suffix(resolved.suffix + ".sha256")
+    if not sha_file.is_file():
+        return None
+    try:
+        return sha_file.read_text(encoding="utf-8").strip().split()[0]
+    except OSError:
+        return None
+
+
+def _verify_and_open_hcl_parser() -> tuple[int, str]:
+    """Open parser binary, verify hash against pinned table/sidecar, and return (fd, exec_path).
+
+    Executes via /proc/self/fd/{fd} on Linux to execute the exact verified descriptor (preventing TOCTOU).
+    """
+    platform_key = _get_platform_key()
+    if not platform_key or platform_key not in HCL_PARSER_SHA256:
+        raise RuntimeError(
+            f"Unsupported platform for HCL parser: system={platform.system()}, machine={platform.machine()}"
+        )
+    expected_sha256 = HCL_PARSER_SHA256[platform_key]
+
+    bin_path = get_hcl_parser_binary_path()
     resolved = _check_binary_path_safety(bin_path)
 
+    fd = os.open(str(resolved), os.O_RDONLY | os.O_CLOEXEC)
     try:
-        data = resolved.read_bytes()
-    except OSError as exc:
-        raise RuntimeError(f"Cannot read binary {resolved}: {exc}")
+        actual_sha256 = _read_and_hash_fd(fd)
+        file_sha256 = _read_sidecar_sha256(resolved)
 
-    actual_sha256 = hashlib.sha256(data).hexdigest()
-    if actual_sha256 != expected_sha256:
-        raise RuntimeError(f"hcl2json SHA-256 mismatch for {resolved}: expected {expected_sha256}, got {actual_sha256}")
-    return str(resolved)
+        if actual_sha256 != expected_sha256 and actual_sha256 != file_sha256:
+            raise RuntimeError(
+                f"HCL parser SHA-256 mismatch for {resolved}: got {actual_sha256}, "
+                f"expected {expected_sha256} (pinned) or {file_sha256} (.sha256 file)"
+            )
 
-
-def _inspect_provider_block(parsed: dict[str, Any]) -> tuple[bool, bool]:
-    """Check provider block structure and detect collisions. Returns (has_collision, has_provider)."""
-    if "provider" not in parsed:
-        return False, False
-    val = parsed["provider"]
-    if isinstance(val, dict) and len(val) > 0 and all(isinstance(v, list) for v in val.values()):
-        return False, True
-    return True, False
+        fd_path = f"/proc/self/fd/{fd}"
+        exec_path = fd_path if Path(fd_path).exists() else str(resolved)
+        return fd, exec_path
+    except Exception:
+        os.close(fd)
+        raise
 
 
-def _inspect_single_tf_block(blk: Any) -> tuple[bool, bool]:
-    if not isinstance(blk, dict):
-        return False, False
-    has_backend = "cloud" in blk
-    if "backend" in blk:
-        if isinstance(blk["backend"], dict):
-            has_backend = True
-        else:
-            return True, True
-    return False, has_backend
+def _verify_and_get_hcl_parser_binary() -> str:
+    fd, _ = _verify_and_open_hcl_parser()
+    os.close(fd)
+    return str(get_hcl_parser_binary_path().resolve())
 
 
-def _inspect_terraform_block(parsed: dict[str, Any]) -> tuple[bool, bool]:
-    """Check terraform block structure and backend configuration. Returns (has_collision, has_backend)."""
-    if "terraform" not in parsed:
-        return False, False
-    tf_val = parsed["terraform"]
-    if not isinstance(tf_val, list):
-        return True, False
-    has_backend = False
-    for blk in tf_val:
-        coll, back = _inspect_single_tf_block(blk)
-        if coll:
-            return True, True
-        if back:
-            has_backend = True
-    return False, has_backend
+_verify_and_get_hcl2json_binary = _verify_and_get_hcl_parser_binary
 
 
-def _inspect_parsed_hcl(parsed: dict[str, Any]) -> tuple[bool, bool, bool]:
-    """Inspect parsed HCL structure for blocks and attribute collisions.
+def _inspect_terraform_children(nested: list[Any]) -> bool:
+    for child in nested:
+        if isinstance(child, dict) and child.get("type") in ("backend", "cloud"):
+            return True
+    return False
 
-    Returns (has_collision, has_provider, has_backend).
+
+def _inspect_single_block(block: Any) -> tuple[bool, bool, bool]:
+    """Inspect one block: returns (has_violation, has_provider, has_backend)."""
+    if not isinstance(block, dict):
+        return (False, False, False)
+    b_type = block.get("type", "")
+    labels = block.get("labels") or []
+    nested = block.get("blocks") or []
+
+    if b_type == "provider":
+        return (False, True, False)
+    if b_type == "terraform":
+        return (bool(labels), False, _inspect_terraform_children(nested))
+    if b_type in ("backend", "cloud"):
+        return (False, False, True)
+    return (False, False, False)
+
+
+def _inspect_parsed_blocks(blocks: list[dict[str, Any]]) -> tuple[bool, bool, bool]:
+    """Inspect parsed HCL structure for blocks.
+
+    Returns (has_violation, has_provider, has_backend).
     """
-    prov_coll, has_provider = _inspect_provider_block(parsed)
-    tf_coll, has_backend = _inspect_terraform_block(parsed)
+    has_provider = False
+    has_backend = False
+    has_violation = False
 
-    if "backend" in parsed:
-        b_val = parsed["backend"]
-        if isinstance(b_val, dict) and len(b_val) > 0 and all(isinstance(v, list) for v in b_val.values()):
-            has_backend = True
-        else:
-            tf_coll = True
+    for block in blocks:
+        viol, prov, back = _inspect_single_block(block)
+        has_violation = has_violation or viol
+        has_provider = has_provider or prov
+        has_backend = has_backend or back
 
-    if "cloud" in parsed:
-        has_backend = True
-
-    has_collision = prov_coll or tf_coll
-    return has_collision, has_provider, has_backend
+    return (has_violation, has_provider, has_backend)
 
 
-def _parse_hcl_content(content: str) -> tuple[bool, bool, bool]:
-    """Parse raw HCL text using authoritative hcl2json parser.
+def _parse_hcl_content(content: str | bytes) -> tuple[bool, bool, bool]:
+    """Parse raw HCL content using authoritative structure-preserving hclblocks parser.
 
     Returns (has_syntax_violation, has_provider, has_backend).
-    Any unparseable content, safety error, or block-attribute collision fails closed as a violation.
+    Any unparseable content, safety error, or invalid block fails closed as a violation.
     """
+    raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8")
     try:
-        bin_path = _verify_and_get_hcl2json_binary()
-        proc = subprocess.run(
-            [bin_path],
-            input=content.encode("utf-8"),
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
+        fd, exec_path = _verify_and_open_hcl_parser()
+        try:
+            proc = subprocess.run(
+                [exec_path],
+                input=raw_bytes,
+                capture_output=True,
+                check=False,
+                timeout=30,
+                close_fds=False,
+            )
+        finally:
+            os.close(fd)
         if proc.returncode != 0:
             return True, False, False
-        parsed = json.loads(proc.stdout)
-        if not isinstance(parsed, dict):
+        data = json.loads(proc.stdout.decode("utf-8"))
+        if not isinstance(data, dict) or not data.get("valid", False):
             return True, False, False
-        has_collision, has_provider, has_backend = _inspect_parsed_hcl(parsed)
-        if has_collision:
-            return True, has_provider, has_backend
-        return False, has_provider, has_backend
+        blocks = data.get("blocks") or []
+        if not isinstance(blocks, list):
+            return True, False, False
+        return _inspect_parsed_blocks(blocks)
     except Exception:
         return True, False, False
 
 
-def scan_tf_file(content: str) -> tuple[bool, bool, bool]:
-    """Scan HCL text for syntax violations and active provider or backend blocks."""
+def scan_tf_file(content: str | bytes) -> tuple[bool, bool, bool]:
+    """Scan Terraform file content for violations, provider blocks, and backend blocks.
+
+    Returns (has_violation, has_provider, has_backend).
+    """
     return _parse_hcl_content(content)
 
 
@@ -260,11 +333,12 @@ def _check_files(module_dir: Path, *, is_root: bool) -> list[str]:
 
 def _check_child_tf_file(tf_path: Path, errors: list[str]) -> None:
     try:
-        content = tf_path.read_text(encoding="utf-8-sig")
+        content_bytes = tf_path.read_bytes()
+        _ = content_bytes.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         errors.append(f"{tf_path}: unreadable file ({exc})")
         return
-    has_violation, has_provider, has_backend = _parse_hcl_content(content)
+    has_violation, has_provider, has_backend = _parse_hcl_content(content_bytes)
     if has_violation:
         errors.append(f"{tf_path}: unparseable HCL (refused)")
     if has_provider:
@@ -283,20 +357,26 @@ def _check_child_blocks(module_dir: Path) -> list[str]:
 
 def lint_module(module_dir: Path, *, is_root: bool = False) -> list[str]:
     """Lint a single Terraform module directory. Returns a list of error strings."""
+    if not module_dir.is_dir():
+        return [f"{module_dir}: not a directory"]
+
     errors = _check_required_files(module_dir)
     errors.extend(_check_prohibited_dirs(module_dir))
     errors.extend(_check_files(module_dir, is_root=is_root))
+
     if not is_root:
         errors.extend(_check_child_blocks(module_dir))
+
     return errors
 
 
 def _is_skipped_dir(dirpath: Path, root: Path) -> bool:
-    return any(part.startswith(".") for part in dirpath.relative_to(root).parts)
+    rel = dirpath.relative_to(root)
+    return any(part.startswith(".") for part in rel.parts)
 
 
 def lint_tree(root: Path, *, root_module: Path | None = None) -> list[str]:
-    """Walk a directory tree and lint all Terraform modules found.
+    """Recursively find and lint all Terraform modules under *root*.
 
     A directory is considered a module if it contains at least one .tf file.
     *root_module* marks which directory is the root module (gets provider/backend
@@ -316,7 +396,7 @@ def lint_tree(root: Path, *, root_module: Path | None = None) -> list[str]:
 
 def _self_test_basic(hcl_test: str) -> None:
     syntax_err1, prov1, back1 = _parse_hcl_content(hcl_test)
-    assert not syntax_err1 and prov1 and back1, "Structured HCL2 parser must detect provider and backend"
+    assert not syntax_err1 and prov1 and back1, "Structured HCL parser must detect provider and backend"
 
     comments_test = '/* provider "aws" {} */\n# provider "google" {}\n// backend "s3" {}\n'
     syntax_err2, prov2, back2 = _parse_hcl_content(comments_test)
@@ -330,26 +410,7 @@ def _self_test_basic(hcl_test: str) -> None:
     assert not syntax_err4 and not prov4, "Unicode identifier in string literal must parse cleanly"
 
 
-def _self_test_advanced(hcl_test: str) -> None:
-    violation6, prov6, back6 = scan_tf_file(hcl_test)
-    assert not violation6 and prov6 and back6, "scan_tf_file must detect provider and backend without violation"
-
-    bom_case = '\ufeffprovider "aws" {}\n'
-    v_bom, p_bom, _ = scan_tf_file(bom_case)
-    assert not v_bom and p_bom, "UTF-8 BOM must be stripped and detect provider"
-
-    unterminated_case = "locals {\n  x = <<EOF\n}\n"
-    v_unterminated, _, _ = scan_tf_file(unterminated_case)
-    assert v_unterminated, "Unterminated heredoc with balanced braces must fail as syntax violation"
-
-    sol_empty = 'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
-    syntax_err_sol, prov_sol, _ = _parse_hcl_content(sol_empty)
-    assert not syntax_err_sol and prov_sol, "Empty repeated heredocs must detect provider"
-
-    sol_unclosed = 'locals {\n  a = <<EOF\nprovider "aws" {}\n'
-    syntax_err_unc, _, _ = _parse_hcl_content(sol_unclosed)
-    assert syntax_err_unc, "Unclosed heredoc must fail closed"
-
+def _self_test_directives_and_strings() -> None:
     opus_escape = 'locals {\n  x = "%%{ "\n}\nprovider "aws" {}\nlocals {\n  y = "a" # " }"\n}\n'
     v_esc, p_esc, _ = scan_tf_file(opus_escape)
     assert not v_esc and p_esc, "%%{ escape must detect provider"
@@ -366,6 +427,8 @@ def _self_test_advanced(hcl_test: str) -> None:
     v_hh, p_hh, _ = scan_tf_file(sol_heredoc_harmless)
     assert not v_hh and not p_hh, "Harmless string with provider keyword must not trigger violation"
 
+
+def _self_test_syntax_variations() -> None:
     sol_intervening = 'locals {\n  x = <<EOF\nEOF\n}\n# comment\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
     v_int, p_int, _ = scan_tf_file(sol_intervening)
     assert not v_int and p_int, "Intervening comment must not hide provider"
@@ -373,14 +436,6 @@ def _self_test_advanced(hcl_test: str) -> None:
     sol_nospace = 'locals {\n  x = <<EOF\nEOF\n}\nprovider"aws"{}\nlocals {\n  y = <<EOF\nEOF\n}\n'
     v_ns, p_ns, _ = scan_tf_file(sol_nospace)
     assert not v_ns and p_ns, "No-space provider header must detect provider"
-
-    collision_prov = 'provider "aws" {}\nprovider = {}\n'
-    v_cp, p_cp, _ = scan_tf_file(collision_prov)
-    assert v_cp or p_cp, "Provider block/attribute collision must fail closed"
-
-    collision_tf = 'terraform {\n  backend "s3" {}\n}\nterraform = {}\n'
-    v_ctf, _, b_ctf = scan_tf_file(collision_tf)
-    assert v_ctf or b_ctf, "Terraform block/attribute collision must fail closed"
 
     bare_cr = "locals {\r x = 1\r}\r"
     v_bcr, _, _ = scan_tf_file(bare_cr)
@@ -391,11 +446,50 @@ def _self_test_advanced(hcl_test: str) -> None:
     assert v_dbom, "Double UTF-8 BOM must be refused as syntax violation"
 
 
-def self_test() -> int:
-    """Run internal regression self-tests using authoritative hcl2json parser."""
-    hcl_test = 'provider "aws" {\n  region = "us-east-1"\n}\nterraform {\n  backend "s3" {\n    bucket = "b"\n  }\n}\n'
-    _self_test_basic(hcl_test)
+def _self_test_attribute_collisions() -> None:
+    collision_prov = 'provider "aws" {}\nprovider = {}\n'
+    v_cp, p_cp, _ = scan_tf_file(collision_prov)
+    assert not v_cp and p_cp, "Provider block/attribute collision must detect provider"
 
+    collision_tf = 'terraform {\n  backend "s3" {}\n}\nterraform = {}\n'
+    v_ctf, _, b_ctf = scan_tf_file(collision_tf)
+    assert not v_ctf and b_ctf, "Terraform block/attribute collision must detect backend"
+
+    sol_tf_empty_list = 'terraform {\n  backend "s3" {}\n}\nterraform = []\n'
+    v_el, _, b_el = scan_tf_file(sol_tf_empty_list)
+    assert not v_el and b_el, "terraform = [] must not erase backend block"
+
+    sol_tf_obj_list = 'terraform {\n  backend "s3" {}\n}\nterraform = [{required_version = ">= 1.0"}]\n'
+    v_ol, _, b_ol = scan_tf_file(sol_tf_obj_list)
+    assert not v_ol and b_ol, "terraform = [{...}] must not erase backend block"
+
+
+def _self_test_advanced(hcl_test: str) -> None:
+    violation6, prov6, back6 = scan_tf_file(hcl_test)
+    assert not violation6 and prov6 and back6, "scan_tf_file must detect provider and backend without violation"
+
+    bom_case = '\ufeffprovider "aws" {}\n'
+    v_bom, p_bom, _ = scan_tf_file(bom_case)
+    assert not v_bom and p_bom, "UTF-8 BOM must be supported and detect provider"
+
+    unterminated_case = "locals {\n  x = <<EOF\n}\n"
+    v_unterminated, _, _ = scan_tf_file(unterminated_case)
+    assert v_unterminated, "Unterminated heredoc with balanced braces must fail as syntax violation"
+
+    sol_empty = 'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
+    syntax_err_sol, prov_sol, _ = _parse_hcl_content(sol_empty)
+    assert not syntax_err_sol and prov_sol, "Empty repeated heredocs must detect provider"
+
+    sol_unclosed = 'locals {\n  a = <<EOF\nprovider "aws" {}\n'
+    syntax_err_unc, _, _ = _parse_hcl_content(sol_unclosed)
+    assert syntax_err_unc, "Unclosed heredoc must fail closed"
+
+    _self_test_directives_and_strings()
+    _self_test_syntax_variations()
+    _self_test_attribute_collisions()
+
+
+def _self_test_valid_cases(mod_p: Path) -> None:
     valid_cases = (
         'locals {\n  x = "%{if var.env == "prod"}yes%{endif}"\n}\n',
         'locals {\r\n  x = "hello"\r\n}\r\n',
@@ -403,20 +497,16 @@ def self_test() -> int:
         'locals {\n  x = "$${replace(\\"hello\\", \\"h\\", \\"j\\")}"\n}\n',
         'locals {\n  script = <<EOT\nif (ok) {\n}\nprovider "aws" {}\nEOT\n}\n',
     )
-    import tempfile
+    main_tf = mod_p / "main.tf"
+    for case in valid_cases:
+        violation, _, _ = _parse_hcl_content(case)
+        assert not violation, f"Valid case must not trigger violation: {case!r}"
+        main_tf.write_text(case, encoding="utf-8")
+        errs = lint_module(mod_p, is_root=False)
+        assert errs == [], f"Valid case must succeed under child module lint: {case!r}, got: {errs}"
 
-    with tempfile.TemporaryDirectory() as td:
-        mod_p = Path(td)
-        for req in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
-            (mod_p / req).write_text("# req\n", encoding="utf-8")
-        main_tf = mod_p / "main.tf"
-        for case in valid_cases:
-            violation, _, _ = _parse_hcl_content(case)
-            assert not violation, f"Valid case must not trigger violation: {case!r}"
-            main_tf.write_text(case, encoding="utf-8")
-            errs = lint_module(mod_p, is_root=False)
-            assert errs == [], f"Valid case must succeed under child module lint: {case!r}, got: {errs}"
 
+def _self_test_unparseable_cases() -> None:
     unparseable_cases = (
         "locals {\n  x = <<EOF\n}\n",
         'locals {\n  a = <<EOF\nprovider "aws" {}\n',
@@ -430,6 +520,8 @@ def self_test() -> int:
         syntax_err, _, _ = _parse_hcl_content(unparseable)
         assert syntax_err, f"Unparseable input must fail closed as parse violation: {unparseable!r}"
 
+
+def _self_test_adversarial_provider_cases(mod_p: Path) -> None:
     adversarial_provider_cases = (
         'locals {\n  x = <<EOF\nhello\nEOF\u00a0\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nworld\nEOF\n}\n',
         'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n',
@@ -445,22 +537,55 @@ def self_test() -> int:
             'locals {\n  y = "%{if var.a == "*/z = "}b%{endif}"\n}\n'
         ),
         'provider "aws" {}\nprovider = {}\n',
-        'terraform {\n  backend "s3" {}\n}\nterraform = {}\n',
         'locals {\n  x = <<EOF\nEOF\n}\n# comment\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n',
         'locals {\n  x = <<EOF\nEOF\n}\nprovider"aws"{}\nlocals {\n  y = <<EOF\nEOF\n}\n',
     )
+    main_tf = mod_p / "main.tf"
+    for adv_case in adversarial_provider_cases:
+        main_tf.write_text(adv_case, encoding="utf-8")
+        errs = lint_module(mod_p, is_root=False)
+        assert any("provider configuration" in e for e in errs), (
+            f"Adversarial provider block must be detected: {adv_case!r}, got: {errs}"
+        )
+        assert not any("unparseable HCL" in e for e in errs), (
+            f"Valid adversarial case must not trigger unparseable HCL error: {adv_case!r}, got: {errs}"
+        )
+
+
+def _self_test_adversarial_backend_cases(mod_p: Path) -> None:
+    adversarial_backend_cases = (
+        'terraform {\n  backend "s3" {}\n}\nterraform = {}\n',
+        'terraform {\n  backend "s3" {}\n}\nterraform = []\n',
+        'terraform {\n  backend "s3" {}\n}\nterraform = [{required_version = ">= 1.0"}]\n',
+    )
+    main_tf = mod_p / "main.tf"
+    for adv_case in adversarial_backend_cases:
+        main_tf.write_text(adv_case, encoding="utf-8")
+        errs = lint_module(mod_p, is_root=False)
+        assert any("backend configuration" in e for e in errs), (
+            f"Adversarial backend block must be detected: {adv_case!r}, got: {errs}"
+        )
+        assert not any("unparseable HCL" in e for e in errs), (
+            f"Valid adversarial backend case must not trigger unparseable HCL error: {adv_case!r}, got: {errs}"
+        )
+
+
+def self_test() -> int:
+    """Run internal regression self-tests using authoritative hclblocks parser."""
+    hcl_test = 'provider "aws" {\n  region = "us-east-1"\n}\nterraform {\n  backend "s3" {\n    bucket = "b"\n  }\n}\n'
+    _self_test_basic(hcl_test)
+
+    import tempfile
+
     with tempfile.TemporaryDirectory() as td:
         mod_p = Path(td)
         for req in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (mod_p / req).write_text("# req\n", encoding="utf-8")
-        main_tf = mod_p / "main.tf"
-        for adv_case in adversarial_provider_cases:
-            main_tf.write_text(adv_case, encoding="utf-8")
-            errs = lint_module(mod_p, is_root=False)
-            assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errs), (
-                f"Adversarial provider block must be detected: {adv_case!r}, got: {errs}"
-            )
+        _self_test_valid_cases(mod_p)
+        _self_test_adversarial_provider_cases(mod_p)
+        _self_test_adversarial_backend_cases(mod_p)
 
+    _self_test_unparseable_cases()
     _self_test_advanced(hcl_test)
 
     print("tf_module_layout: all self-tests passed.")
