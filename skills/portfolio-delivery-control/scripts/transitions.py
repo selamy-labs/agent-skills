@@ -329,7 +329,6 @@ def _dispatch_action(
     merge_identity: str = "selamy-labs-bot",
     remote: str = "origin",
     repo: str = "",
-    control_dir: Path | str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if action == "push":
         return reconcile_and_push(wt_path, remote, target_branch, commit_sha, runner=command_runner)
@@ -346,7 +345,6 @@ def _dispatch_action(
             runner=command_runner,
             repo=repo,
             expected_base_branch=base_branch,
-            control_dir=control_dir,
         )
     if action == "complete_spec_task":
         return reconcile_and_complete_spec_task(spec_path, task_id)
@@ -428,7 +426,6 @@ def _guard_action_ci(
     iso_now: str,
     repo: str = "",
     expected_base_branch: str = "main",
-    control_dir: Path | str | None = None,
 ) -> tuple[bool, dict[str, Any] | None]:
     if action not in {"complete_spec_task", "merge_pr"}:
         return True, None
@@ -440,7 +437,6 @@ def _guard_action_ci(
         commit_sha,
         runner=command_runner,
         expected_base_branch=expected_base_branch,
-        control_dir=control_dir,
         repo=repo,
     )
     if not ci_ok:
@@ -559,7 +555,6 @@ def _dispatch_and_record_transition(
         merge_identity=merge_identity,
         remote=remote,
         repo=repo,
-        control_dir=status_file.parent,
     )
     if not act_ok:
         reason = act_res.get("reason_code", "PROVIDER_EXECUTION_FAILED")
@@ -626,7 +621,6 @@ def execute_transition(
         iso_now,
         repo=repo,
         expected_base_branch=expected_base_branch,
-        control_dir=control_dir,
     )
     if ci_ref:
         return ci_ref

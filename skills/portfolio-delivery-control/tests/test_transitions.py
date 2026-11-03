@@ -1352,70 +1352,6 @@ exit 0
         self.assertEqual(res_empty.get("status"), "refused")
         self.assertEqual(res_empty.get("reason_code"), "CI_CHECK_MISSING")
 
-    def test_required_checks_policy_fallback_success(self) -> None:
-        """Tests additive policy checks pass."""
-        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
-        policy_file = self.state_dir / "delivery-policy.json"
-        policy_file.write_text(
-            json.dumps({"authoritative": True, "required_checks": {"agent-skills": ["policy-gate"]}}),
-            encoding="utf-8",
-        )
-
-        def runner_with_policy_gate(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            cmd_str = " ".join(cmd)
-            if "pr view" in cmd_str:
-                return 0, json.dumps({"headRefOid": self.c_sha, "state": "OPEN", "baseRefName": "main"})
-            if "--required" in cmd:
-                return 0, json.dumps([{"name": "test", "state": "COMPLETED", "bucket": "pass", "workflow": "CI"}])
-            if "pr checks" in cmd_str:
-                return 0, json.dumps(
-                    [
-                        {"name": "test", "bucket": "pass"},
-                        {"name": "policy-gate", "bucket": "pass"},
-                    ]
-                )
-            return 0, ""
-
-        res_ok = execute_transition(
-            control_dir=str(self.state_dir),
-            work_id="selamy-labs-agent-skills-152-MP464",
-            action="complete_spec_task",
-            claim_token=self.claim_token,
-            pr_number=152,
-            command_runner=runner_with_policy_gate,
-        )
-        self.assertEqual(res_ok.get("status"), "transitioned")
-
-    def test_required_checks_policy_fallback_negative_control(self) -> None:
-        """Negative control for missing check under additive policy."""
-        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
-        policy_file = self.state_dir / "delivery-policy.json"
-        policy_file.write_text(
-            json.dumps({"authoritative": True, "required_checks": {"agent-skills": ["policy-gate"]}}),
-            encoding="utf-8",
-        )
-
-        def runner_missing_policy_gate(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            cmd_str = " ".join(cmd)
-            if "pr view" in cmd_str:
-                return 0, json.dumps({"headRefOid": self.c_sha, "state": "OPEN", "baseRefName": "main"})
-            if "--required" in cmd:
-                return 0, json.dumps([{"name": "test", "state": "COMPLETED", "bucket": "pass", "workflow": "CI"}])
-            if "pr checks" in cmd_str:
-                return 0, json.dumps([{"name": "other-gate", "bucket": "pass"}])
-            return 0, ""
-
-        res_fail = execute_transition(
-            control_dir=str(self.state_dir),
-            work_id="selamy-labs-agent-skills-152-MP464",
-            action="complete_spec_task",
-            claim_token=self.claim_token,
-            pr_number=152,
-            command_runner=runner_missing_policy_gate,
-        )
-        self.assertEqual(res_fail.get("status"), "refused")
-        self.assertEqual(res_fail.get("reason_code"), "CI_CHECK_MISSING")
-
     def test_malformed_reviews_family_and_session_refused_cleanly(self) -> None:
         self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
         status_file = self.state_dir / "coordinator-status.json"
@@ -1564,33 +1500,6 @@ exit 0
 
         doc_after = json.loads(status_file.read_text(encoding="utf-8"))
         self.assertEqual(doc_before, doc_after)
-
-    def test_execute_transition_weaker_policy_cannot_drop_provider_required_check(self) -> None:
-        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
-        policy_file = self.state_dir / "delivery-policy.json"
-        policy_file.write_text(
-            json.dumps({"required_checks": {"agent-skills": ["Quality"]}}),
-            encoding="utf-8",
-        )
-
-        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            cmd_str = " ".join(cmd)
-            if "pr view" in cmd_str:
-                return 0, json.dumps({"headRefOid": self.c_sha, "state": "OPEN", "baseRefName": "main"})
-            if "--required" in cmd:
-                return 0, json.dumps([])
-            return 0, ""
-
-        res = execute_transition(
-            control_dir=str(self.state_dir),
-            work_id="selamy-labs-agent-skills-152-MP464",
-            action="merge_pr",
-            claim_token=self.claim_token,
-            pr_number=152,
-            command_runner=runner,
-        )
-        self.assertEqual(res.get("status"), "refused")
-        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
 
     def test_execute_transition_refuses_when_base_branch_read_fails(self) -> None:
         self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
