@@ -58,6 +58,15 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int):  # type: ign
             session_id = getattr(session, "session_id", None)
             if session_id and isinstance(cov_data, dict):
                 cov_data["session_id"] = session_id
-                report_file.write_text(json.dumps(cov_data, indent=2), encoding="utf-8")
+                content = json.dumps(cov_data, indent=2)
+                report_file.write_text(content, encoding="utf-8")
+                import hashlib
+
+                report_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                marker = REPO_ROOT / ".coverage_session_start"
+                if marker.is_file():
+                    marker_data = json.loads(marker.read_text(encoding="utf-8"))
+                    marker_data["report_digest"] = report_digest
+                    marker.write_text(json.dumps(marker_data), encoding="utf-8")
         except Exception:
             pass

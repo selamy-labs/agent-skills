@@ -949,20 +949,15 @@ def _collect_scanner_commands(verify_steps: list[Any]) -> set[str]:
     return found_scanners
 
 
-def _is_pinned_action(uses_val: Any, action_name: str, pinned_tag: str) -> bool:
+def _is_pinned_action(uses_val: Any, action_name: str) -> bool:
     if not isinstance(uses_val, str):
         return False
-    if uses_val == f"{action_name}@{pinned_tag}":
-        return True
-    if uses_val.startswith(f"{action_name}@"):
-        ref = uses_val.split("@", 1)[1]
-        if len(ref) == 40 and bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref)):
-            return True
-    return False
+    val = uses_val.strip()
+    return bool(re.fullmatch(rf"{re.escape(action_name)}@([0-9a-fA-F]{{40}})", val))
 
 
 def _validate_release_publish_step_0(s0: Any) -> None:
-    assert isinstance(s0, dict) and _is_pinned_action(s0.get("uses"), "actions/checkout", "v7.0.0"), (
+    assert isinstance(s0, dict) and _is_pinned_action(s0.get("uses"), "actions/checkout"), (
         "release job step 0 must use pinned actions/checkout"
     )
     expected_with = {
@@ -974,7 +969,7 @@ def _validate_release_publish_step_0(s0: Any) -> None:
 
 
 def _validate_release_publish_step_1(s1: Any) -> None:
-    assert isinstance(s1, dict) and _is_pinned_action(s1.get("uses"), "actions/setup-python", "v6.3.0"), (
+    assert isinstance(s1, dict) and _is_pinned_action(s1.get("uses"), "actions/setup-python"), (
         "release job step 1 must use pinned actions/setup-python"
     )
     assert s1.get("with") == {"python-version": "3.12"}, "setup-python must use python-version: 3.12"
@@ -1292,9 +1287,17 @@ def _test_mutants_release_actions_and_inputs(release_path: Path) -> None:
     doc_unpinned_checkout["jobs"]["release"]["steps"][0]["uses"] = "actions/checkout@main"
     _assert_release_wf_mutant_fails(doc_unpinned_checkout, "checkout@main")
 
+    doc_semver_checkout = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_semver_checkout["jobs"]["release"]["steps"][0]["uses"] = "actions/checkout@v7.0.0"
+    _assert_release_wf_mutant_fails(doc_semver_checkout, "checkout@v7.0.0")
+
     doc_unpinned_setup = yaml.safe_load(release_path.read_text(encoding="utf-8"))
     doc_unpinned_setup["jobs"]["release"]["steps"][1]["uses"] = "actions/setup-python@attacker-branch"
     _assert_release_wf_mutant_fails(doc_unpinned_setup, "setup-python@attacker-branch")
+
+    doc_semver_setup = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_semver_setup["jobs"]["release"]["steps"][1]["uses"] = "actions/setup-python@v6.3.0"
+    _assert_release_wf_mutant_fails(doc_semver_setup, "setup-python@v6.3.0")
 
     doc_repo_override = yaml.safe_load(release_path.read_text(encoding="utf-8"))
     doc_repo_override["jobs"]["release"]["steps"][0]["with"]["repository"] = "attacker/project"

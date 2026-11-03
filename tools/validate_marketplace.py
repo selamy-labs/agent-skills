@@ -223,20 +223,15 @@ CANONICAL_TAG_CMD_LINES: tuple[str, ...] = (
 CANONICAL_RELEASE_CMD: str = 'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md'
 
 
-def _is_pinned_action(uses_val: Any, action_name: str, pinned_tag: str) -> bool:
+def _is_pinned_action(uses_val: Any, action_name: str) -> bool:
     if not isinstance(uses_val, str):
         return False
-    if uses_val == f"{action_name}@{pinned_tag}":
-        return True
-    if uses_val.startswith(f"{action_name}@"):
-        ref = uses_val.split("@", 1)[1]
-        if len(ref) == 40 and bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref)):
-            return True
-    return False
+    val = uses_val.strip()
+    return bool(re.fullmatch(rf"{re.escape(action_name)}@([0-9a-fA-F]{{40}})", val))
 
 
 def _check_release_step_0(s0: Any, errors: list[str]) -> None:
-    if not isinstance(s0, dict) or not _is_pinned_action(s0.get("uses"), "actions/checkout", "v7.0.0"):
+    if not isinstance(s0, dict) or not _is_pinned_action(s0.get("uses"), "actions/checkout"):
         errors.append("job 'release' step 0 must use pinned actions/checkout")
         return
     if s0.get("with") != CANONICAL_CHECKOUT_WITH:
@@ -246,7 +241,7 @@ def _check_release_step_0(s0: Any, errors: list[str]) -> None:
 
 
 def _check_release_step_1(s1: Any, errors: list[str]) -> None:
-    if not isinstance(s1, dict) or not _is_pinned_action(s1.get("uses"), "actions/setup-python", "v6.3.0"):
+    if not isinstance(s1, dict) or not _is_pinned_action(s1.get("uses"), "actions/setup-python"):
         errors.append("job 'release' step 1 must use pinned actions/setup-python")
         return
     if s1.get("with") != CANONICAL_SETUP_PYTHON_WITH:

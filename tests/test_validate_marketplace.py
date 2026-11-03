@@ -302,14 +302,14 @@ def _make_valid_release_job() -> dict[str, Any]:
         "permissions": {"contents": "write"},
         "steps": [
             {
-                "uses": "actions/checkout@v7.0.0",
+                "uses": "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
                 "with": {
                     "ref": "${{ github.event.workflow_run.head_sha || github.sha }}",
                     "fetch-depth": 0,
                 },
             },
             {
-                "uses": "actions/setup-python@v6.3.0",
+                "uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
                 "with": {"python-version": "3.12"},
             },
             {
@@ -382,9 +382,13 @@ def test_validate_release_step_0_and_1_errors() -> None:
     for bad_s0 in (
         "not a dict",
         {"uses": "actions/checkout@main"},
-        {"uses": "actions/checkout@v7.0.0", "with": {}},
+        {"uses": "actions/checkout@v7.0.0"},
         {
-            "uses": "actions/checkout@v7.0.0",
+            "uses": "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+            "with": {},
+        },
+        {
+            "uses": "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
             "with": {
                 "ref": "${{ github.event.workflow_run.head_sha || github.sha }}",
                 "fetch-depth": 0,
@@ -405,9 +409,10 @@ def test_validate_release_step_0_and_1_errors() -> None:
     for bad_s1 in (
         "not a dict",
         {"uses": "actions/setup-python@attacker"},
-        {"uses": "actions/setup-python@v6.3.0", "with": {"python-version": "3.11"}},
+        {"uses": "actions/setup-python@v6.3.0"},
+        {"uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1", "with": {"python-version": "3.11"}},
         {
-            "uses": "actions/setup-python@v6.3.0",
+            "uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
             "with": {"python-version": "3.12"},
             "env": {"A": "B"},
         },

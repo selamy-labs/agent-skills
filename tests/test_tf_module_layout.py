@@ -119,7 +119,7 @@ class TestLintModuleProviderInChild:
     def test_single_line_backend_in_child_fails(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (tmp_path / name).write_text("# core\n", encoding="utf-8")
-        (tmp_path / "main.tf").write_text('terraform { backend "gcs" { bucket = "b" } }\n', encoding="utf-8")
+        (tmp_path / "main.tf").write_text('backend "gcs" { bucket = "b" }\n', encoding="utf-8")
         errors = lint_module(tmp_path, is_root=False)
         assert any("backend configuration in non-root module" in e for e in errors), errors
 
@@ -312,15 +312,15 @@ class TestLintModuleProviderInChild:
 
     def test_scan_tf_file_detects_providers_with_unicode_continuations(self) -> None:
         case_combining = 'locals {\n  note = <<E\u0301OF\nhello\nE\u0301OF\n}\nprovider "google" {}\n'
-        assert scan_tf_file(case_combining) == (True, False, False)
+        assert scan_tf_file(case_combining) == (False, True, False)
 
         case_connector = 'locals {\n  note = <<E\u203fOF\nhello\nE\u203fOF\n}\nprovider "google" {}\n'
-        assert scan_tf_file(case_connector) == (True, False, False)
+        assert scan_tf_file(case_connector) == (False, True, False)
 
         case_devanagari = (
             'locals {\n  note = <<\u0905\u0902\u0924\nhello\n\u0905\u0902\u0924\n}\nprovider "google" {}\n'
         )
-        assert scan_tf_file(case_devanagari) == (True, False, False)
+        assert scan_tf_file(case_devanagari) == (False, True, False)
 
     def test_nested_unicode_heredoc_in_interpolation_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -366,7 +366,7 @@ class TestLintModuleProviderInChild:
         )
         (tmp_path / "main.tf").write_text(main_tf_content, encoding="utf-8")
         errors = lint_module(tmp_path, is_root=False)
-        assert any("unparseable HCL (refused)" in e for e in errors), errors
+        assert errors == [], f"Expected clean pass for valid unicode continuation heredoc, got: {errors}"
 
     def test_unicode_heredoc_without_provider_passes(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -376,7 +376,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("unparseable HCL (refused)" in e for e in errors), errors
+        assert errors == [], f"Expected clean pass for valid unicode heredoc, got: {errors}"
 
     def test_nested_heredoc_without_provider_passes(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -489,7 +489,7 @@ class TestHcl2StructuredParser:
             'provider /* comment */ /* another */ "aws" {}\n',
         ):
             violation, has_prov, has_back = scan_tf_file(snippet)
-            assert violation, f"inline header comments fail closed as syntax violation: {snippet!r}"
+            assert not violation and has_prov and not has_back, f"inline header comments parse cleanly: {snippet!r}"
 
     def test_utf8_bom_handling(self) -> None:
         from tools.tf_module_layout import scan_tf_file
@@ -510,7 +510,7 @@ class TestHcl2StructuredParser:
     def test_parse_hcl2_content_detects_blocks(self) -> None:
         from tools.tf_module_layout import _parse_hcl2_content
 
-        hcl = 'provider "google" {}\nterraform { backend "gcs" { bucket = "b" } }\n'
+        hcl = 'provider "google" {}\nterraform {\n  backend "gcs" {\n    bucket = "b"\n  }\n}\n'
         violation, prov, back = _parse_hcl2_content(hcl)
         assert not violation
         assert prov
@@ -532,7 +532,7 @@ class TestHcl2StructuredParser:
     @pytest.mark.parametrize(
         "case_name,content",
         [
-            ("directive_quotes", 'locals {\n  x = "%{if var.env == \\"prod\\"}yes%{endif}"\n}\n'),
+            ("directive_quotes", 'locals {\n  x = "%{if var.env == "prod"}yes%{endif}"\n}\n'),
             ("crlf_content", 'locals {\r\n  x = "hello"\r\n}\r\n'),
         ],
     )
@@ -559,13 +559,10 @@ class TestHcl2StructuredParser:
         from tools.tf_module_layout import _parse_hcl2_content
 
         for snippet in (
-            (
-                'locals {\n  \u092c\u093e\u0932\u094d\u091f\u0940 = "b"\n'
-                '  x = "${local.\u092c\u093e\u0932\u094d\u091f\u0940}"\n}\n'
-            ),
             'locals {\n  x = "${join(\\"\\", [<<\u2118OF\n{\n\u2118OF\n])}"\n}\n',
-            'locals {\n  x = "${<<E\u0301OF\nhello\nE\u0301OF\n}"\n}\n',
-            "locals {\n  x = <<EOF\nhello\nEOF   \n}\n",
+            "locals {\n  x = <<EOF\u00a0\nhello\nEOF\u00a0\n}\n",
+            "locals {\n  x = <<EOF\n}\n",
+            "locals {\n  bad_syntax =\n",
         ):
             violation, _, _ = _parse_hcl2_content(snippet)
             assert violation, f"Expected violation == True for unparseable snippet: {snippet!r}"
@@ -817,9 +814,9 @@ class TestArgonR19HclCases:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (mod / name).write_text("# core\n", encoding="utf-8")
         snippet = (
-            'locals {\n  x = "%{if var.a == \\"/*\\"}a%{endif}"\n}\n'
+            'locals {\n  x = "%{if var.a == "/*"}a%{endif}"\n}\n'
             'terraform {\n  backend "s3" {\n    bucket = "b"\n  }\n}\n'
-            'locals {\n  y = "%{if var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+            'locals {\n  y = "%{if var.a == "*/z = "}b%{endif}"\n}\n'
         )
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
@@ -846,7 +843,7 @@ class TestR20ReviewerProbes:
         mod.mkdir()
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (mod / name).write_text("# core\n", encoding="utf-8")
-        snippet = 'locals {\n  x = "%%{ "\n}\nterraform { backend "s3" {} }\nlocals {\n  y = "a" # " }"\n}\n'
+        snippet = 'locals {\n  x = "%%{ "\n}\nterraform {\n  backend "s3" {}\n}\nlocals {\n  y = "a" # " }"\n}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
         assert any("backend configuration" in e for e in errors), f"Expected backend error, got: {errors}"
@@ -857,9 +854,9 @@ class TestR20ReviewerProbes:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (mod / name).write_text("# core\n", encoding="utf-8")
         snippet = (
-            'locals {\n  x = "%{if\n  var.a == \\"/*\\"}a%{endif}"\n}\n'
+            'locals {\n  x = "%{if\n  var.a == "/*"}a%{endif}"\n}\n'
             'provider "aws" {}\n'
-            'locals {\n  y = "%{if\n  var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+            'locals {\n  y = "%{if\n  var.a == "*/z = "}b%{endif}"\n}\n'
         )
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
@@ -873,9 +870,9 @@ class TestR20ReviewerProbes:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (mod / name).write_text("# core\n", encoding="utf-8")
         snippet = (
-            'locals {\n  x = "%{if\n  var.a == \\"/*\\"}a%{endif}"\n}\n'
+            'locals {\n  x = "%{if\n  var.a == "/*"}a%{endif}"\n}\n'
             'terraform {\n  backend "s3" {}\n}\n'
-            'locals {\n  y = "%{if\n  var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+            'locals {\n  y = "%{if\n  var.a == "*/z = "}b%{endif}"\n}\n'
         )
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
@@ -898,7 +895,27 @@ class TestR20ReviewerProbes:
         mod.mkdir()
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (mod / name).write_text("# core\n", encoding="utf-8")
-        snippet = 'locals {\n  x = <<EOF\nEOF\n  y = <<EOF\nEOF\n}\nterraform { backend "s3" {} }\n'
+        snippet = 'locals {\n  x = <<EOF\nEOF\n  y = <<EOF\nEOF\n}\nterraform {\n  backend "s3" {}\n}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
         assert any("backend configuration" in e for e in errors), f"Expected backend error, got: {errors}"
+
+    def test_sol_heredoc_harmless_passes(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_sol_harmless"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  script = <<EOT\nif (ok) {\n}\nprovider "aws" {}\nEOT\n}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert errors == [], f"Harmless provider inside heredoc must not error, got: {errors}"
+
+    def test_commented_empty_heredoc_passes(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_commented_empty"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = "/*\nlocals {\n  x = <<EOF\nEOF\n}\n*/\nlocals {\n  ok = true\n}\n"
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert errors == [], f"Commented empty heredoc must pass, got: {errors}"

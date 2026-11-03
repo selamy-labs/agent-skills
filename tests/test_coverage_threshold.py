@@ -92,7 +92,8 @@ def _read_session_marker(marker: Path) -> dict[str, Any]:
     return data
 
 
-def _verify_report_session_binding(path: Path, expected_session_id: str, report_data: dict[str, Any] | None) -> None:
+def _verify_report_session_binding(path: Path, marker_data: dict[str, Any], report_data: dict[str, Any] | None) -> None:
+    expected_session_id = str(marker_data.get("session_id", ""))
     if report_data is None:
         try:
             report_data = json.loads(path.read_text(encoding="utf-8"))
@@ -104,6 +105,16 @@ def _verify_report_session_binding(path: Path, expected_session_id: str, report_
             f"Coverage report {path} session_id ({report_session_id!r}) does not match "
             f"pytest session marker session_id ({expected_session_id!r}). Forged or unbound reports are refused."
         )
+    expected_digest = marker_data.get("report_digest")
+    if expected_digest:
+        import hashlib
+
+        actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual_digest != expected_digest:
+            raise AssertionError(
+                f"Coverage report {path} digest ({actual_digest}) does not match "
+                f"session marker report_digest ({expected_digest}). Forged or replayed reports are refused."
+            )
 
 
 def check_report_freshness(
@@ -138,7 +149,12 @@ def check_report_freshness(
             f"Stale or pre-existing reports are refused."
         )
 
-    _verify_report_session_binding(path, str(marker_data["session_id"]), report_data)
+    _verify_report_session_binding(path, marker_data, report_data)
+
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def verify_coverage_report(
@@ -681,6 +697,95 @@ def test_verify_coverage_report_accepts_valid_matching_session(tmp_path: Path) -
     percent, branch_pct = verify_coverage_report(report)
     assert percent == 95.0
     assert branch_pct == 95.0
+
+
+def test_verify_coverage_report_marker_is_single_use(tmp_path: Path) -> None:
+    """SOL61-04: Session marker is single-use; subsequent verification fails."""
+    import hashlib
+    import time
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    rep_content = json.dumps(
+        {
+            "session_id": "sess-single-use",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(rep_content, encoding="utf-8")
+    rep_digest = hashlib.sha256(rep_content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps({"session_id": "sess-single-use", "timestamp": now, "report_digest": rep_digest}),
+        encoding="utf-8",
+    )
+
+    percent, _ = verify_coverage_report(report)
+    assert percent == 95.0
+
+    # Second call fails because marker was consumed (single-use)
+    with pytest.raises(AssertionError, match="missing session marker"):
+        verify_coverage_report(report)
+
+
+def test_verify_coverage_report_refuses_replayed_report_with_mismatched_digest(tmp_path: Path) -> None:
+    """SOL61-04: Report digest mismatch between report and marker is refused."""
+    import time
+
+    now = time.time()
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "sess-replayed",
+                "timestamp": now,
+                "report_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "session_id": "sess-replayed",
+                "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="does not match session marker report_digest"):
+        verify_coverage_report(report)
+
+
+def test_replaying_older_report_with_forged_marker_fails(tmp_path: Path) -> None:
+    """SOL61-04: Replaying older report with a forged marker is refused."""
+    import time
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "session_id": "previous-pytest-session",
+                "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_time = now - 7200.0
+    os.utime(report, (old_time, old_time))
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps({"session_id": "previous-pytest-session", "timestamp": now}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="older than the current pytest run"):
+        verify_coverage_report(report)
 
 
 def test_is_tracked_by_git_fatal_error_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
