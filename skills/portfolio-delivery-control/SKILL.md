@@ -19,15 +19,17 @@ python3 /absolute/portfolio-delivery-control/scripts/preflight.py \
   --format json
 ```
 
+Use `--compact` to emit a bounded, agent-friendly projection (>70% byte reduction) containing ready projects, time-critical blockers, pending intake, and aggregated control gaps. Use `--pane-capture-file <path>` for deterministic one-shot derivation of queued dispatches from a captured tmux pane (captured with `tmux capture-pane -p -J`). Use `--format markdown` for human-readable reports including audit summary counts.
+
 Exit 0 means the recorded structural checks pass, 1 means attention is needed, and 2 means input/schema errors. Preserve the output and its source digest with the coordinator's checkpoint. Never manufacture missing records to obtain green output. Run once per existing coordinator/witness tick and after a material state transition, not after every tool call.
 
 The script reads `coordinator-status.json`, `local-actions.json`, and an optional results file. The normalized current view lives in `coordinator-status.json.delivery_control`; see [the contract](references/contract.md). Existing historical records remain historical. Do not create an independently maintained CSV or spreadsheet. A human-readable export can be generated from the same report.
 
 ## Resolve the report
 
-1. **Coverage:** Every primary-authorized project has an owner, next action, current stage, dated progress evidence, or an explicit blocker/wait. Priority for one foundation does not remove other projects. Unresolved product scope can advance through a bounded discovery artifact; it does not authorize invented implementations or deployments.
+1. **Coverage:** Every primary-authorized project has an owner, next action, current stage, dated progress evidence, or an explicit blocker/wait. Priority for one foundation does not remove other projects. Unresolved product scope can advance through a bounded discovery artifact; it does not authorize invented implementations or deployments. Legacy entries are projected with RFC 6901 source pointers, canonical SHA-256 digests, and verified fact age.
 2. **Intake:** Read new primary directives, reconcile superseded instructions, record their exact file hashes, and verify actual application. A hash proves which file was read, not compliance. Keep a compact current checkpoint with the next consequential decisions.
-3. **Parallelism:** Admit independent ready slices using available authorized implementation and review capacity. Give each writer a verified worktree and path scope. Keep review/integration capacity available. Count advancing artifacts and stage transitions, not session names or idle processes. Preserve valid long waits and advancing work.
+3. **Parallelism:** Admit independent ready slices using available authorized implementation and review capacity. Give each writer a verified worktree and path scope. Stage transition guards enforce strict admission keys, claim fencing (`claim_token`), and distinct reviewer model roles. Keep review/integration capacity available. Count advancing artifacts and stage transitions, not session names or idle processes. Preserve valid long waits and advancing work.
 4. **Evidence:** Distinguish implementation, review, push, protected merge, green post-merge CI, artifact publication, and hosted validation. A fresh root timestamp does not refresh old nested facts. Bind review and CI receipts to the exact revision; verify live state before an irreversible action.
 5. **Follow-through:** For each nudge, record the cause, expected next observable result, owner and recheck time. Recheck action/result, not just acknowledgement. Stop repeating a nudge already queued or being handled.
 
