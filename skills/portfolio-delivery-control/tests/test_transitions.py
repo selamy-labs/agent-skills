@@ -260,6 +260,7 @@ class TestTransitions(unittest.TestCase):
         qualified: bool = True,
         project_ci_status: str | None = "passing",
         with_merge_transition: bool = False,
+        base_branch: str = "main",
     ) -> None:
         work_id = f"selamy-labs-agent-skills-152-{task_id}"
         reviews_data = [
@@ -284,6 +285,7 @@ class TestTransitions(unittest.TestCase):
                         "repo": "selamy-labs/agent-skills",
                         "issue_num": "152",
                         "task_id": task_id,
+                        "base_branch": base_branch,
                         "spec_path": str(self.spec_file),
                         "approval_ref": str(self.approval_file),
                         "claim": {
@@ -1839,6 +1841,113 @@ exit 0
         self.assertEqual(res.get("status"), "refused")
         self.assertEqual(res.get("reason_code"), "CI_CHECK_FAILED")
 
+    def test_execute_transition_refuses_when_ruleset_endpoint_fails(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=lambda cmd, cwd=None: _rules_503_runner(cmd),
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
+
+    def test_execute_transition_refuses_when_branch_protection_endpoint_fails(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=lambda cmd, cwd=None: _bp_403_runner(cmd),
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
+
+    def test_execute_transition_non_main_base_never_retries_main(self) -> None:
+        self._setup_coordinator_state(
+            task_id="MP464",
+            qualified=True,
+            with_merge_transition=True,
+            base_branch="release",
+        )
+        queried_cmds: list[str] = []
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return _fail_release_runner(cmd, self.c_sha, queried_cmds)
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
+        bp_or_rules = [q for q in queried_cmds if "required_status_checks" in q or "rules/branches" in q]
+        self.assertTrue(bp_or_rules)
+        for q in bp_or_rules:
+            self.assertNotIn("branches/main", q)
+            self.assertIn("branches/release", q)
+
+    def test_execute_transition_same_context_missing_app_pin_refuses(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+        res_missing = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=lambda cmd, cwd=None: _multi_app_missing_runner(cmd, self.c_sha),
+        )
+        self.assertEqual(res_missing.get("status"), "refused")
+        self.assertEqual(res_missing.get("reason_code"), "CI_CHECK_MISSING")
+
+    def test_execute_transition_same_context_both_apps_transitioned(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+        res_ok = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=lambda cmd, cwd=None: _multi_app_both_runner(cmd, self.c_sha),
+        )
+        self.assertEqual(res_ok.get("status"), "transitioned")
+
+    def test_execute_transition_refuses_when_all_mandatory_gates_are_false(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+        status_file = self.state_dir / "coordinator-status.json"
+        doc = json.loads(status_file.read_text(encoding="utf-8"))
+        wi = doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]
+        wi["candidate"]["gate_results"] = {
+            "pytest": False,
+            "complexipy": False,
+            "vulture": False,
+            "ruff_check": False,
+            "ruff_format": False,
+            "privacy_scan": False,
+            "security_scan": False,
+            "lint_skills": False,
+            "coverage": 95.0,
+        }
+        status_file.write_text(json.dumps(doc), encoding="utf-8")
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "MISSING_MANDATORY_GATE")
+
 
 def _weak_base_branch_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
     cmd_str = " ".join(cmd)
@@ -2007,6 +2116,137 @@ def _duplicate_check_failing_runner(cmd: list[str], c_sha: str) -> tuple[int, st
                 "statusCheckRollup": [
                     {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha},
                     {"name": "Quality", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": c_sha},
+                ],
+            }
+        )
+    return 0, ""
+
+
+def _rules_503_runner(cmd: list[str]) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "baseRefName" in cmd_str:
+        return 0, json.dumps({"baseRefName": "main"})
+    if "protection/required_status_checks" in cmd_str:
+        return 0, json.dumps({"contexts": ["Quality"]})
+    if "rules/branches" in cmd_str:
+        return 1, "HTTP 503: Service Unavailable"
+    return 0, ""
+
+
+def _bp_403_runner(cmd: list[str]) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "baseRefName" in cmd_str:
+        return 0, json.dumps({"baseRefName": "main"})
+    if "protection/required_status_checks" in cmd_str:
+        return 1, "HTTP 403: Forbidden (rate limit)"
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps(
+            [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [{"context": "Release", "integration_id": 99}]},
+                }
+            ]
+        )
+    return 0, ""
+
+
+def _fail_release_runner(cmd: list[str], c_sha: str, queried_cmds: list[str]) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    queried_cmds.append(cmd_str)
+    if "baseRefName" in cmd_str:
+        return 0, json.dumps({"baseRefName": "release"})
+    if "required_status_checks" in cmd_str or "rules/branches" in cmd_str:
+        return 1, "Endpoint failure on release branch"
+    if "statusCheckRollup" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "statusCheckRollup": [
+                    {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                ],
+            }
+        )
+    return 0, ""
+
+
+def _multi_app_missing_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "baseRefName" in cmd_str:
+        return 0, json.dumps({"baseRefName": "main"})
+    if "protection/required_status_checks" in cmd_str:
+        return 0, json.dumps({"checks": [{"context": "Quality", "app_id": 100}]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps(
+            [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [{"context": "Quality", "integration_id": 200}]},
+                }
+            ]
+        )
+    if "check-runs" in cmd_str:
+        runs = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": c_sha,
+                "app": {"id": 100},
+            }
+        ]
+        return 0, json.dumps({"check_runs": runs})
+    if "statusCheckRollup" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "statusCheckRollup": [
+                    {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                ],
+            }
+        )
+    return 0, ""
+
+
+def _multi_app_both_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "baseRefName" in cmd_str:
+        return 0, json.dumps({"baseRefName": "main"})
+    if "protection/required_status_checks" in cmd_str:
+        return 0, json.dumps({"checks": [{"context": "Quality", "app_id": 100}]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps(
+            [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [{"context": "Quality", "integration_id": 200}]},
+                }
+            ]
+        )
+    if "check-runs" in cmd_str:
+        runs = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": c_sha,
+                "app": {"id": 100},
+            },
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": c_sha,
+                "app": {"id": 200},
+            },
+        ]
+        return 0, json.dumps({"check_runs": runs})
+    if "statusCheckRollup" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "statusCheckRollup": [
+                    {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
                 ],
             }
         )

@@ -320,6 +320,150 @@ def fetch_pr_base_branch(
     return None
 
 
+def _extract_runs_from_dict(data: dict[str, Any]) -> list[dict[str, Any]] | None:
+    runs = data.get("check_runs")
+    if isinstance(runs, list):
+        return [dict(r) for r in runs if isinstance(r, dict)]
+    return None
+
+
+def _extract_runs_from_list(data: list[Any]) -> list[dict[str, Any]] | None:
+    if not data:
+        return None
+    res: list[dict[str, Any]] = []
+    for page in data:
+        if not isinstance(page, dict):
+            return None
+        page_runs = _extract_runs_from_dict(page)
+        if page_runs is None:
+            return None
+        res.extend(page_runs)
+    return res
+
+
+def _parse_single_json_runs(out_str: str) -> list[dict[str, Any]] | None:
+    try:
+        data = json.loads(out_str)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, dict):
+        return _extract_runs_from_dict(data)
+    if isinstance(data, list):
+        return _extract_runs_from_list(data)
+    return None
+
+
+def _skip_leading_whitespace(s: str, pos: int) -> int:
+    while pos < len(s) and s[pos].isspace():
+        pos += 1
+    return pos
+
+
+def _decode_concatenated_pages(out_str: str) -> list[dict[str, Any]] | None:
+    decoder = json.JSONDecoder()
+    pos = 0
+    res: list[dict[str, Any]] = []
+    while True:
+        pos = _skip_leading_whitespace(out_str, pos)
+        if pos >= len(out_str):
+            break
+        try:
+            page, idx = decoder.raw_decode(out_str[pos:])
+            pos += idx
+        except Exception:
+            return None
+        page_runs = _extract_runs_from_dict(page) if isinstance(page, dict) else None
+        if page_runs is None:
+            return None
+        res.extend(page_runs)
+    return res if res else None
+
+
+def _parse_paginated_check_runs_data(out: str) -> list[dict[str, Any]] | None:
+    out_str = out.strip()
+    if not out_str:
+        return None
+    single = _parse_single_json_runs(out_str)
+    if single is not None:
+        return single
+    return _decode_concatenated_pages(out_str)
+
+
+def _extract_statuses_from_dict(data: dict[str, Any]) -> list[dict[str, Any]]:
+    statuses = data.get("statuses")
+    if isinstance(statuses, list):
+        return [dict(x) for x in statuses if isinstance(x, dict)]
+    if "state" in data:
+        return [data]
+    return []
+
+
+def _parse_statuses_data(out: str) -> list[dict[str, Any]]:
+    out_str = out.strip()
+    if not out_str:
+        return []
+    try:
+        data = json.loads(out_str)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, list):
+        return [dict(x) for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        return _extract_statuses_from_dict(data)
+    return []
+
+
+def _normalize_commit_status_item(item: dict[str, Any], cand_sha: str) -> dict[str, Any] | None:
+    if "state" not in item:
+        return None
+    ctx = str(item.get("context") or item.get("name") or "").strip()
+    if not ctx:
+        return None
+    state = str(item.get("state") or "").lower()
+    concl = "SUCCESS" if state == "success" else "FAILURE"
+    app_val = item.get("app") or item.get("creator") or item.get("integration_id")
+    return {
+        "name": ctx,
+        "context": ctx,
+        "status": "COMPLETED",
+        "conclusion": concl,
+        "state": state.upper(),
+        "head_sha": cand_sha,
+        "app": app_val,
+    }
+
+
+def _fetch_endpoint_output(
+    endpoint: str,
+    worktree: Path,
+    runner: Callable[..., Any] | None,
+) -> tuple[int, str]:
+    code, out = _run_cmd(["gh", "api", "--paginate", endpoint], worktree, runner)
+    if code != 0 or not out.strip():
+        code, out = _run_cmd(["gh", "api", endpoint], worktree, runner)
+    return code, out
+
+
+def _append_statuses_if_available(
+    repo_name: str,
+    cand_sha: str,
+    worktree: Path,
+    runner: Callable[..., Any] | None,
+    runs: list[dict[str, Any]],
+) -> None:
+    st_ep = (
+        f"repos/{repo_name}/commits/{cand_sha}/statuses"
+        if repo_name
+        else f"repos/{{owner}}/{{repo}}/commits/{cand_sha}/statuses"
+    )
+    s_code, s_out = _fetch_endpoint_output(st_ep, worktree, runner)
+    if s_code == 0 and s_out.strip():
+        for st in _parse_statuses_data(s_out):
+            norm = _normalize_commit_status_item(st, cand_sha)
+            if norm is not None:
+                runs.append(norm)
+
+
 def fetch_commit_check_runs_from_provider(
     repo: str | Path | None,
     cand_sha: str,
@@ -328,26 +472,22 @@ def fetch_commit_check_runs_from_provider(
 ) -> list[dict[str, Any]] | None:
     worktree = Path(cwd or (repo if isinstance(repo, Path) else "."))
     repo_name = str(repo).strip() if isinstance(repo, str) else ""
-    endpoint = (
+    cr_ep = (
         f"repos/{repo_name}/commits/{cand_sha}/check-runs"
         if repo_name
         else f"repos/{{owner}}/{{repo}}/commits/{cand_sha}/check-runs"
     )
-    code, out = _run_cmd(["gh", "api", endpoint], worktree, runner)
+    code, out = _fetch_endpoint_output(cr_ep, worktree, runner)
     if code != 0 or not out.strip():
         return None
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
+
+    runs = _parse_paginated_check_runs_data(out)
+    if runs is None:
         return None
-    if not isinstance(data, dict):
-        return None
-    runs = data.get("check_runs")
-    if not isinstance(runs, list):
-        return None
-    res = [dict(r) for r in runs if isinstance(r, dict)]
-    stamp_rollup_head_sha(res, cand_sha)
-    return res
+
+    _append_statuses_if_available(repo_name, cand_sha, worktree, runner, runs)
+    stamp_rollup_head_sha(runs, cand_sha)
+    return runs
 
 
 def has_app_pinned_checks(required_checks: list[Any] | None) -> bool:
@@ -370,15 +510,39 @@ def _normalize_req_check(req: Any) -> dict[str, Any]:
     return {"context": str(req).strip(), "app_id": None}
 
 
-def _merge_check_descriptors(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
+def _normalize_descriptor_app_id(app_id: Any) -> Any:
+    if app_id is None:
+        return None
+    try:
+        return int(app_id)
+    except (ValueError, TypeError):
+        return str(app_id).strip()
+
+
+def _group_descriptors_by_context(items: list[dict[str, Any]]) -> dict[str, list[Any]]:
+    by_ctx: dict[str, list[Any]] = {}
     for item in items:
         ctx = str(item.get("context") or "").strip()
-        if not ctx:
-            continue
-        if ctx not in merged or (merged[ctx].get("app_id") is None and item.get("app_id") is not None):
-            merged[ctx] = item
-    return list(merged.values())
+        if ctx:
+            app_id = _normalize_descriptor_app_id(item.get("app_id"))
+            by_ctx.setdefault(ctx, []).append(app_id)
+    return by_ctx
+
+
+def _build_context_descriptors(ctx: str, apps: list[Any]) -> list[dict[str, Any]]:
+    pinned = [a for a in apps if a is not None]
+    if not pinned:
+        return [{"context": ctx, "app_id": None}]
+    unique_apps = list(dict.fromkeys(pinned))
+    return [{"context": ctx, "app_id": a} for a in unique_apps]
+
+
+def _merge_check_descriptors(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_ctx = _group_descriptors_by_context(items)
+    result: list[dict[str, Any]] = []
+    for ctx, apps in by_ctx.items():
+        result.extend(_build_context_descriptors(ctx, apps))
+    return result
 
 
 def _parse_contexts(contexts: Any) -> list[dict[str, Any]]:
@@ -446,14 +610,57 @@ def parse_required_checks(data: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _is_confirmed_absence(code: int, out: str) -> bool:
+    if code == 0:
+        return False
+    lower = out.lower()
+    if "404" in lower or "not found" in lower:
+        return True
+    if "branch not protected" in lower or "required status checks not enabled" in lower:
+        return True
+    if "no rules found" in lower or "no rulesets found" in lower:
+        return True
+    return False
+
+
 def _query_branch_protection_checks(
     endpoint: str, worktree: Path, runner: Callable[..., Any] | None
 ) -> list[dict[str, Any]] | None:
     code, out = _run_cmd(["gh", "api", endpoint], worktree, runner)
-    if code != 0 or not out.strip():
+    if code != 0:
+        if _is_confirmed_absence(code, out):
+            return []
         return None
+    if not out.strip():
+        return []
     try:
-        return parse_required_checks(json.loads(out))
+        data = json.loads(out)
+        if isinstance(data, dict) and "message" in data and "contexts" not in data and "checks" not in data:
+            if _is_confirmed_absence(1, str(data.get("message") or "")):
+                return []
+            return None
+        return parse_required_checks(data)
+    except json.JSONDecodeError:
+        return None
+
+
+def _query_ruleset_checks(
+    endpoint: str, worktree: Path, runner: Callable[..., Any] | None
+) -> list[dict[str, Any]] | None:
+    code, out = _run_cmd(["gh", "api", endpoint], worktree, runner)
+    if code != 0:
+        if _is_confirmed_absence(code, out):
+            return []
+        return None
+    if not out.strip():
+        return []
+    try:
+        data = json.loads(out)
+        if isinstance(data, dict) and "message" in data and "parameters" not in data:
+            if _is_confirmed_absence(1, str(data.get("message") or "")):
+                return []
+            return None
+        return parse_required_checks(data)
     except json.JSONDecodeError:
         return None
 
@@ -477,16 +684,16 @@ def fetch_required_checks_from_provider(
         else f"repos/{{owner}}/{{repo}}/rules/branches/{base_branch}"
     )
     bp_res = _query_branch_protection_checks(bp_endpoint, worktree, runner)
-    rules_res = _query_branch_protection_checks(rules_endpoint, worktree, runner)
+    rules_res = _query_ruleset_checks(rules_endpoint, worktree, runner)
 
-    if bp_res is None and rules_res is None:
+    if bp_res is None or rules_res is None:
         return None
 
     combined: list[dict[str, Any]] = []
-    if bp_res:
-        combined.extend(bp_res)
-    if rules_res:
-        combined.extend(rules_res)
+    combined.extend(bp_res)
+    combined.extend(rules_res)
+    if not combined:
+        return None
     return _merge_check_descriptors(combined)
 
 

@@ -21,6 +21,7 @@ from providers import (  # noqa: E402
     _check_app_matches,
     _extract_repo_required_checks,
     _is_named_check_passing,
+    _merge_check_descriptors,
     _post_merge_verify,
     _read_policy_dict,
     _run_cmd,
@@ -1400,6 +1401,250 @@ class TestProviders(unittest.TestCase):
         )
         self.assertFalse(ok_bad)
         self.assertEqual(res_bad.get("reason_code"), "MISSING_EXACT_HEAD_CI")
+
+    def test_fetch_required_checks_fails_closed_when_rules_endpoint_fails_503(self) -> None:
+        def bp_ok_rules_503(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["Quality"]})
+            if "rules/branches" in cmd_str:
+                return 1, "HTTP 503: Service Unavailable"
+            return 0, ""
+
+        self.assertIsNone(
+            fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=bp_ok_rules_503)
+        )
+
+    def test_fetch_required_checks_fails_closed_when_bp_endpoint_fails_403(self) -> None:
+        def bp_403_rules_ok(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 1, "HTTP 403: Forbidden (rate limit)"
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps(
+                    [
+                        {
+                            "type": "required_status_checks",
+                            "parameters": {"required_status_checks": [{"context": "Release", "integration_id": 99}]},
+                        }
+                    ]
+                )
+            return 0, ""
+
+        self.assertIsNone(
+            fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=bp_403_rules_ok)
+        )
+
+    def test_fetch_required_checks_succeeds_when_bp_404_and_rules_ok(self) -> None:
+        def bp_404_rules_ok(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 1, "Branch not protected (HTTP 404)"
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps(
+                    [
+                        {
+                            "type": "required_status_checks",
+                            "parameters": {"required_status_checks": [{"context": "Release", "integration_id": 99}]},
+                        }
+                    ]
+                )
+            return 0, ""
+
+        res3 = fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=bp_404_rules_ok)
+        self.assertIsNotNone(res3)
+        self.assertEqual(len(res3), 1)  # type: ignore[arg-type]
+        self.assertEqual(res3[0]["context"], "Release")  # type: ignore[index]
+
+    def test_fetch_required_checks_succeeds_when_rules_404_and_bp_ok(self) -> None:
+        def bp_ok_rules_404(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["Quality"]})
+            if "rules/branches" in cmd_str:
+                return 1, "No rules found (HTTP 404)"
+            return 0, ""
+
+        res4 = fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=bp_ok_rules_404)
+        self.assertIsNotNone(res4)
+        self.assertEqual(len(res4), 1)  # type: ignore[arg-type]
+        self.assertEqual(res4[0]["context"], "Quality")  # type: ignore[index]
+
+    def test_merge_check_descriptors_preserves_multiple_app_pins(self) -> None:
+        raw = [
+            {"context": "Quality", "app_id": 100},
+            {"context": "Quality", "app_id": 200},
+            {"context": "Quality", "app_id": 100},
+            {"context": "Build", "app_id": None},
+        ]
+        merged = _merge_check_descriptors(raw)
+        self.assertEqual(len(merged), 3)
+        q_pins = [m["app_id"] for m in merged if m["context"] == "Quality"]
+        self.assertIn(100, q_pins)
+        self.assertIn(200, q_pins)
+        self.assertEqual(len(q_pins), 2)
+
+    def test_verify_live_status_rollup_multiple_app_pins(self) -> None:
+        req = [
+            {"context": "Quality", "app_id": 100},
+            {"context": "Quality", "app_id": 200},
+        ]
+        rollup = [
+            {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha},
+        ]
+        runs_100_only = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 100},
+            },
+        ]
+        ok1, code1 = verify_live_status_rollup(rollup, self.c_sha, required_checks=req, check_runs=runs_100_only)
+        self.assertFalse(ok1)
+        self.assertEqual(code1, "CI_CHECK_MISSING")
+
+        runs_both = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 100},
+            },
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 200},
+            },
+        ]
+        ok2, code2 = verify_live_status_rollup(rollup, self.c_sha, required_checks=req, check_runs=runs_both)
+        self.assertTrue(ok2)
+        self.assertEqual(code2, "")
+
+        runs_app2_failed = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 100},
+            },
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": self.c_sha,
+                "app": {"id": 200},
+            },
+        ]
+        ok3, code3 = verify_live_status_rollup(rollup, self.c_sha, required_checks=req, check_runs=runs_app2_failed)
+        self.assertFalse(ok3)
+        self.assertEqual(code3, "CI_CHECK_FAILED")
+
+    def test_fetch_commit_check_runs_pagination_and_commit_statuses(self) -> None:
+        def paginated_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "check-runs" in cmd_str:
+                p1 = json.dumps(
+                    {
+                        "check_runs": [
+                            {"name": "CheckA", "status": "completed", "conclusion": "success", "app": {"id": 10}}
+                        ]
+                    }
+                )
+                p2 = json.dumps(
+                    {
+                        "check_runs": [
+                            {"name": "CheckB", "status": "completed", "conclusion": "success", "app": {"id": 20}}
+                        ]
+                    }
+                )
+                return 0, f"{p1}\n{p2}"
+            if "statuses" in cmd_str:
+                return 0, json.dumps(
+                    [
+                        {
+                            "context": "CommitStatusA",
+                            "state": "success",
+                            "creator": {"id": 30},
+                        }
+                    ]
+                )
+            return 0, ""
+
+        runs = fetch_commit_check_runs_from_provider("selamy-labs/agent-skills", self.c_sha, runner=paginated_runner)
+        self.assertIsNotNone(runs)
+        names = [r["name"] for r in runs]  # type: ignore[union-attr]
+        self.assertIn("CheckA", names)
+        self.assertIn("CheckB", names)
+        self.assertIn("CommitStatusA", names)
+
+        status_item = next(r for r in runs if r["name"] == "CommitStatusA")  # type: ignore[union-attr]
+        self.assertEqual(status_item["app"]["id"], 30)
+        self.assertEqual(status_item["conclusion"], "SUCCESS")
+
+    def test_fetch_commit_check_runs_pagination_failure_and_status_error(self) -> None:
+        req = [{"context": "CheckB", "app_id": 20}]
+        rollup = [{"name": "CheckB", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}]
+
+        runs_page2_fail = [
+            {
+                "name": "CheckA",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 10},
+            },
+            {
+                "name": "CheckB",
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": self.c_sha,
+                "app": {"id": 20},
+            },
+        ]
+        ok, code = verify_live_status_rollup(rollup, self.c_sha, required_checks=req, check_runs=runs_page2_fail)
+        self.assertFalse(ok)
+        self.assertEqual(code, "CI_CHECK_FAILED")
+
+        req_status = [{"context": "ci/test", "app_id": 40}]
+        fail_status_run = [
+            {
+                "name": "ci/test",
+                "context": "ci/test",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+                "state": "FAILURE",
+                "head_sha": self.c_sha,
+                "app": {"id": 40},
+            },
+        ]
+        ok_s, code_s = verify_live_status_rollup(
+            rollup, self.c_sha, required_checks=req_status, check_runs=fail_status_run
+        )
+        self.assertFalse(ok_s)
+        self.assertEqual(code_s, "CI_CHECK_FAILED")
+
+        wrong_app_status_run = [
+            {
+                "name": "ci/test",
+                "context": "ci/test",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "state": "SUCCESS",
+                "head_sha": self.c_sha,
+                "app": {"id": 999},
+            },
+        ]
+        ok_w, code_w = verify_live_status_rollup(
+            rollup, self.c_sha, required_checks=req_status, check_runs=wrong_app_status_run
+        )
+        self.assertFalse(ok_w)
+        self.assertEqual(code_w, "CI_CHECK_MISSING")
 
 
 if __name__ == "__main__":

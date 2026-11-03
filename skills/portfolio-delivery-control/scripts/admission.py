@@ -101,15 +101,48 @@ def inspect_modified_paths(
     return True, ""
 
 
+def _check_gate_exit_code(ec: Any) -> bool:
+    return type(ec) is int and ec == 0
+
+
+def _check_gate_status(st: Any) -> bool:
+    return isinstance(st, str) and st.upper() in ("PASS", "PASSED")
+
+
+def _is_gate_dict_passing(val: dict[str, Any]) -> bool:
+    ec = val.get("exit_code")
+    p = val.get("passed")
+    st = val.get("status")
+    if ec is None and p is None and st is None:
+        return False
+    if ec is not None and not _check_gate_exit_code(ec):
+        return False
+    if p is not None and p is not True:
+        return False
+    if st is not None and not _check_gate_status(st):
+        return False
+    return True
+
+
 def _is_gate_passing(val: Any) -> bool:
+    if val is True:
+        return True
+    if val is False or val is None:
+        return False
+    if type(val) is int:
+        return val == 0
+    if isinstance(val, str):
+        return _check_gate_status(val)
     if isinstance(val, dict):
-        return val.get("exit_code") == 0 and val.get("passed") is not False
-    return val in (0, True, "PASS", "PASSED")
+        return _is_gate_dict_passing(val)
+    return False
 
 
 def _is_coverage_passing(cov: Any) -> bool:
     if isinstance(cov, dict):
         cov = cov.get("percent", 0)
+    if cov is True or cov is False:
+        return False
     try:
         return float(cov) >= 90.0
     except (ValueError, TypeError):

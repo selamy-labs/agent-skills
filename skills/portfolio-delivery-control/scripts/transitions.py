@@ -463,6 +463,33 @@ def _validate_transition_args(
     return None
 
 
+def _validate_pr_base_and_checks(
+    repo: str,
+    pr_ref: str,
+    expected_base_branch: str,
+    command_runner: Callable[..., Any] | None,
+    wt_path: Path,
+    control_dir: Path | str | None,
+) -> tuple[str | None, list[Any] | None, str | None]:
+    if not pr_ref:
+        return None, None, "CI_CHECK_FAILED"
+    pr_base = fetch_pr_base_branch(repo, pr_ref, runner=command_runner, cwd=wt_path)
+    if not pr_base:
+        return None, None, "PR_VIEW_FAILED"
+    if pr_base != expected_base_branch:
+        return None, None, "BASE_BRANCH_MISMATCH"
+    req_checks = resolve_required_checks(
+        repo,
+        base_branch=pr_base,
+        runner=command_runner,
+        cwd=wt_path,
+        control_dir=control_dir,
+    )
+    if not req_checks:
+        return None, None, "CI_CHECK_MISSING"
+    return pr_base, req_checks, None
+
+
 def _guard_action_ci(
     action: str,
     commit_sha: str,
@@ -474,42 +501,36 @@ def _guard_action_ci(
     expected_base_branch: str = "main",
     control_dir: Path | str | None = None,
 ) -> tuple[bool, dict[str, Any] | None, list[Any] | None]:
-    if action in {"complete_spec_task", "merge_pr"}:
-        if not pr_ref:
-            return False, {"status": "refused", "reason_code": "CI_CHECK_FAILED", "observed_at": iso_now}, None
-        pr_base = fetch_pr_base_branch(repo, pr_ref, runner=command_runner, cwd=wt_path)
-        if not pr_base:
-            return False, {"status": "refused", "reason_code": "PR_VIEW_FAILED", "observed_at": iso_now}, None
-        if pr_base != expected_base_branch:
-            return False, {"status": "refused", "reason_code": "BASE_BRANCH_MISMATCH", "observed_at": iso_now}, None
-        target_base = pr_base
-        req_checks = resolve_required_checks(
-            repo,
-            base_branch=target_base,
-            runner=command_runner,
-            cwd=wt_path,
-            control_dir=control_dir,
+    if action not in {"complete_spec_task", "merge_pr"}:
+        return True, None, None
+
+    pr_base, req_checks, err_code = _validate_pr_base_and_checks(
+        repo, pr_ref, expected_base_branch, command_runner, wt_path, control_dir
+    )
+    if err_code:
+        return False, {"status": "refused", "reason_code": err_code, "observed_at": iso_now}, None
+
+    ci_ok, ci_code = _guard_live_provider_ci(
+        pr_ref,
+        commit_sha,
+        command_runner,
+        wt_path,
+        repo=repo,
+        base_branch=pr_base or "",
+        control_dir=control_dir,
+        required_checks=req_checks,
+    )
+    if not ci_ok:
+        return (
+            False,
+            {
+                "status": "refused",
+                "reason_code": ci_code,
+                "observed_at": iso_now,
+            },
+            None,
         )
-        ci_ok, ci_code = _guard_live_provider_ci(
-            pr_ref,
-            commit_sha,
-            command_runner,
-            wt_path,
-            repo=repo,
-            required_checks=req_checks,
-        )
-        if not ci_ok:
-            return (
-                False,
-                {
-                    "status": "refused",
-                    "reason_code": ci_code,
-                    "observed_at": iso_now,
-                },
-                None,
-            )
-        return True, None, req_checks
-    return True, None, None
+    return True, None, req_checks
 
 
 def _write_transition_receipt(

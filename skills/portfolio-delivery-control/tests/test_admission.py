@@ -13,6 +13,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from admission import (  # noqa: E402
+    MANDATORY_GATE_NAMES,
     admit_work,
     claim_work,
     invalidate_prior_reviews_if_revision_changed,
@@ -347,6 +348,55 @@ class TestAdmission(unittest.TestCase):
         # Invalid gate dictionary
         self.assertFalse(verify_mandatory_gates(None))
         self.assertFalse(verify_mandatory_gates({"pytest": "FAIL"}))
+
+    def test_mandatory_gates_sol_r17_004_booleans_and_strict_types(self) -> None:
+        # All mandatory gates set to boolean False
+        all_false = {g: False for g in MANDATORY_GATE_NAMES}
+        all_false["coverage"] = 95.0
+        self.assertFalse(verify_mandatory_gates(all_false))
+
+        # Single mandatory gate set to boolean False
+        one_false = {g: {"exit_code": 0, "passed": True} for g in MANDATORY_GATE_NAMES}
+        one_false["pytest"] = False
+        one_false["coverage"] = 95.0
+        self.assertFalse(verify_mandatory_gates(one_false))
+
+        # Boolean False as exit_code (False == 0 in Python)
+        false_ec = {g: {"exit_code": 0, "passed": True} for g in MANDATORY_GATE_NAMES}
+        false_ec["pytest"] = {"exit_code": False, "passed": True}
+        false_ec["coverage"] = 95.0
+        self.assertFalse(verify_mandatory_gates(false_ec))
+
+        # passed is explicitly False
+        passed_false = {g: {"exit_code": 0, "passed": True} for g in MANDATORY_GATE_NAMES}
+        passed_false["ruff_check"] = {"exit_code": 0, "passed": False}
+        passed_false["coverage"] = 95.0
+        self.assertFalse(verify_mandatory_gates(passed_false))
+
+        # empty dict or None exit code
+        empty_gate = {g: {"exit_code": 0, "passed": True} for g in MANDATORY_GATE_NAMES}
+        empty_gate["vulture"] = {}
+        empty_gate["coverage"] = 95.0
+        self.assertFalse(verify_mandatory_gates(empty_gate))
+
+        # Coverage as boolean
+        bool_cov = {g: {"exit_code": 0, "passed": True} for g in MANDATORY_GATE_NAMES}
+        bool_cov["coverage"] = True
+        self.assertFalse(verify_mandatory_gates(bool_cov))
+
+        # Valid gates with mixed representations
+        valid_mixed = {
+            "pytest": 0,
+            "complexipy": True,
+            "vulture": "PASSED",
+            "ruff_check": {"exit_code": 0, "passed": True},
+            "ruff_format": {"exit_code": 0},
+            "privacy_scan": {"passed": True},
+            "security_scan": {"status": "PASS"},
+            "lint_skills": 0,
+            "coverage": 92.5,
+        }
+        self.assertTrue(verify_mandatory_gates(valid_mixed))
 
         # Revision invalidation
         wi = {
