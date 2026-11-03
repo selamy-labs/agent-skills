@@ -98,7 +98,7 @@ def verify_dispatch_binding(
     entry = dispatch_ledger[dispatch_id]
     if not isinstance(entry, dict):
         return False, "UNBOUND_DISPATCH_ID"
-    if entry.get("work_id") and entry.get("work_id") != work_id:
+    if entry.get("work_id") != work_id:
         return False, "DISPATCH_WORK_ID_MISMATCH"
     if entry.get("family") != family:
         return False, "DISPATCH_FAMILY_MISMATCH"
@@ -125,17 +125,30 @@ def _check_ship_sets(ship_revs: list[dict[str, Any]]) -> bool:
     return families == VALID_FAMILIES and len(sessions) >= 3 and len(dispatches) >= 3
 
 
-def _check_ship_ledger_bindings(ship_revs: list[dict[str, Any]], dispatch_ledger: dict[str, Any]) -> bool:
-    for r in ship_revs:
-        d_id = str(r.get("dispatch_id") or "")
-        entry = dispatch_ledger.get(d_id)
-        if not isinstance(entry, dict):
-            return False
-        sess = r.get("reviewer_session_id") or r.get("session_id")
-        entry_sess = entry.get("reviewer_session_id") or entry.get("session_id")
-        if entry.get("family") != r.get("family") or entry_sess != sess:
-            return False
+def _is_single_ship_ledger_bound(
+    r: dict[str, Any],
+    dispatch_ledger: dict[str, Any],
+    work_id: str,
+) -> bool:
+    d_id = str(r.get("dispatch_id") or "")
+    entry = dispatch_ledger.get(d_id)
+    if not isinstance(entry, dict):
+        return False
+    sess = r.get("reviewer_session_id") or r.get("session_id")
+    entry_sess = entry.get("reviewer_session_id") or entry.get("session_id")
+    if entry.get("family") != r.get("family") or entry_sess != sess:
+        return False
+    if work_id and entry.get("work_id") != work_id:
+        return False
     return True
+
+
+def _check_ship_ledger_bindings(
+    ship_revs: list[dict[str, Any]],
+    dispatch_ledger: dict[str, Any],
+    work_id: str = "",
+) -> bool:
+    return all(_is_single_ship_ledger_bound(r, dispatch_ledger, work_id) for r in ship_revs)
 
 
 def check_qualification(
@@ -143,13 +156,43 @@ def check_qualification(
     commit_sha: str,
     tree_sha: str,
     dispatch_ledger: dict[str, Any] | None = None,
+    work_id: str = "",
 ) -> bool:
     ship_revs = _filter_ship_reviews(reviews, commit_sha, tree_sha)
     if not _check_ship_sets(ship_revs):
         return False
     if dispatch_ledger is not None:
-        return _check_ship_ledger_bindings(ship_revs, dispatch_ledger)
+        return _check_ship_ledger_bindings(ship_revs, dispatch_ledger, work_id=work_id)
     return True
+
+
+def _is_session_already_dispatched(ledger: dict[str, Any], work_id: str, session_id: str) -> bool:
+    for d_item in ledger.values():
+        if isinstance(d_item, dict) and d_item.get("work_id") == work_id:
+            d_sess = d_item.get("reviewer_session_id") or d_item.get("session_id")
+            if d_sess == session_id:
+                return True
+    return False
+
+
+def _check_dispatch_role_and_uniqueness(
+    doc: dict[str, Any],
+    work_id: str,
+    dispatch_id: str,
+    reviewer_session_id: str,
+) -> tuple[bool, str]:
+    dc = doc.setdefault("delivery_control", {})
+    work_items = dc.setdefault("work_items", {})
+    wi = work_items.get(work_id, {})
+    claim = wi.get("claim", {})
+    if claim and claim.get("session_id") == reviewer_session_id:
+        return False, "SESSION_REUSED_ACROSS_ROLES"
+    ledger = dc.setdefault("dispatch_ledger", {})
+    if dispatch_id in ledger:
+        return False, "DUPLICATE_DISPATCH_ID"
+    if _is_session_already_dispatched(ledger, work_id, reviewer_session_id):
+        return False, "DUPLICATE_REVIEWER_SESSION"
+    return True, ""
 
 
 def record_dispatch(
@@ -174,6 +217,11 @@ def record_dispatch(
             doc = json.loads(status_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
+
+    ok, err = _check_dispatch_role_and_uniqueness(doc, work_id, dispatch_id, reviewer_session_id)
+    if not ok:
+        return {"status": "refused", "reason_code": err}
+
     dc = doc.setdefault("delivery_control", {})
     ledger = dc.setdefault("dispatch_ledger", {})
     entry = {
@@ -246,7 +294,9 @@ def build_review_receipt(
 
 def _load_report_json(report_path: Path | str, report_sha256: str) -> tuple[bool, str, dict[str, Any]]:
     p = Path(report_path)
-    if not p.exists() or sha256_file(p).lower() != report_sha256.lower():
+    if not p.exists() or not p.is_file():
+        return False, "ARTIFACT_NOT_FOUND", {}
+    if sha256_file(p).lower() != report_sha256.lower():
         return False, "ARTIFACT_HASH_MISMATCH", {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))

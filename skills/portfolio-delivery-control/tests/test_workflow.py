@@ -3,11 +3,16 @@
 
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from workflow import (
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from workflow import (  # noqa: E402
     admit_work,
     build_parser,
     check_qualification,

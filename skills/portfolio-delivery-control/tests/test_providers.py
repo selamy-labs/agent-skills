@@ -3,24 +3,41 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
-from providers import (
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from providers import (  # noqa: E402
+    _post_merge_verify,
+    _run_cmd,
+    _verify_created_pr,
     check_existing_pr,
     fetch_ci_checks_from_provider,
+    get_commit_modified_paths,
     get_remote_branch_sha,
     inspect_git_commit,
     is_approved_identity,
+    is_ci_check_passing,
+    is_hex_40,
+    is_hex_64,
+    iso_timestamp,
     reconcile_and_complete_spec_task,
     reconcile_and_merge_pr,
     reconcile_and_publish_pr,
     reconcile_and_push,
+    sha256_file,
     stamp_rollup_head_sha,
+    verify_live_status_rollup,
     verify_provider_bot_actor,
 )
 
@@ -398,6 +415,420 @@ class TestProviders(unittest.TestCase):
         ok, res = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=merge_flow_runner)
         self.assertTrue(ok)
         self.assertEqual(res.get("state"), "MERGED")
+
+    def test_identity_and_hex_validation(self) -> None:
+        self.assertTrue(is_hex_40(self.c_sha))
+        self.assertFalse(is_hex_40("not-hex-at-all"))
+        self.assertFalse(is_hex_40(12345))
+        self.assertFalse(is_hex_40("z" * 40))
+
+        self.assertTrue(is_hex_64("a" * 64))
+        self.assertFalse(is_hex_64("a" * 40))
+        self.assertFalse(is_hex_64(12345))
+        self.assertFalse(is_hex_64("z" * 64))
+
+        self.assertTrue(is_approved_identity("selamy-labs-bot"))
+        self.assertTrue(is_approved_identity("claude-cir"))
+        self.assertFalse(is_approved_identity("unauthorized-user"))
+        self.assertFalse(is_approved_identity("selamy-labs-bot <wrong-email@example.com>"))
+        self.assertFalse(is_approved_identity("<wrong-email@example.com>"))
+        self.assertTrue(is_approved_identity("<346154065+selamy-labs-bot@users.noreply.github.com>"))
+
+    def test_sha256_and_timestamp(self) -> None:
+        p = self.worktree / "test_file.txt"
+        p.write_bytes(b"hello world")
+        digest = sha256_file(p)
+        self.assertEqual(len(digest), 64)
+
+        t1 = iso_timestamp()
+        self.assertTrue(t1.endswith("Z"))
+        dt = datetime.datetime(2026, 11, 3, 12, 0, 0, tzinfo=datetime.UTC)
+        t2 = iso_timestamp(dt)
+        self.assertEqual(t2, "2026-11-03T12:00:00Z")
+
+    def test_provider_bot_actor_bot_prefix_and_json_error(self) -> None:
+        def prefix_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"login": "selamy-labs-bot[bot]", "type": "Bot"})
+
+        ok, err = verify_provider_bot_actor(self.worktree, "selamy-labs-bot", runner=prefix_runner)
+        self.assertTrue(ok)
+
+        def bad_json_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "corrupted json"
+
+        ok2, err2 = verify_provider_bot_actor(self.worktree, "selamy-labs-bot", runner=bad_json_runner)
+        self.assertFalse(ok2)
+        self.assertEqual(err2, "PROVIDER_AUTH_FAILED")
+
+        def list_json_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps(["not-a-dict"])
+
+        ok3, err3 = verify_provider_bot_actor(self.worktree, "selamy-labs-bot", runner=list_json_runner)
+        self.assertFalse(ok3)
+        self.assertEqual(err3, "DISALLOWED_MERGE_IDENTITY")
+
+    def test_run_cmd_error_and_timeout(self) -> None:
+        code, out = _run_cmd(["false"], self.worktree)
+        self.assertNotEqual(code, 0)
+
+        with patch("providers.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["sleep"], timeout=1)):
+            code_t, out_t = _run_cmd(["sleep"], self.worktree)
+            self.assertEqual(code_t, 1)
+            self.assertIn("timed out", out_t)
+
+        with patch("providers.subprocess.run", side_effect=OSError("permission denied")):
+            code_e, out_e = _run_cmd(["foo"], self.worktree)
+            self.assertEqual(code_e, 1)
+            self.assertIn("permission denied", out_e)
+
+    def test_inspect_git_commit_failures(self) -> None:
+        def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "fatal: bad object"
+
+        ok, author, committer, tree, _ = inspect_git_commit(self.worktree, self.c_sha, runner=fail_runner)
+        self.assertFalse(ok)
+
+        def short_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "only-one-line\n"
+
+        ok2, _, _, _, _ = inspect_git_commit(self.worktree, self.c_sha, runner=short_runner)
+        self.assertFalse(ok2)
+
+    def test_get_remote_branch_sha_failures(self) -> None:
+        def error_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "network error"
+
+        sha = get_remote_branch_sha(self.worktree, "origin", "feat/branch", runner=error_runner)
+        self.assertIsNone(sha)
+
+        def empty_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, ""
+
+        sha2 = get_remote_branch_sha(self.worktree, "origin", "feat/branch", runner=empty_runner)
+        self.assertIsNone(sha2)
+
+    def test_check_existing_pr_failures(self) -> None:
+        def bad_json_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "not-json"
+
+        ok, err = check_existing_pr(self.worktree, "feat/branch", self.c_sha, runner=bad_json_runner)
+        self.assertFalse(ok)
+        self.assertIsNone(err)
+
+    def test_verify_provider_bot_actor_variations(self) -> None:
+        # Fallback to gh auth status when gh api user fails
+        def auth_fallback_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "api user" in " ".join(cmd):
+                return 1, "Forbidden"
+            if "auth status" in " ".join(cmd):
+                return 0, "Logged in to github.com account selamy-labs-bot"
+            return 0, ""
+
+        ok, err = verify_provider_bot_actor(self.worktree, "selamy-labs-bot", runner=auth_fallback_runner)
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+
+        # Fallback auth fails
+        def auth_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "Not logged in"
+
+        ok2, err2 = verify_provider_bot_actor(self.worktree, "selamy-labs-bot", runner=auth_fail_runner)
+        self.assertFalse(ok2)
+        self.assertEqual(err2, "PROVIDER_AUTH_FAILED")
+
+        # User type is User (not Bot) and login does not match merge_identity
+        def user_type_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"login": "external-human", "type": "User"})
+
+        ok3, err3 = verify_provider_bot_actor(self.worktree, "selamy-labs-bot", runner=user_type_runner)
+        self.assertFalse(ok3)
+        self.assertEqual(err3, "DISALLOWED_MERGE_IDENTITY")
+
+    def test_fetch_ci_checks_from_provider_variations(self) -> None:
+        # Exit code != 0
+        def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "Not found"
+
+        self.assertIsNone(fetch_ci_checks_from_provider(self.worktree, "152", self.c_sha, runner=fail_runner))
+
+        # Bad JSON
+        def bad_json(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "not json"
+
+        self.assertIsNone(fetch_ci_checks_from_provider(self.worktree, "152", self.c_sha, runner=bad_json))
+
+        # Head OID mismatch
+        def head_mismatch(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"headRefOid": "9" * 40, "statusCheckRollup": []})
+
+        self.assertIsNone(fetch_ci_checks_from_provider(self.worktree, "152", self.c_sha, runner=head_mismatch))
+
+        # Missing statusCheckRollup
+        def no_rollup(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"headRefOid": self.c_sha, "statusCheckRollup": None})
+
+        self.assertIsNone(fetch_ci_checks_from_provider(self.worktree, "152", self.c_sha, runner=no_rollup))
+
+    def test_verify_created_pr_variations(self) -> None:
+        ok1, res1 = _verify_created_pr(1, "Command failed", self.c_sha)
+        self.assertFalse(ok1)
+        self.assertEqual(res1.get("reason_code"), "CREATED_PR_VIEW_FAILED")
+
+        ok2, res2 = _verify_created_pr(0, "not-json", self.c_sha)
+        self.assertFalse(ok2)
+        self.assertEqual(res2.get("reason_code"), "PR_HEAD_MISMATCH")
+
+        ok3, res3 = _verify_created_pr(0, json.dumps(["list", "not", "dict"]), self.c_sha)
+        self.assertFalse(ok3)
+        self.assertEqual(res3.get("reason_code"), "PR_HEAD_MISMATCH")
+
+        ok4, res4 = _verify_created_pr(0, json.dumps({"state": "CLOSED", "headRefOid": self.c_sha}), self.c_sha)
+        self.assertFalse(ok4)
+        self.assertEqual(res4.get("reason_code"), "PR_HEAD_MISMATCH")
+
+        ok5, res5 = _verify_created_pr(0, json.dumps({"state": "OPEN", "headRefOid": "9" * 40}), self.c_sha)
+        self.assertFalse(ok5)
+        self.assertEqual(res5.get("reason_code"), "PR_HEAD_MISMATCH")
+
+    def test_ci_check_passing_and_rollup(self) -> None:
+        # Non-dict
+        self.assertFalse(is_ci_check_passing("not-dict", self.c_sha))
+
+        # Head sha mismatch
+        self.assertFalse(is_ci_check_passing({"head_sha": "9" * 40}, self.c_sha))
+
+        # Conclusion failure
+        self.assertFalse(is_ci_check_passing({"head_sha": self.c_sha, "conclusion": "FAILURE"}, self.c_sha))
+        self.assertFalse(is_ci_check_passing({"head_sha": self.c_sha, "conclusion": "TIMED_OUT"}, self.c_sha))
+
+        # State error
+        self.assertFalse(is_ci_check_passing({"head_sha": self.c_sha, "state": "ERROR"}, self.c_sha))
+
+        # Success state
+        self.assertTrue(is_ci_check_passing({"head_sha": self.c_sha, "state": "SUCCESS"}, self.c_sha))
+        self.assertTrue(
+            is_ci_check_passing({"head_sha": self.c_sha, "status": "COMPLETED", "conclusion": "SUCCESS"}, self.c_sha)
+        )
+        self.assertTrue(
+            is_ci_check_passing({"head_sha": self.c_sha, "status": "COMPLETED", "conclusion": "SKIPPED"}, self.c_sha)
+        )
+
+        # verify_live_status_rollup
+        self.assertEqual(verify_live_status_rollup([], self.c_sha), (False, "MISSING_EXACT_HEAD_CI"))
+        self.assertEqual(verify_live_status_rollup(["not-dict"], self.c_sha), (False, "CI_CHECK_FAILED"))
+        self.assertEqual(verify_live_status_rollup([{"state": "ERROR"}], self.c_sha), (False, "CI_CHECK_FAILED"))
+        self.assertEqual(
+            verify_live_status_rollup([{"state": "SUCCESS", "head_sha": self.c_sha}], self.c_sha), (True, "")
+        )
+
+    def test_post_merge_verify_variations(self) -> None:
+        # View command failed
+        def view_fail(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "view failed"
+
+        ok1, err1, _ = _post_merge_verify(self.worktree, "152", self.c_sha, runner=view_fail)
+        self.assertFalse(ok1)
+        self.assertEqual(err1, "MERGE_NOT_COMPLETED")
+
+        # Post-info not merged (e.g. queued)
+        def queued_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha})
+
+        ok2, err2, _ = _post_merge_verify(self.worktree, "152", self.c_sha, runner=queued_runner)
+        self.assertFalse(ok2)
+        self.assertEqual(err2, "MERGE_NOT_COMPLETED")
+
+        # Head OID mismatch post-merge
+        def head_mismatch_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps(
+                {
+                    "state": "MERGED",
+                    "mergedAt": "2026-11-03T10:00:00Z",
+                    "mergeCommit": {"oid": "c" * 40},
+                    "headRefOid": "9" * 40,
+                }
+            )
+
+        ok3, err3, _ = _post_merge_verify(self.worktree, "152", self.c_sha, runner=head_mismatch_runner)
+        self.assertFalse(ok3)
+        self.assertEqual(err3, "CANDIDATE_REVISION_MISMATCH")
+
+    def test_reconcile_and_complete_spec_task_variations(self) -> None:
+        # Missing spec path
+        ok1, res1 = reconcile_and_complete_spec_task(None, "TASK_01")
+        self.assertFalse(ok1)
+
+        # Nonexistent spec path
+        ok2, res2 = reconcile_and_complete_spec_task("/tmp/nonexistent-spec-file.md", "TASK_01")
+        self.assertFalse(ok2)
+
+        # Task not found in spec
+        spec = self.worktree / "SPEC.md"
+        spec.write_text("- [ ] OTHER_TASK: Desc\n", encoding="utf-8")
+        ok3, res3 = reconcile_and_complete_spec_task(spec, "TASK_01")
+        self.assertFalse(ok3)
+
+        # Task already completed
+        spec.write_text("- [x] TASK_01: Desc\n", encoding="utf-8")
+        ok4, res4 = reconcile_and_complete_spec_task(spec, "TASK_01")
+        self.assertTrue(ok4)
+        self.assertTrue(res4.get("reconciled_existing_effect"))
+
+    def test_get_commit_modified_paths(self) -> None:
+        # Mock runner with diff-tree output
+        def diff_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "file1.py\nfile2.py\n"
+
+        paths = get_commit_modified_paths(self.worktree, self.c_sha, runner=diff_runner)
+        self.assertEqual(paths, ["file1.py", "file2.py"])
+
+        # Diff failure
+        def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "error"
+
+        paths_f = get_commit_modified_paths(self.worktree, self.c_sha, runner=fail_runner)
+        self.assertEqual(paths_f, [])
+
+    def test_reconcile_and_publish_pr_failures(self) -> None:
+        # PR create fails
+        def pr_create_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "pr view" in cmd_str:
+                return 1, "no PR found"
+            if "ls-remote" in cmd_str:
+                return 0, f"{self.c_sha}\trefs/heads/feat/branch\n"
+            if "pr create" in cmd_str:
+                return 1, "Failed to create PR: GraphQL error"
+            return 0, ""
+
+        ok, res = reconcile_and_publish_pr(
+            self.worktree, "feat/branch", "main", self.c_sha, "Title", "Body", runner=pr_create_fail_runner
+        )
+        self.assertFalse(ok)
+        self.assertIn("GraphQL error", res.get("error", ""))
+
+        # Created PR verification fails
+        def pr_view_after_create_fail(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "pr view" in cmd_str:
+                return 1, "not found"
+            if "ls-remote" in cmd_str:
+                return 0, f"{self.c_sha}\trefs/heads/feat/branch\n"
+            if "pr create" in cmd_str:
+                return 0, "https://github.com/selamy-labs/agent-skills/pull/152"
+            return 0, ""
+
+        ok2, res2 = reconcile_and_publish_pr(
+            self.worktree, "feat/branch", "main", self.c_sha, "Title", "Body", runner=pr_view_after_create_fail
+        )
+        self.assertFalse(ok2)
+        self.assertEqual(res2.get("reason_code"), "CREATED_PR_VIEW_FAILED")
+
+    def test_reconcile_and_merge_pr_failure_branches(self) -> None:  # noqa: C901
+        # Disallowed merge actor
+        def disallowed_actor_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "api user" in " ".join(cmd):
+                return 0, json.dumps({"login": "attacker", "type": "User"})
+            return 0, ""
+
+        ok1, res1 = reconcile_and_merge_pr(
+            self.worktree, "152", self.c_sha, merge_identity="selamy-labs-bot", runner=disallowed_actor_runner
+        )
+        self.assertFalse(ok1)
+        self.assertEqual(res1.get("reason_code"), "DISALLOWED_MERGE_IDENTITY")
+
+        # PR view failure
+        def pr_view_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "api user" in " ".join(cmd):
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr view" in " ".join(cmd):
+                return 1, "PR not found"
+            return 0, ""
+
+        ok2, res2 = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=pr_view_fail_runner)
+        self.assertFalse(ok2)
+        self.assertEqual(res2.get("reason_code"), "PR_VIEW_FAILED")
+
+        # Merge CI missing statusCheckRollup list
+        def no_rollup_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "api user" in " ".join(cmd):
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr view" in " ".join(cmd):
+                return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha, "statusCheckRollup": None})
+            return 0, ""
+
+        ok3, res3 = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=no_rollup_runner)
+        self.assertFalse(ok3)
+        self.assertEqual(res3.get("reason_code"), "MISSING_EXACT_HEAD_CI")
+
+        # Already merged PR reconciliation
+        def already_merged_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "api user" in " ".join(cmd):
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr view" in " ".join(cmd):
+                return 0, json.dumps(
+                    {
+                        "state": "MERGED",
+                        "headRefOid": self.c_sha,
+                        "mergedAt": "2026-11-03T10:00:00Z",
+                        "mergeCommit": {"oid": "d" * 40},
+                        "statusCheckRollup": [
+                            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
+                        ],
+                    }
+                )
+            return 0, ""
+
+        ok4, res4 = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=already_merged_runner)
+        self.assertTrue(ok4)
+        self.assertTrue(res4.get("reconciled_existing_effect"))
+        self.assertEqual(res4.get("merge_commit_sha"), "d" * 40)
+
+        # gh pr merge fails
+        def pr_merge_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "api user" in cmd_str:
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr view" in cmd_str:
+                return 0, json.dumps(
+                    {
+                        "state": "OPEN",
+                        "headRefOid": self.c_sha,
+                        "statusCheckRollup": [
+                            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
+                        ],
+                    }
+                )
+            if "pr merge" in cmd_str:
+                return 1, "Merge conflict on server"
+            return 0, ""
+
+        ok5, res5 = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=pr_merge_fail_runner)
+        self.assertFalse(ok5)
+        self.assertEqual(res5.get("reason_code"), "MERGE_FAILED")
+
+        # Post-merge verify fails (e.g. queued PR)
+        def post_merge_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "api user" in cmd_str:
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr merge" in cmd_str:
+                return 0, "Merge queued"
+            if "pr view" in cmd_str:
+                return 0, json.dumps(
+                    {
+                        "state": "OPEN",
+                        "headRefOid": self.c_sha,
+                        "statusCheckRollup": [
+                            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
+                        ],
+                    }
+                )
+            return 0, ""
+
+        ok6, res6 = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=post_merge_fail_runner)
+        self.assertFalse(ok6)
+        self.assertEqual(res6.get("reason_code"), "MERGE_NOT_COMPLETED")
 
 
 if __name__ == "__main__":

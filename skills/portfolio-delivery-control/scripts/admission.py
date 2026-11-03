@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from providers import (
+    get_commit_modified_paths,
     inspect_git_commit,
     is_approved_identity,
     is_hex_40,
     iso_timestamp,
+    sha256_file,
 )
 
 DEFAULT_ALLOWED_ROOTS = ["/tmp", "/home/pselamy", "/workspace"]
@@ -51,7 +53,7 @@ def validate_worktree(
     roots = allowed_roots or DEFAULT_ALLOWED_ROOTS
     try:
         wt_path = Path(worktree).resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return False, "INVALID_WORKTREE_PATH", Path(worktree)
     if not wt_path.exists() or not wt_path.is_dir():
         return False, "WORKTREE_NOT_FOUND", wt_path
@@ -90,7 +92,7 @@ def inspect_modified_paths(
     allowed_prefixes: list[str],
 ) -> tuple[bool, str]:
     if not modified_paths:
-        return True, ""
+        return False, "EMPTY_MODIFIED_PATHS"
     for p in modified_paths:
         if not _is_path_allowed(p, allowed_prefixes):
             return False, "PATH_SCOPE_ESCAPE"
@@ -302,13 +304,48 @@ def _verify_git_commit_and_tree(
     tree_sha: str,
     runner: Callable[..., Any] | None = None,
 ) -> tuple[bool, str]:
-    git_ok, author, _, g_tree, _ = inspect_git_commit(wt_path, commit_sha, runner=runner)
+    git_ok, author, committer, g_tree, _ = inspect_git_commit(wt_path, commit_sha, runner=runner)
     if not git_ok:
         return False, "GIT_COMMIT_NOT_FOUND"
     if g_tree != tree_sha:
         return False, "TREE_SHA_MISMATCH"
     if not is_approved_identity(author):
         return False, "DISALLOWED_AUTHOR_IDENTITY"
+    if not is_approved_identity(committer):
+        return False, "DISALLOWED_COMMITTER_IDENTITY"
+    return True, ""
+
+
+def _verify_single_artifact(path_val: Path | str | None, hash_val: str | None) -> tuple[bool, str]:
+    if hash_val and not path_val:
+        return False, "ARTIFACT_NOT_FOUND"
+    if not path_val:
+        return True, ""
+    p = Path(path_val)
+    if not p.is_file():
+        return False, "ARTIFACT_NOT_FOUND"
+    if hash_val and sha256_file(p).lower() != hash_val.lower():
+        return False, "ARTIFACT_HASH_MISMATCH"
+    return True, ""
+
+
+def _verify_impl_artifacts(
+    patch_path: Path | str | None,
+    patch_sha256: str | None,
+    bundle_path: Path | str | None,
+    bundle_sha256: str | None,
+    author_receipt_path: Path | str | None,
+    author_receipt_sha256: str | None,
+) -> tuple[bool, str]:
+    artifacts = [
+        (patch_path, patch_sha256),
+        (bundle_path, bundle_sha256),
+        (author_receipt_path, author_receipt_sha256),
+    ]
+    for path_val, hash_val in artifacts:
+        ok, err = _verify_single_artifact(path_val, hash_val)
+        if not ok:
+            return False, err
     return True, ""
 
 
@@ -347,22 +384,31 @@ def _validate_impl_preconditions(
     tree_sha: str,
     modified_paths: list[str] | None,
     gate_results: dict[str, Any] | None,
+    now_dt: datetime.datetime,
     runner: Callable[..., Any] | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, list[str]]:
     claim = wi.get("claim")
     if not claim or claim.get("claim_token") != claim_token:
-        return False, "INVALID_CLAIM_TOKEN"
+        return False, "INVALID_CLAIM_TOKEN", []
+    if not _is_claim_active(claim, now_dt):
+        return False, "CLAIM_EXPIRED", []
     if not (is_hex_40(commit_sha) and is_hex_40(tree_sha)):
-        return False, "INVALID_REVISION_SHA"
-    git_ok, git_err = _verify_git_commit_and_tree(Path(claim["worktree"]), commit_sha, tree_sha, runner=runner)
+        return False, "INVALID_REVISION_SHA", []
+    wt_path = Path(claim["worktree"])
+    git_ok, git_err = _verify_git_commit_and_tree(wt_path, commit_sha, tree_sha, runner=runner)
     if not git_ok:
-        return False, git_err
-    p_ok, p_err = inspect_modified_paths(modified_paths, [PROTECTED_SKILL_REL, "tests", "scripts"])
+        return False, git_err, []
+    paths = modified_paths
+    if not paths:
+        paths = get_commit_modified_paths(wt_path, commit_sha, runner=runner)
+    if not paths:
+        return False, "EMPTY_MODIFIED_PATHS", []
+    p_ok, p_err = inspect_modified_paths(paths, [PROTECTED_SKILL_REL, "tests", "scripts"])
     if not p_ok:
-        return False, p_err
+        return False, p_err, []
     if not verify_mandatory_gates(gate_results):
-        return False, "MANDATORY_GATES_FAILED"
-    return True, ""
+        return False, "MANDATORY_GATES_FAILED", []
+    return True, "", paths
 
 
 def record_implementation(
@@ -383,6 +429,7 @@ def record_implementation(
     runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     iso_now = now or iso_timestamp()
+    now_dt = datetime.datetime.fromisoformat(iso_now)
     cdir = Path(control_dir)
     status_file = cdir / "coordinator-status.json"
     doc: dict[str, Any] = {}
@@ -397,8 +444,14 @@ def record_implementation(
         return {"status": "refused", "reason_code": "WORK_NOT_ADMITTED", "observed_at": iso_now}
     wi = work_items[work_id]
 
-    val_ok, val_err = _validate_impl_preconditions(
-        wi, claim_token, commit_sha, tree_sha, modified_paths, gate_results, runner=runner
+    art_ok, art_err = _verify_impl_artifacts(
+        patch_path, patch_sha256, bundle_path, bundle_sha256, author_receipt_path, author_receipt_sha256
+    )
+    if not art_ok:
+        return {"status": "refused", "reason_code": art_err, "observed_at": iso_now}
+
+    val_ok, val_err, resolved_paths = _validate_impl_preconditions(
+        wi, claim_token, commit_sha, tree_sha, modified_paths, gate_results, now_dt, runner=runner
     )
     if not val_ok:
         return {"status": "refused", "reason_code": val_err, "observed_at": iso_now}
@@ -408,7 +461,7 @@ def record_implementation(
         commit_sha,
         tree_sha,
         gate_results,
-        modified_paths,
+        resolved_paths,
         patch_path,
         patch_sha256,
         bundle_path,

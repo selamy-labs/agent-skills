@@ -391,7 +391,7 @@ def reconcile_and_publish_pr(
     }
 
 
-def _is_ci_check_passing(c: Any, cand_sha: str) -> bool:
+def is_ci_check_passing(c: Any, cand_sha: str) -> bool:
     if not isinstance(c, dict):
         return False
     c_sha = str(c.get("head_sha") or c.get("commit_sha") or c.get("sha") or "").strip()
@@ -405,6 +405,21 @@ def _is_ci_check_passing(c: Any, cand_sha: str) -> bool:
     if state in {"FAILURE", "ERROR"}:
         return False
     return (status == "COMPLETED" and concl in {"SUCCESS", "NEUTRAL", "SKIPPED"}) or state == "SUCCESS"
+
+
+_is_ci_check_passing = is_ci_check_passing
+
+
+def get_commit_modified_paths(
+    worktree: Path,
+    commit_sha: str,
+    runner: Callable[..., Any] | None = None,
+) -> list[str]:
+    cmd = ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit_sha]
+    code, out = _run_cmd(cmd, worktree, runner)
+    if code != 0 or not out.strip():
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 def verify_live_status_rollup(rollup: list[dict[str, Any]], commit_sha: str) -> tuple[bool, str]:

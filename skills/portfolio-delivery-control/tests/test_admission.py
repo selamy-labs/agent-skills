@@ -2,11 +2,17 @@
 """Tests for admission and claim logic in portfolio delivery control."""
 
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
-from admission import (
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from admission import (  # noqa: E402
     admit_work,
     claim_work,
     invalidate_prior_reviews_if_revision_changed,
@@ -212,7 +218,9 @@ class TestAdmission(unittest.TestCase):
         def mock_runner(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
             if "log" in cmd:
                 author_log = (
-                    f"claude-cir <claude-cir@selamy.dev>\ncommitter <committer@selamy.dev>\n{self.t_sha}\nparent\n"
+                    "claude-cir <claude-cir@selamy.dev>\n"
+                    "selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"{self.t_sha}\nparent\n"
                 )
                 return 0, author_log
             return 0, ""
@@ -367,6 +375,333 @@ class TestAdmission(unittest.TestCase):
             tree_sha=self.t_sha,
         )
         self.assertEqual(res_i.get("reason_code"), "WORK_NOT_ADMITTED")
+
+    def test_record_implementation_artifact_verification(self) -> None:
+        # Set up admitted and claimed work item
+        admit_work(
+            control_dir=str(self.state_dir),
+            repo="selamy-labs/agent-skills",
+            issue_num=152,
+            spec_path=str(self.spec_file),
+            task_id="TASK_01",
+            allowed_roots=[str(self.temp_dir)],
+        )
+        c_res = claim_work(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            owner="selamy-labs-bot",
+            session_id="sess-impl",
+            worktree=str(self.worktree),
+        )
+        claim_token = c_res["claim_token"]
+
+        # Missing path when hash provided
+        res = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            patch_path=None,
+            patch_sha256="abc" * 10,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "ARTIFACT_NOT_FOUND")
+
+        # Nonexistent file path
+        res = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            patch_path="/tmp/nonexistent-patch-file.patch",
+            patch_sha256="abc" * 10,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "ARTIFACT_NOT_FOUND")
+
+        # File exists but hash mismatch
+        dummy_patch = Path(self.temp_dir) / "test.patch"
+        dummy_patch.write_text("patch content\n")
+        res = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            patch_path=dummy_patch,
+            patch_sha256="wronghash" + "0" * 55,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "ARTIFACT_HASH_MISMATCH")
+
+    def test_record_implementation_git_and_path_guards(self) -> None:
+        admit_work(
+            control_dir=str(self.state_dir),
+            repo="selamy-labs/agent-skills",
+            issue_num=152,
+            spec_path=str(self.spec_file),
+            task_id="TASK_01",
+            allowed_roots=[str(self.temp_dir)],
+        )
+        c_res = claim_work(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            owner="selamy-labs-bot",
+            session_id="sess-impl",
+            worktree=str(self.worktree),
+        )
+        claim_token = c_res["claim_token"]
+
+        # Invalid revision SHA format
+        res = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha="not-a-sha",
+            tree_sha=self.t_sha,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "INVALID_REVISION_SHA")
+
+        # Tree SHA mismatch
+        def mock_runner_tree_mismatch(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "log" in " ".join(cmd):
+                return (
+                    0,
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"{'3' * 40}\n",
+                )
+            return 0, ""
+
+        res = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            runner=mock_runner_tree_mismatch,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "TREE_SHA_MISMATCH")
+
+        # Empty modified paths (both argument and git diff-tree empty)
+        def mock_runner_empty_diff(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "log" in " ".join(cmd):
+                return (
+                    0,
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"{self.t_sha}\n",
+                )
+            if "diff-tree" in " ".join(cmd):
+                return 0, ""
+            return 0, ""
+
+        res = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            modified_paths=[],
+            runner=mock_runner_empty_diff,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "EMPTY_MODIFIED_PATHS")
+
+        # Path scope escape (e.g., ../outside or /etc/passwd)
+        def mock_runner_good_git(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "log" in " ".join(cmd):
+                return (
+                    0,
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"{self.t_sha}\n",
+                )
+            return 0, ""
+
+        res = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            modified_paths=["../outside/file.py"],
+            runner=mock_runner_good_git,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "PATH_SCOPE_ESCAPE")
+
+    def test_claim_conflict_and_corrupt_status_handling(self) -> None:
+        # Corrupt status file
+        status_file = self.state_dir / "coordinator-status.json"
+        status_file.write_text("{bad json", encoding="utf-8")
+
+        res_c = claim_work(
+            control_dir=str(self.state_dir),
+            work_id="some-work-id",
+            owner="lane",
+            session_id="sess",
+            worktree=str(self.worktree),
+        )
+        self.assertEqual(res_c.get("reason_code"), "WORK_NOT_ADMITTED")
+
+        res_i = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="some-work-id",
+            claim_token="tok",
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+        )
+        self.assertEqual(res_i.get("reason_code"), "WORK_NOT_ADMITTED")
+
+    def test_record_implementation_claim_expired_and_disallowed_committer(self) -> None:
+        admit_work(
+            control_dir=str(self.state_dir),
+            repo="selamy-labs/agent-skills",
+            issue_num=152,
+            spec_path=str(self.spec_file),
+            task_id="TASK_01",
+            allowed_roots=[str(self.temp_dir)],
+        )
+        c_res = claim_work(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            owner="selamy-labs-bot",
+            session_id="sess-impl",
+            worktree=str(self.worktree),
+            now="2026-11-03T10:00:00Z",
+        )
+        claim_token = c_res["claim_token"]
+
+        # Expired claim
+        res_exp = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            now="2026-11-03T12:00:00Z",  # 2 hours later, TTL was 1800s (30m)
+        )
+        self.assertEqual(res_exp.get("status"), "refused")
+        self.assertEqual(res_exp.get("reason_code"), "CLAIM_EXPIRED")
+
+        # Invalid claim token
+        res_tok = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token="wrong-token",
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            now="2026-11-03T10:05:00Z",
+        )
+        self.assertEqual(res_tok.get("status"), "refused")
+        self.assertEqual(res_tok.get("reason_code"), "INVALID_CLAIM_TOKEN")
+
+        # Disallowed committer identity
+        def mock_runner_bad_committer(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "log" in " ".join(cmd):
+                return (
+                    0,
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"unapproved-committer <bad@example.com>\n"
+                    f"{self.t_sha}\n",
+                )
+            return 0, ""
+
+        res_com = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            now="2026-11-03T10:05:00Z",
+            runner=mock_runner_bad_committer,
+        )
+        self.assertEqual(res_com.get("status"), "refused")
+        self.assertEqual(res_com.get("reason_code"), "DISALLOWED_COMMITTER_IDENTITY")
+
+        # Mandatory gates failed
+        def mock_runner_good(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "log" in " ".join(cmd):
+                return (
+                    0,
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"selamy-labs-bot <346154065+selamy-labs-bot@users.noreply.github.com>\n"
+                    f"{self.t_sha}\n",
+                )
+            return 0, ""
+
+        res_gate = record_implementation(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            claim_token=claim_token,
+            commit_sha=self.c_sha,
+            tree_sha=self.t_sha,
+            modified_paths=["skills/portfolio-delivery-control/scripts/workflow.py"],
+            gate_results={"pytest": 1, "coverage": 50.0},
+            now="2026-11-03T10:05:00Z",
+            runner=mock_runner_good,
+        )
+        self.assertEqual(res_gate.get("status"), "refused")
+        self.assertEqual(res_gate.get("reason_code"), "MANDATORY_GATES_FAILED")
+
+    def test_admission_edge_cases_and_helpers(self) -> None:
+        import datetime
+
+        from admission import _is_claim_active, _is_coverage_passing, _is_gate_passing, _is_path_allowed
+
+        # _is_path_allowed
+        self.assertFalse(_is_path_allowed("/absolute/path", ["skills"]))
+        self.assertFalse(_is_path_allowed("../relative/path", ["skills"]))
+
+        # _is_gate_passing
+        self.assertTrue(_is_gate_passing({"exit_code": 0, "passed": True}))
+        self.assertFalse(_is_gate_passing({"exit_code": 1}))
+        self.assertFalse(_is_gate_passing({"exit_code": 0, "passed": False}))
+
+        # _is_coverage_passing
+        self.assertTrue(_is_coverage_passing({"percent": 95.0}))
+        self.assertFalse(_is_coverage_passing("not-a-number"))
+
+        # _is_claim_active
+        now_dt = datetime.datetime.now(datetime.UTC)
+        self.assertFalse(_is_claim_active({}, now_dt))
+        self.assertFalse(_is_claim_active({"expires_at": "invalid-date"}, now_dt))
+
+        # Idempotent re-claim by same owner & session
+        admit_work(
+            control_dir=str(self.state_dir),
+            repo="selamy-labs/agent-skills",
+            issue_num=152,
+            spec_path=str(self.spec_file),
+            task_id="TASK_01",
+            allowed_roots=[str(self.temp_dir)],
+        )
+        c1 = claim_work(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            owner="selamy-labs-bot",
+            session_id="sess-impl",
+            worktree=str(self.worktree),
+        )
+        self.assertEqual(c1.get("status"), "claimed")
+        c2 = claim_work(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-TASK_01",
+            owner="selamy-labs-bot",
+            session_id="sess-impl",
+            worktree=str(self.worktree),
+        )
+        self.assertEqual(c2.get("status"), "claimed")
+
+        # Invalid worktree path raising OSError
+        ok_wt, err_wt, _ = validate_worktree("\0badpath")
+        self.assertFalse(ok_wt)
+        self.assertEqual(err_wt, "INVALID_WORKTREE_PATH")
 
 
 if __name__ == "__main__":

@@ -6,17 +6,22 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
-from receipts import (
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from receipts import (  # noqa: E402
     record_dispatch,
     record_review,
     validate_review_receipt,
 )
-from workflow import load_coordinator_status, save_coordinator_status
+from workflow import load_coordinator_status, save_coordinator_status  # noqa: E402
 
 
 class TestReviewReceipts(unittest.TestCase):
@@ -338,6 +343,248 @@ class TestReviewReceipts(unittest.TestCase):
         ok, err, _ = validate_review_receipt(bad_findings)
         self.assertFalse(ok)
         self.assertEqual(err, "INVALID_FINDINGS_CONTAINER")
+
+        # Non-dict receipt
+        ok_nd, err_nd, _ = validate_review_receipt(["not", "dict"])
+        self.assertFalse(ok_nd)
+        self.assertEqual(err_nd, "REPORT_INVALID")
+
+        # Invalid dispatch_id (empty or non-str)
+        bad_disp = self._make_valid_report_data(dispatch_id="")
+        ok, err, _ = validate_review_receipt(bad_disp)
+        self.assertFalse(ok)
+        self.assertEqual(err, "INVALID_DISPATCH_ID")
+
+        # Invalid reviewer_session_id
+        bad_sess = self._make_valid_report_data(session_id="")
+        ok, err, _ = validate_review_receipt(bad_sess)
+        self.assertFalse(ok)
+        self.assertEqual(err, "INVALID_REVIEWER_SESSION_ID")
+
+        # Invalid family
+        bad_fam = self._make_valid_report_data(family="unknown_family")
+        ok, err, _ = validate_review_receipt(bad_fam)
+        self.assertFalse(ok)
+        self.assertEqual(err, "INVALID_FAMILY")
+
+        # Invalid revision sha (not 40 hex)
+        bad_sha = self._make_valid_report_data(commit_sha="not40hex")
+        ok, err, _ = validate_review_receipt(bad_sha)
+        self.assertFalse(ok)
+        self.assertEqual(err, "INVALID_REVISION_SHA")
+
+        # Finding item not dict
+        bad_item1 = self._make_valid_report_data(findings=[123])  # type: ignore
+        ok, err, _ = validate_review_receipt(bad_item1)
+        self.assertFalse(ok)
+        self.assertEqual(err, "FINDING_SCHEMA_VIOLATION")
+
+        # Finding item missing required keys or non-string
+        bad_item2 = self._make_valid_report_data(findings=[{"id": 1, "severity": "HIGH", "file": "f.py"}])  # type: ignore
+        ok, err, _ = validate_review_receipt(bad_item2)
+        self.assertFalse(ok)
+        self.assertEqual(err, "FINDING_SCHEMA_VIOLATION")
+
+    def test_verify_dispatch_binding_checks(self) -> None:
+        from receipts import verify_dispatch_binding
+
+        ledger = {
+            "disp-1": {
+                "dispatch_id": "disp-1",
+                "work_id": self.work_id,
+                "family": "opus",
+                "reviewer_session_id": "sess-opus",
+            },
+            "disp-not-dict": "invalid",
+        }
+
+        # Unbound dispatch ID
+        ok, err = verify_dispatch_binding({}, "disp-1", self.work_id, "opus", "sess-opus")
+        self.assertFalse(ok)
+        self.assertEqual(err, "UNBOUND_DISPATCH_ID")
+
+        # Entry not dict
+        ok, err = verify_dispatch_binding(ledger, "disp-not-dict", self.work_id, "opus", "sess-opus")
+        self.assertFalse(ok)
+        self.assertEqual(err, "UNBOUND_DISPATCH_ID")
+
+        # Work ID mismatch
+        ok, err = verify_dispatch_binding(ledger, "disp-1", "other-work-id", "opus", "sess-opus")
+        self.assertFalse(ok)
+        self.assertEqual(err, "DISPATCH_WORK_ID_MISMATCH")
+
+        # Family mismatch
+        ok, err = verify_dispatch_binding(ledger, "disp-1", self.work_id, "argon", "sess-opus")
+        self.assertFalse(ok)
+        self.assertEqual(err, "DISPATCH_FAMILY_MISMATCH")
+
+        # Session mismatch
+        ok, err = verify_dispatch_binding(ledger, "disp-1", self.work_id, "opus", "other-session")
+        self.assertFalse(ok)
+        self.assertEqual(err, "DISPATCH_SESSION_MISMATCH")
+
+        # Valid binding
+        ok, err = verify_dispatch_binding(ledger, "disp-1", self.work_id, "opus", "sess-opus")
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+
+    def test_record_dispatch_role_and_uniqueness_guards(self) -> None:
+        # Session reused across roles (implementer claim session is sess-implementer)
+        res_reuse = record_dispatch(self.control_dir, self.work_id, "disp-dup-role", "opus", "sess-implementer")
+        self.assertEqual(res_reuse.get("status"), "refused")
+        self.assertEqual(res_reuse.get("reason_code"), "SESSION_REUSED_ACROSS_ROLES")
+
+        # First dispatch succeeds
+        res1 = record_dispatch(self.control_dir, self.work_id, "disp-unique-1", "opus", "sess-unique-1")
+        self.assertEqual(res1.get("status"), "dispatched")
+
+        # Duplicate dispatch_id
+        res_dup_id = record_dispatch(self.control_dir, self.work_id, "disp-unique-1", "argon", "sess-unique-2")
+        self.assertEqual(res_dup_id.get("status"), "refused")
+        self.assertEqual(res_dup_id.get("reason_code"), "DUPLICATE_DISPATCH_ID")
+
+        # Duplicate reviewer_session_id for the same work item
+        res_dup_sess = record_dispatch(self.control_dir, self.work_id, "disp-unique-2", "argon", "sess-unique-1")
+        self.assertEqual(res_dup_sess.get("status"), "refused")
+        self.assertEqual(res_dup_sess.get("reason_code"), "DUPLICATE_REVIEWER_SESSION")
+
+    def test_check_qualification_edge_cases(self) -> None:
+        from receipts import check_qualification
+
+        reviews = [
+            {
+                "family": "opus",
+                "reviewer_session_id": "s1",
+                "dispatch_id": "d1",
+                "verdict": "SHIP",
+                "commit_sha": self.c_sha,
+                "tree_sha": self.t_sha,
+            },
+            {
+                "family": "argon",
+                "reviewer_session_id": "s2",
+                "dispatch_id": "d2",
+                "verdict": "SHIP",
+                "commit_sha": self.c_sha,
+                "tree_sha": self.t_sha,
+            },
+            {
+                "family": "sol",
+                "reviewer_session_id": "s3",
+                "dispatch_id": "d3",
+                "verdict": "SHIP",
+                "commit_sha": self.c_sha,
+                "tree_sha": self.t_sha,
+            },
+        ]
+        # Without dispatch_ledger (dispatch_ledger=None)
+        self.assertTrue(check_qualification(reviews, self.c_sha, self.t_sha, dispatch_ledger=None))
+
+        # Ledger with non-dict entry
+        bad_ledger1 = {"d1": "not-a-dict", "d2": {}, "d3": {}}
+        self.assertFalse(check_qualification(reviews, self.c_sha, self.t_sha, dispatch_ledger=bad_ledger1))
+
+        # Ledger with family/session mismatch
+        bad_ledger2 = {
+            "d1": {"family": "sol", "reviewer_session_id": "s1", "work_id": self.work_id},
+            "d2": {"family": "argon", "reviewer_session_id": "s2", "work_id": self.work_id},
+            "d3": {"family": "sol", "reviewer_session_id": "s3", "work_id": self.work_id},
+        }
+        self.assertFalse(check_qualification(reviews, self.c_sha, self.t_sha, dispatch_ledger=bad_ledger2))
+
+        # Ledger with work_id mismatch
+        bad_ledger3 = {
+            "d1": {"family": "opus", "reviewer_session_id": "s1", "work_id": "other-work"},
+            "d2": {"family": "argon", "reviewer_session_id": "s2", "work_id": self.work_id},
+            "d3": {"family": "sol", "reviewer_session_id": "s3", "work_id": self.work_id},
+        }
+        self.assertFalse(
+            check_qualification(reviews, self.c_sha, self.t_sha, dispatch_ledger=bad_ledger3, work_id=self.work_id)
+        )
+
+    def test_record_review_more_rejection_branches(self) -> None:
+        # Report file does not exist
+        res_nonexist = record_review(
+            self.control_dir,
+            self.work_id,
+            "rev-1",
+            "claude-opus-5-5",
+            "opus",
+            "sess-1",
+            "SHIP",
+            "/tmp/nonexistent-rep-file.json",
+            "0" * 64,
+        )
+        self.assertEqual(res_nonexist.get("reason_code"), "ARTIFACT_NOT_FOUND")
+
+        # Report file is invalid JSON
+        bad_json_file = self.control_dir / "bad_report.json"
+        bad_json_file.write_text("{not valid json", encoding="utf-8")
+        h_bad = hashlib.sha256(bad_json_file.read_bytes()).hexdigest()
+        res_bad_json = record_review(
+            self.control_dir,
+            self.work_id,
+            "rev-1",
+            "claude-opus-5-5",
+            "opus",
+            "sess-1",
+            "SHIP",
+            bad_json_file,
+            h_bad,
+        )
+        self.assertEqual(res_bad_json.get("reason_code"), "REPORT_INVALID")
+
+        # Report file is a list, not a dict
+        bad_list_file = self.control_dir / "list_report.json"
+        bad_list_file.write_text("[1, 2, 3]", encoding="utf-8")
+        h_list = hashlib.sha256(bad_list_file.read_bytes()).hexdigest()
+        res_bad_list = record_review(
+            self.control_dir,
+            self.work_id,
+            "rev-1",
+            "claude-opus-5-5",
+            "opus",
+            "sess-1",
+            "SHIP",
+            bad_list_file,
+            h_list,
+        )
+        self.assertEqual(res_bad_list.get("reason_code"), "REPORT_INVALID")
+
+        # Report identity mismatch (model or family)
+        record_dispatch(self.control_dir, self.work_id, "disp-mismatch", "opus", "sess-mismatch")
+        data = self._make_valid_report_data(session_id="sess-mismatch", dispatch_id="disp-mismatch")
+        p, h = self._write_report(data)
+
+        # Call with different model
+        res_id_mismatch = record_review(
+            self.control_dir, self.work_id, "rev-1", "different-model", "opus", "sess-mismatch", "SHIP", p, h
+        )
+        self.assertEqual(res_id_mismatch.get("reason_code"), "REPORT_IDENTITY_MISMATCH")
+
+        # Call with different verdict
+        res_ver_mismatch = record_review(
+            self.control_dir, self.work_id, "rev-1", "claude-opus-5-5", "opus", "sess-mismatch", "REVISE", p, h
+        )
+        self.assertEqual(res_ver_mismatch.get("reason_code"), "REPORT_VERDICT_MISMATCH")
+
+        # Call with different session
+        res_sess_mismatch = record_review(
+            self.control_dir, self.work_id, "rev-1", "claude-opus-5-5", "opus", "other-sess", "SHIP", p, h
+        )
+        self.assertEqual(res_sess_mismatch.get("reason_code"), "REVIEWER_SESSION_MISMATCH")
+
+        # Work not admitted
+        res_no_work = record_review(
+            self.control_dir, "unadmitted-work-id", "rev-1", "claude-opus-5-5", "opus", "sess-mismatch", "SHIP", p, h
+        )
+        self.assertEqual(res_no_work.get("reason_code"), "WORK_NOT_ADMITTED")
+
+        # Self review forbidden (reviewer_id == claim owner or model contains "flash")
+        res_self_owner = record_review(
+            self.control_dir, self.work_id, "selamy-labs-bot", "claude-opus-5-5", "opus", "sess-mismatch", "SHIP", p, h
+        )
+        self.assertEqual(res_self_owner.get("reason_code"), "SELF_REVIEW_FORBIDDEN")
 
 
 if __name__ == "__main__":

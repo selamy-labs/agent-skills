@@ -13,6 +13,7 @@ from admission import verify_mandatory_gates
 from providers import (
     ALLOWED_MERGE_IDENTITIES,
     fetch_ci_checks_from_provider,
+    is_ci_check_passing,
     is_hex_40,
     iso_timestamp,
     reconcile_and_complete_spec_task,
@@ -21,6 +22,7 @@ from providers import (
     reconcile_and_push,
     sha256_file,
 )
+from receipts import check_qualification, validate_review_receipt
 
 VALID_ACTIONS = {"push", "publish_pr", "merge_pr", "complete_spec_task"}
 
@@ -76,6 +78,43 @@ def _guard_claim_freshness(wi: dict[str, Any], claim_token: str | None, now_dt: 
     return True, ""
 
 
+def _check_on_disk_report(rep_path_str: str | None, control_dir: Path | str | None) -> bool:
+    if not rep_path_str:
+        return False
+    rep_p = Path(rep_path_str)
+    if not rep_p.is_absolute() and control_dir:
+        rep_p = Path(control_dir) / rep_p
+    if not rep_p.exists():
+        return False
+    try:
+        rep_data = json.loads(rep_p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    val_ok, _, _ = validate_review_receipt(rep_data)
+    return val_ok
+
+
+def _matches_receipt_fields(
+    data: dict[str, Any],
+    family: str,
+    session_id: str,
+    commit_sha: str,
+    tree_sha: str,
+    dispatch_id: str,
+) -> bool:
+    if data.get("verdict") != "SHIP":
+        return False
+    rec_sess = data.get("reviewer_session_id") or data.get("session_id")
+    rec_fam = data.get("family") or data.get("reviewer_family")
+    if rec_fam != family or rec_sess != session_id:
+        return False
+    if dispatch_id and data.get("dispatch_id") != dispatch_id:
+        return False
+    r_commit = data.get("commit_sha") or data.get("revision")
+    r_tree = data.get("tree_sha")
+    return r_commit == commit_sha and r_tree == tree_sha
+
+
 def _check_receipt_file_on_disk(
     control_dir: Path | str,
     work_id: str,
@@ -83,6 +122,7 @@ def _check_receipt_file_on_disk(
     session_id: str,
     commit_sha: str,
     tree_sha: str,
+    dispatch_id: str = "",
 ) -> bool:
     rec_path = Path(control_dir) / "receipts" / f"review_{work_id}_{family}_{session_id}.json"
     if not rec_path.exists():
@@ -93,9 +133,9 @@ def _check_receipt_file_on_disk(
         return False
     if not isinstance(data, dict):
         return False
-    r_commit = data.get("commit_sha") or data.get("revision")
-    r_tree = data.get("tree_sha")
-    return r_commit == commit_sha and r_tree == tree_sha
+    if not _matches_receipt_fields(data, family, session_id, commit_sha, tree_sha, dispatch_id):
+        return False
+    return _check_on_disk_report(data.get("report_path"), control_dir)
 
 
 def _check_single_ship_match(
@@ -112,7 +152,8 @@ def _check_single_ship_match(
     if control_dir and work_id:
         fam = str(r.get("family") or r.get("reviewer_family") or "")
         sess = str(r.get("reviewer_session_id") or r.get("session_id") or "")
-        return _check_receipt_file_on_disk(control_dir, work_id, fam, sess, commit_sha, tree_sha)
+        disp = str(r.get("dispatch_id") or "")
+        return _check_receipt_file_on_disk(control_dir, work_id, fam, sess, commit_sha, tree_sha, dispatch_id=disp)
     return True
 
 
@@ -122,7 +163,10 @@ def _check_ship_reviews_match(
     tree_sha: str,
     control_dir: Path | str | None = None,
     work_id: str = "",
+    dispatch_ledger: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
+    if not check_qualification(reviews, commit_sha, tree_sha, dispatch_ledger, work_id=work_id):
+        return False, "MISSING_QUALIFICATION"
     ship_revs = [r for r in reviews if r.get("verdict") == "SHIP"]
     if len(ship_revs) < 3:
         return False, "MISSING_QUALIFICATION"
@@ -156,6 +200,7 @@ def _guard_pre_transition(
     claim_token: str | None,
     now_dt: datetime.datetime,
     control_dir: Path | str | None = None,
+    dispatch_ledger: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     ok, err = _guard_approval_and_defects(wi, control_dir)
     if not ok:
@@ -174,6 +219,7 @@ def _guard_pre_transition(
         cand_tree,
         control_dir=control_dir,
         work_id=str(wi.get("work_id") or ""),
+        dispatch_ledger=dispatch_ledger,
     )
     if not ok:
         return False, err
@@ -184,37 +230,30 @@ def _guard_pre_transition(
     return True, ""
 
 
+def _extract_project_ci_checks(p_ci: dict[str, Any], commit_sha: str) -> tuple[bool, str, list[dict[str, Any]]]:
+    rev = str(p_ci.get("revision") or p_ci.get("head_sha") or "").strip()
+    if not rev or rev != commit_sha:
+        return False, "", []
+    status = str(p_ci.get("status") or "").lower()
+    ev = p_ci.get("evidence")
+    checks = [dict(c) for c in ev if isinstance(c, dict)] if isinstance(ev, list) else []
+    return True, status, checks
+
+
 def _check_project_row_ci(p_row: dict[str, Any], commit_sha: str) -> tuple[bool | None, list[dict[str, Any]] | None]:
     p_ci = p_row.get("ci")
     if not isinstance(p_ci, dict):
         return None, None
-    rev = str(p_ci.get("revision") or p_ci.get("head_sha") or "").strip()
-    if rev and rev != commit_sha:
+    valid, status, checks = _extract_project_ci_checks(p_ci, commit_sha)
+    if not valid:
         return None, None
-    status = str(p_ci.get("status") or "").lower()
-    ev = p_ci.get("evidence")
-    checks = [dict(c) for c in ev if isinstance(c, dict)] if isinstance(ev, list) else []
     if status in {"failing", "failed", "failure"}:
+        return False, checks
+    if checks and not all(is_ci_check_passing(c, commit_sha) for c in checks):
         return False, checks
     if status in {"passing", "passed", "success"} and checks:
         return True, checks
     return None, None
-
-
-def _is_ci_check_passing(c: Any, cand_sha: str) -> bool:
-    if not isinstance(c, dict):
-        return False
-    c_sha = str(c.get("head_sha") or c.get("commit_sha") or c.get("sha") or "").strip()
-    if c_sha and c_sha != cand_sha:
-        return False
-    status = str(c.get("status") or "").upper()
-    concl = str(c.get("conclusion") or "").upper()
-    state = str(c.get("state") or "").upper()
-    if concl in {"FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
-        return False
-    if state in {"FAILURE", "ERROR"}:
-        return False
-    return (status == "COMPLETED" and concl in {"SUCCESS", "NEUTRAL", "SKIPPED"}) or state == "SUCCESS"
 
 
 def _evaluate_live_ci_checks(
@@ -222,14 +261,14 @@ def _evaluate_live_ci_checks(
 ) -> tuple[bool, str, list[dict[str, Any]]]:
     if not live_checks:
         return False, "required checks are missing", []
-    if not all(_is_ci_check_passing(c, commit_sha) for c in live_checks):
+    if not all(is_ci_check_passing(c, commit_sha) for c in live_checks):
         return False, "exact-head provider required checks failed", live_checks
     return True, "", live_checks
 
 
 def _evaluate_caller_ci_checks(ci_checks: Any, commit_sha: str) -> tuple[bool, str, list[dict[str, Any]]]:
     if isinstance(ci_checks, list) and ci_checks:
-        if all(_is_ci_check_passing(c, commit_sha) for c in ci_checks):
+        if all(is_ci_check_passing(c, commit_sha) for c in ci_checks):
             return True, "", ci_checks
         return False, "exact-head provider required checks failed", ci_checks
     return False, "required checks are missing", []
@@ -250,15 +289,30 @@ def _guard_spec_task_ci(
     if p_res is False:
         return False, "provider CI status is failing", p_checks or []
 
-    if pr_ref and command_runner is not None:
+    if pr_ref:
         live_checks = fetch_ci_checks_from_provider("", pr_ref, commit_sha, runner=command_runner, cwd=wt_path)
-        if live_checks is not None:
-            return _evaluate_live_ci_checks(live_checks, commit_sha)
+        if live_checks is None:
+            return False, "exact-head provider required checks missing or failed", []
+        return _evaluate_live_ci_checks(live_checks, commit_sha)
 
     if p_res is True and p_checks:
         return True, "", p_checks
 
     return _evaluate_caller_ci_checks(ci_checks, commit_sha)
+
+
+def _check_live_pr_ci_failure(
+    pr_ref: str,
+    commit_sha: str,
+    command_runner: Callable[..., Any] | None,
+    wt_path: Path,
+) -> tuple[bool, list[dict[str, Any]]]:
+    live_checks = fetch_ci_checks_from_provider("", pr_ref, commit_sha, runner=command_runner, cwd=wt_path)
+    if live_checks is None:
+        return True, []
+    if not live_checks or not all(is_ci_check_passing(c, commit_sha) for c in live_checks):
+        return True, live_checks
+    return False, live_checks
 
 
 def _check_merge_pr_ci_failure(
@@ -272,12 +326,12 @@ def _check_merge_pr_ci_failure(
     p_res, p_checks = _check_project_row_ci(p_row, commit_sha)
     if p_res is False:
         return True, p_checks or []
-    if pr_ref and command_runner is not None:
-        live_checks = fetch_ci_checks_from_provider("", pr_ref, commit_sha, runner=command_runner, cwd=wt_path)
-        if live_checks is not None:
-            if not live_checks or not all(_is_ci_check_passing(c, commit_sha) for c in live_checks):
-                return True, live_checks
-    return False, []
+    if pr_ref:
+        return _check_live_pr_ci_failure(pr_ref, commit_sha, command_runner, wt_path)
+    if p_res is True and p_checks:
+        return False, p_checks
+    c_ok, _, c_checks = _evaluate_caller_ci_checks(ci_checks, commit_sha)
+    return not c_ok, c_checks
 
 
 def _dispatch_action(
@@ -461,7 +515,10 @@ def _load_and_guard_transition_item(
         )
     wi = work_items[work_id]
 
-    g_ok, g_err = _guard_pre_transition(wi, action, claim_token, now_dt, control_dir=control_dir)
+    ledger = dc.get("dispatch_ledger", {})
+    g_ok, g_err = _guard_pre_transition(
+        wi, action, claim_token, now_dt, control_dir=control_dir, dispatch_ledger=ledger
+    )
     if not g_ok:
         return False, {"status": "refused", "reason_code": g_err, "observed_at": iso_now}, doc, wi, status_file
     return True, None, doc, wi, status_file

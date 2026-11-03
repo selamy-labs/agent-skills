@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
 """Tests for state transitions and stage guards in portfolio delivery control."""
 
+import hashlib
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
-from transitions import execute_transition
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from transitions import (  # noqa: E402
+    _check_merge_pr_ci_failure,
+    _check_receipt_file_on_disk,
+    _dispatch_action,
+    _guard_spec_task_ci,
+    execute_transition,
+)
 
 
 class TestTransitions(unittest.TestCase):
@@ -53,6 +65,11 @@ class TestTransitions(unittest.TestCase):
         with_merge_transition: bool = False,
     ) -> None:
         work_id = f"selamy-labs-agent-skills-152-{task_id}"
+        reviews_data = [
+            ("opus", "claude-opus-5-5", "disp-01", "sess-r1"),
+            ("argon", "gemini-4.0-argon-high", "disp-02", "sess-r2"),
+            ("sol", "gpt-6.1-sol-high", "disp-03", "sess-r3"),
+        ]
         doc: dict[str, Any] = {
             "delivery_control": {
                 "projects": {
@@ -60,6 +77,18 @@ class TestTransitions(unittest.TestCase):
                         "stage": "ready",
                     }
                 },
+                "dispatch_ledger": {
+                    disp_id: {
+                        "dispatch_id": disp_id,
+                        "work_id": work_id,
+                        "family": fam,
+                        "reviewer_session_id": sess,
+                        "session_id": sess,
+                    }
+                    for fam, model, disp_id, sess in reviews_data
+                }
+                if qualified
+                else {},
                 "work_items": {
                     work_id: {
                         "work_id": work_id,
@@ -87,32 +116,17 @@ class TestTransitions(unittest.TestCase):
                         "reviews": (
                             [
                                 {
-                                    "dispatch_id": "disp-01",
-                                    "reviewer_session_id": "sess-r1",
-                                    "family": "opus",
-                                    "model": "claude-opus-4-6",
+                                    "dispatch_id": disp_id,
+                                    "reviewer_session_id": sess,
+                                    "session_id": sess,
+                                    "family": fam,
+                                    "reviewer_family": fam,
+                                    "model": model,
                                     "verdict": "SHIP",
                                     "commit_sha": self.c_sha,
                                     "tree_sha": self.t_sha,
-                                },
-                                {
-                                    "dispatch_id": "disp-02",
-                                    "reviewer_session_id": "sess-r2",
-                                    "family": "gemini",
-                                    "model": "gemini-3.8-pro",
-                                    "verdict": "SHIP",
-                                    "commit_sha": self.c_sha,
-                                    "tree_sha": self.t_sha,
-                                },
-                                {
-                                    "dispatch_id": "disp-03",
-                                    "reviewer_session_id": "sess-r3",
-                                    "family": "codex",
-                                    "model": "gpt-5.3-codex",
-                                    "verdict": "SHIP",
-                                    "commit_sha": self.c_sha,
-                                    "tree_sha": self.t_sha,
-                                },
+                                }
+                                for fam, model, disp_id, sess in reviews_data
                             ]
                             if qualified
                             else []
@@ -152,21 +166,41 @@ class TestTransitions(unittest.TestCase):
         if qualified:
             rec_dir = self.state_dir / "receipts"
             rec_dir.mkdir(parents=True, exist_ok=True)
-            for fam, sess in [("opus", "sess-r1"), ("gemini", "sess-r2"), ("codex", "sess-r3")]:
-                rec_path = rec_dir / f"review_{work_id}_{fam}_{sess}.json"
-                rec_path.write_text(
+            rep_dir = self.state_dir / "reports"
+            rep_dir.mkdir(parents=True, exist_ok=True)
+            for fam, model, disp_id, sess in reviews_data:
+                rep_path = rep_dir / f"report_{work_id}_{fam}_{sess}.json"
+                rep_path.write_text(
                     json.dumps(
                         {
-                            "schema_version": "review-receipt/v1",
-                            "work_id": work_id,
-                            "dispatch_id": f"disp-{sess}",
+                            "schema": "review-receipt/v1",
+                            "dispatch_id": disp_id,
                             "reviewer_session_id": sess,
                             "family": fam,
-                            "model": "model-test",
+                            "model": model,
                             "commit_sha": self.c_sha,
                             "tree_sha": self.t_sha,
                             "verdict": "SHIP",
                             "findings": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                rec_path = rec_dir / f"review_{work_id}_{fam}_{sess}.json"
+                rec_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": "review-receipt/v1",
+                            "work_id": work_id,
+                            "dispatch_id": disp_id,
+                            "reviewer_session_id": sess,
+                            "family": fam,
+                            "model": model,
+                            "commit_sha": self.c_sha,
+                            "tree_sha": self.t_sha,
+                            "verdict": "SHIP",
+                            "findings": [],
+                            "report_path": str(rep_path),
                         }
                     ),
                     encoding="utf-8",
@@ -321,11 +355,24 @@ class TestTransitions(unittest.TestCase):
             with_merge_transition=True,
         )
 
+        def mock_live_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "statusCheckRollup" in " ".join(cmd):
+                return 0, json.dumps(
+                    {
+                        "headRefOid": self.c_sha,
+                        "statusCheckRollup": [
+                            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
+                        ],
+                    }
+                )
+            return 0, ""
+
         res = execute_transition(
             control_dir=str(self.state_dir),
             work_id="selamy-labs-agent-skills-152-MP464",
             action="complete_spec_task",
             claim_token=self.claim_token,
+            command_runner=mock_live_runner,
         )
         self.assertEqual(res.get("status"), "transitioned")
         self.assertEqual(res.get("action"), "complete_spec_task")
@@ -340,6 +387,7 @@ class TestTransitions(unittest.TestCase):
             work_id="selamy-labs-agent-skills-152-MP464",
             action="complete_spec_task",
             claim_token=self.claim_token,
+            command_runner=mock_live_runner,
         )
         self.assertEqual(res_reconcile.get("status"), "transitioned")
         self.assertTrue(res_reconcile.get("reconciled_existing_effect"))
@@ -549,6 +597,470 @@ class TestTransitions(unittest.TestCase):
             branch="feat/MP464",
         )
         self.assertEqual(res10.get("reason_code"), "STALE_REVIEW_REVISION")
+
+    def test_approval_verification_details(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+        status_file = self.state_dir / "coordinator-status.json"
+        doc = json.loads(status_file.read_text(encoding="utf-8"))
+        wi = doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]
+
+        # Valid dict approval with matching sha256
+        import hashlib
+
+        h = hashlib.sha256(self.approval_file.read_bytes()).hexdigest()
+        wi["approval_ref"] = {"path": str(self.approval_file), "sha256": h}
+        status_file.write_text(json.dumps(doc))
+        res_ok = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "push",
+            claim_token=self.claim_token,
+            branch="feat/MP464",
+            command_runner=lambda cmd, cwd=None: (0, f"{self.c_sha}\trefs/heads/feat/MP464\n"),
+        )
+        self.assertEqual(res_ok.get("status"), "transitioned")
+
+        # Approval file has [WITHDRAWN]
+        withdrawn_app = Path(self.temp_dir) / "withdrawn.txt"
+        withdrawn_app.write_text("Coordinator [WITHDRAWN] approval", encoding="utf-8")
+        wi["approval_ref"] = str(withdrawn_app)
+        status_file.write_text(json.dumps(doc))
+        res_w = execute_transition(
+            str(self.state_dir), "selamy-labs-agent-skills-152-MP464", "push", claim_token=self.claim_token
+        )
+        self.assertEqual(res_w.get("reason_code"), "APPROVAL_WITHDRAWN")
+
+        # Approval file read error (pointing to a directory)
+        app_dir = Path(self.temp_dir) / "app_dir"
+        app_dir.mkdir(parents=True, exist_ok=True)
+        wi["approval_ref"] = str(app_dir)
+        status_file.write_text(json.dumps(doc))
+        res_r = execute_transition(
+            str(self.state_dir), "selamy-labs-agent-skills-152-MP464", "push", claim_token=self.claim_token
+        )
+        self.assertEqual(res_r.get("reason_code"), "APPROVAL_READ_FAILED")
+
+    def test_claim_freshness_timezone_handling(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+        status_file = self.state_dir / "coordinator-status.json"
+        doc = json.loads(status_file.read_text(encoding="utf-8"))
+        wi = doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]
+
+        # Invalid ISO string in expires_at
+        wi["claim"]["expires_at"] = "not-an-iso-timestamp"
+        status_file.write_text(json.dumps(doc))
+        res1 = execute_transition(
+            str(self.state_dir), "selamy-labs-agent-skills-152-MP464", "push", claim_token=self.claim_token
+        )
+        self.assertEqual(res1.get("reason_code"), "CLAIM_EXPIRED")
+
+        # Expired naive timestamp compared to timezone-aware now
+        wi["claim"]["expires_at"] = "2020-01-01T00:00:00"
+        status_file.write_text(json.dumps(doc))
+        res2 = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "push",
+            claim_token=self.claim_token,
+            now="2026-11-03T12:00:00Z",
+        )
+        self.assertEqual(res2.get("reason_code"), "CLAIM_EXPIRED")
+
+    def test_receipt_file_on_disk_validations(self) -> None:
+        # Nonexistent
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w1", "opus", "s1", self.c_sha, self.t_sha))
+
+        rec_dir = self.state_dir / "receipts"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        rec_file = rec_dir / "review_w1_opus_s1.json"
+
+        # Invalid JSON
+        rec_file.write_text("not json", encoding="utf-8")
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w1", "opus", "s1", self.c_sha, self.t_sha))
+
+        # Not dict
+        rec_file.write_text(json.dumps(["list"]), encoding="utf-8")
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w1", "opus", "s1", self.c_sha, self.t_sha))
+
+        # Verdict != SHIP
+        rec_file.write_text(json.dumps({"verdict": "REVISE"}), encoding="utf-8")
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w1", "opus", "s1", self.c_sha, self.t_sha))
+
+        # Family / session mismatch
+        rec_file.write_text(json.dumps({"verdict": "SHIP", "family": "sol", "session_id": "s1"}), encoding="utf-8")
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w1", "opus", "s1", self.c_sha, self.t_sha))
+
+        # Dispatch ID mismatch
+        rec_file.write_text(
+            json.dumps(
+                {
+                    "verdict": "SHIP",
+                    "family": "opus",
+                    "session_id": "s1",
+                    "dispatch_id": "disp-wrong",
+                    "commit_sha": self.c_sha,
+                    "tree_sha": self.t_sha,
+                    "report_path": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            _check_receipt_file_on_disk(
+                self.state_dir, "w1", "opus", "s1", self.c_sha, self.t_sha, dispatch_id="disp-expected"
+            )
+        )
+
+    def test_spec_task_prerequisite_action_variations(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+        status_file = self.state_dir / "coordinator-status.json"
+        doc = json.loads(status_file.read_text(encoding="utf-8"))
+        wi = doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]
+
+        # required_completion_action = "publish_pr" with publish_pr transition
+        wi["required_completion_action"] = "publish_pr"
+        wi["transitions"] = [
+            {"action": "publish_pr", "commit_sha": self.c_sha, "tree_sha": self.t_sha, "transitioned_at": "now"}
+        ]
+        status_file.write_text(json.dumps(doc))
+
+        def live_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "statusCheckRollup" in " ".join(cmd):
+                return 0, json.dumps(
+                    {
+                        "headRefOid": self.c_sha,
+                        "statusCheckRollup": [
+                            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
+                        ],
+                    }
+                )
+            return 0, ""
+
+        res1 = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "complete_spec_task",
+            claim_token=self.claim_token,
+            command_runner=live_runner,
+        )
+        self.assertEqual(res1.get("status"), "transitioned")
+
+    def test_unknown_action_dispatch(self) -> None:
+        ok, res = _dispatch_action(
+            "unknown_action",
+            self.worktree,
+            "feat/branch",
+            "main",
+            self.c_sha,
+            "152",
+            "Title",
+            "Body",
+            self.spec_file,
+            "TASK_01",
+            None,
+            None,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(res.get("reason_code"), "INVALID_ACTION")
+
+    def test_receipt_file_on_disk_report_errors(self) -> None:
+        rec_dir = self.state_dir / "receipts"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        rec_file = rec_dir / "review_w2_opus_s2.json"
+
+        # Commit sha mismatch
+        rec_file.write_text(
+            json.dumps(
+                {
+                    "verdict": "SHIP",
+                    "family": "opus",
+                    "session_id": "s2",
+                    "commit_sha": "wrong_sha",
+                    "tree_sha": self.t_sha,
+                    "report_path": "/tmp/fake.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w2", "opus", "s2", self.c_sha, self.t_sha))
+
+        # Missing report_path
+        rec_file.write_text(
+            json.dumps(
+                {
+                    "verdict": "SHIP",
+                    "family": "opus",
+                    "session_id": "s2",
+                    "commit_sha": self.c_sha,
+                    "tree_sha": self.t_sha,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w2", "opus", "s2", self.c_sha, self.t_sha))
+
+        # report_path does not exist
+        rec_file.write_text(
+            json.dumps(
+                {
+                    "verdict": "SHIP",
+                    "family": "opus",
+                    "session_id": "s2",
+                    "commit_sha": self.c_sha,
+                    "tree_sha": self.t_sha,
+                    "report_path": str(Path(self.temp_dir) / "nonexistent-report.json"),
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w2", "opus", "s2", self.c_sha, self.t_sha))
+
+        # report_path has invalid JSON
+        rep_file = Path(self.temp_dir) / "invalid-rep.json"
+        rep_file.write_text("corrupted json", encoding="utf-8")
+        rec_file.write_text(
+            json.dumps(
+                {
+                    "verdict": "SHIP",
+                    "family": "opus",
+                    "session_id": "s2",
+                    "commit_sha": self.c_sha,
+                    "tree_sha": self.t_sha,
+                    "report_path": str(rep_file),
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w2", "opus", "s2", self.c_sha, self.t_sha))
+
+        # report_path has schema violation (missing keys)
+        rep_file.write_text(json.dumps({"schema": "wrong"}), encoding="utf-8")
+        self.assertFalse(_check_receipt_file_on_disk(self.state_dir, "w2", "opus", "s2", self.c_sha, self.t_sha))
+
+    def test_pr_ref_empty_and_fallback_ci(self) -> None:
+        doc = {
+            "delivery_control": {
+                "projects": {
+                    "agent-skills": {
+                        "ci": {
+                            "status": "passing",
+                            "revision": self.c_sha,
+                            "evidence": [
+                                {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+        wi = {"project": "agent-skills"}
+
+        # Empty pr_ref falls back to project row passing CI
+        ok1, err1, checks1 = _guard_spec_task_ci(doc, wi, self.c_sha, None, None, self.worktree, "")
+        self.assertTrue(ok1)
+        self.assertEqual(len(checks1), 1)
+
+        # Empty pr_ref and no project row CI, falls back to valid caller checks
+        empty_doc = {"delivery_control": {"projects": {}}}
+        caller_checks = [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}]
+        ok2, err2, checks2 = _guard_spec_task_ci(empty_doc, wi, self.c_sha, caller_checks, None, self.worktree, "")
+        self.assertTrue(ok2)
+
+        # Empty pr_ref and caller checks has failing check
+        failing_caller = [{"name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": self.c_sha}]
+        ok3, err3, _ = _guard_spec_task_ci(empty_doc, wi, self.c_sha, failing_caller, None, self.worktree, "")
+        self.assertFalse(ok3)
+
+        # Empty pr_ref and no checks at all
+        ok4, err4, _ = _guard_spec_task_ci(empty_doc, wi, self.c_sha, None, None, self.worktree, "")
+        self.assertFalse(ok4)
+        self.assertEqual(err4, "required checks are missing")
+
+        # _check_merge_pr_ci_failure variations
+        p_row_pass = doc["delivery_control"]["projects"]["agent-skills"]
+        fail_ci1, _ = _check_merge_pr_ci_failure(p_row_pass, self.c_sha, None, None, self.worktree, "")
+        self.assertFalse(fail_ci1)
+
+        p_row_empty: dict[str, Any] = {}
+        fail_ci2, _ = _check_merge_pr_ci_failure(p_row_empty, self.c_sha, caller_checks, None, self.worktree, "")
+        self.assertFalse(fail_ci2)
+
+        fail_ci3, _ = _check_merge_pr_ci_failure(p_row_empty, self.c_sha, failing_caller, None, self.worktree, "")
+        self.assertTrue(fail_ci3)
+
+    def test_protected_branch_push_to_base_branch(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+        res = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "push",
+            claim_token=self.claim_token,
+            branch="devel",
+            base_branch="devel",
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "PROTECTED_BRANCH_PUSH")
+
+    def test_provider_dispatch_action_failure(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+
+        def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "ls-remote" in " ".join(cmd):
+                return 0, ""
+            if "push" in " ".join(cmd):
+                return 1, "remote rejected (pre-receive hook declined)"
+            return 0, ""
+
+        res = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "push",
+            claim_token=self.claim_token,
+            branch="feat/MP464",
+            command_runner=fail_runner,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertIn("rejected", res.get("error", ""))
+
+    def test_approval_relative_path_withdrawn_and_digest_mismatch(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+
+        # Relative path approval
+        rel_app_file = self.state_dir / "rel_approval.md"
+        rel_app_file.write_text("LGTM approved for MP464", encoding="utf-8")
+        rel_sha = hashlib.sha256(rel_app_file.read_bytes()).hexdigest()
+
+        status_file = self.state_dir / "coordinator-status.json"
+        doc = json.loads(status_file.read_text(encoding="utf-8"))
+        wi = doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]
+        wi["approval_ref"] = {"path": "rel_approval.md", "sha256": rel_sha}
+        status_file.write_text(json.dumps(doc), encoding="utf-8")
+
+        res_rel = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "push",
+            claim_token=self.claim_token,
+            branch="feat/MP464",
+            command_runner=lambda cmd, cwd=None: (0, ""),
+        )
+        self.assertEqual(res_rel.get("status"), "transitioned")
+
+        # Withdrawn approval
+        rel_app_file.write_text("[WITHDRAWN] Not approved", encoding="utf-8")
+        res_withdrawn = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "push",
+            claim_token=self.claim_token,
+            branch="feat/MP464",
+            command_runner=lambda cmd, cwd=None: (0, ""),
+        )
+        self.assertEqual(res_withdrawn.get("status"), "refused")
+        self.assertEqual(res_withdrawn.get("reason_code"), "APPROVAL_WITHDRAWN")
+
+        # Digest mismatch
+        rel_app_file.write_text("Modified content after approval", encoding="utf-8")
+        res_mismatch = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "push",
+            claim_token=self.claim_token,
+            branch="feat/MP464",
+            command_runner=lambda cmd, cwd=None: (0, ""),
+        )
+        self.assertEqual(res_mismatch.get("status"), "refused")
+        self.assertEqual(res_mismatch.get("reason_code"), "APPROVAL_DIGEST_MISMATCH")
+
+    def test_transitions_coverage_branches(self) -> None:
+        import datetime
+
+        from transitions import (  # noqa: E402
+            _check_project_row_ci,
+            _dispatch_action,
+            _evaluate_live_ci_checks,
+            _guard_action_ci,
+            _guard_claim_freshness,
+            _verify_live_approval,
+        )
+
+        # _verify_live_approval with None
+        ok_a, err_a = _verify_live_approval(None)
+        self.assertFalse(ok_a)
+        self.assertEqual(err_a, "ABSENT_APPROVAL")
+
+        # _guard_claim_freshness with empty expires_at
+        ok_c1, err_c1 = _guard_claim_freshness(
+            {"claim": {"claim_token": "tok"}},
+            "tok",
+            datetime.datetime.now(datetime.UTC),
+        )
+        self.assertFalse(ok_c1)
+        self.assertEqual(err_c1, "CLAIM_EXPIRED")
+
+        # _guard_claim_freshness with naive and aware datetimes
+        ok_c2, err_c2 = _guard_claim_freshness(
+            {"claim": {"claim_token": "tok", "expires_at": "2026-11-03T10:00:00"}},
+            "tok",
+            datetime.datetime(2026, 11, 3, 12, 0, tzinfo=datetime.UTC),
+        )
+        self.assertFalse(ok_c2)
+        self.assertEqual(err_c2, "CLAIM_EXPIRED")
+
+        # _check_project_row_ci with failing status
+        p_row_fail = {"ci": {"revision": self.c_sha, "status": "failing", "evidence": []}}
+        ok_ci1, _ = _check_project_row_ci(p_row_fail, self.c_sha)
+        self.assertFalse(ok_ci1)
+
+        # _check_project_row_ci with passing status but failing evidence check
+        p_row_fail_ev = {
+            "ci": {
+                "revision": self.c_sha,
+                "status": "passing",
+                "evidence": [{"name": "pytest", "status": "failing"}],
+            }
+        }
+        ok_ci2, _ = _check_project_row_ci(p_row_fail_ev, self.c_sha)
+        self.assertFalse(ok_ci2)
+
+        # _evaluate_live_ci_checks with empty live_checks list
+        ok_l1, err_l1, _ = _evaluate_live_ci_checks([], self.c_sha)
+        self.assertFalse(ok_l1)
+        self.assertEqual(err_l1, "required checks are missing")
+
+        # _guard_action_ci for push action returns (True, None) (no CI guard for push)
+        res_g_push = _guard_action_ci(
+            "push", {}, {}, self.c_sha, None, None, Path(self.temp_dir), "", "2026-11-03T10:00:00Z"
+        )
+        self.assertEqual(res_g_push, (True, None))
+
+        # execute_transition with invalid action
+        res_bad_act = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "invalid_action",
+            claim_token=self.claim_token,
+        )
+        self.assertEqual(res_bad_act.get("status"), "refused")
+        self.assertEqual(res_bad_act.get("reason_code"), "INVALID_ACTION")
+
+        # _dispatch_action with unknown action
+        act_ok, act_res = _dispatch_action(
+            "unknown_action",
+            Path(self.temp_dir),
+            "feat/branch",
+            "main",
+            self.c_sha,
+            "",
+            "",
+            "",
+            None,
+            "",
+            None,
+            None,
+        )
+        self.assertFalse(act_ok)
+        self.assertIn("Unknown action", act_res.get("error", ""))
 
 
 if __name__ == "__main__":
