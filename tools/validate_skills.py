@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -533,7 +534,7 @@ def _inspect_job_step(
 ) -> None:
     if not isinstance(step, dict):
         return
-    step_name = step.get("name", step.get("id", "unnamed step"))
+    step_name: str = str(step.get("name") or step.get("id") or "unnamed step")
     errors.extend(validate_shell_configuration(f"step {step_name!r} in '{job_name}'", step))
 
     if step.get("if") is not None:
@@ -558,6 +559,7 @@ def _inspect_job_step(
 
     is_primary = step is primary_pip_step
     _process_step_run_lines(run_cmd, is_primary, gates_found, errors)
+    _check_step_coverage_command_order(run_cmd, step_name, job_name, errors)
 
 
 ALLOWED_USES_ACTIONS: frozenset[str] = frozenset({"actions/checkout@v7.0.0", "actions/setup-python@v6.3.0"})
@@ -577,34 +579,113 @@ CANONICAL_QUALITY_RUN_ARGVS: frozenset[tuple[str, ...]] = frozenset(
     }
 )
 
-CANONICAL_TESTS_RUN_ARGVS: frozenset[tuple[str, ...]] = frozenset(
-    {
-        (
-            "pip",
-            "install",
-            "pytest==8.3.4",
-            "pytest-cov==6.0.0",
-            "ruff==0.15.21",
-            "pyyaml==6.0.1",
-            "python-hcl2==7.2.0",
-        ),
-        ("python", "-m", "ruff", "check", "."),
-        ("python", "-m", "ruff", "format", "--check", "--diff", "."),
-        ("python", "tools/validate_skills.py"),
-        ("python", "tools/validate_marketplace.py"),
-        ("python", "tools/tf_module_layout.py", "--self-test"),
-        ("python", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"),
-        (
-            "pytest",
-            "--cov=tools",
-            "--cov-branch",
-            "--cov-report=term-missing",
-            "--cov-report=json:coverage.json",
-            "--cov-fail-under=90",
-        ),
-        ("python", "-m", "tests.test_coverage_threshold", "coverage.json"),
-    }
+CANONICAL_TESTS_RUN_SEQUENCE: tuple[tuple[str, ...], ...] = (
+    (
+        "pip",
+        "install",
+        "pytest==8.3.4",
+        "pytest-cov==6.0.0",
+        "ruff==0.15.21",
+        "pyyaml==6.0.1",
+        "python-hcl2==7.2.0",
+    ),
+    ("python", "-m", "ruff", "check", "."),
+    ("python", "-m", "ruff", "format", "--check", "--diff", "."),
+    ("python", "tools/validate_skills.py"),
+    ("python", "tools/validate_marketplace.py"),
+    ("python", "tools/tf_module_layout.py", "--self-test"),
+    ("python", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"),
+    (
+        "pytest",
+        "--cov=tools",
+        "--cov-branch",
+        "--cov-report=term-missing",
+        "--cov-report=json:coverage.json",
+        "--cov-fail-under=90",
+    ),
+    ("python", "-m", "tests.test_coverage_threshold", "coverage.json"),
 )
+
+CANONICAL_TESTS_RUN_ARGVS: frozenset[tuple[str, ...]] = frozenset(CANONICAL_TESTS_RUN_SEQUENCE)
+
+
+class OrderedArgvSet(list[tuple[str, ...]]):
+    def add(self, item: tuple[str, ...]) -> None:
+        self.append(item)
+
+
+def is_tracked_by_git(path: Path | str) -> bool:
+    """Return True if path is tracked by git."""
+    target = Path(path)
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=target.parent if target.parent.is_dir() else None,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def check_no_tracked_coverage_json(repo_root: Path) -> list[str]:
+    """Ensure coverage.json is not tracked in git."""
+    cov_path = repo_root / "coverage.json"
+    if is_tracked_by_git(cov_path):
+        return ["coverage.json must not be tracked in git repository"]
+    return []
+
+
+def _validate_tests_step_order(run_argvs_order: list[tuple[str, ...]], job_name: str, errors: list[str]) -> None:
+    expected_order = list(CANONICAL_TESTS_RUN_SEQUENCE)
+    if run_argvs_order != expected_order:
+        errors.append(f"job '{job_name}' steps out of order: expected canonical step sequence")
+    pytest_idx = -1
+    verify_idx = -1
+    for idx, cmd in enumerate(run_argvs_order):
+        if cmd and cmd[0] == "pytest":
+            pytest_idx = idx
+        elif len(cmd) >= 3 and cmd[:3] == ("python", "-m", "tests.test_coverage_threshold"):
+            verify_idx = idx
+
+    if pytest_idx != -1 and verify_idx != -1 and verify_idx != pytest_idx + 1:
+        errors.append(
+            f"job '{job_name}' step 'Verify coverage threshold' must immediately follow 'Run tests with coverage'"
+        )
+
+
+def _is_coverage_threshold_tokens(tokens: list[str]) -> bool:
+    if len(tokens) < 3:
+        return False
+    return tokens[:3] in (
+        ["python", "-m", "tests.test_coverage_threshold"],
+        ["python3", "-m", "tests.test_coverage_threshold"],
+        ["python", "-B", "-m", "tests.test_coverage_threshold"],
+        ["python3", "-B", "-m", "tests.test_coverage_threshold"],
+    )
+
+
+def _find_coverage_command_indices(lines: list[str]) -> tuple[int, int]:
+    pytest_idx = -1
+    verify_idx = -1
+    for idx, line in enumerate(lines):
+        tokens = _line_tokens(line)
+        if tokens and tokens[0] == "pytest":
+            pytest_idx = idx
+        elif _is_coverage_threshold_tokens(tokens):
+            verify_idx = idx
+    return pytest_idx, verify_idx
+
+
+def _check_step_coverage_command_order(run_cmd: str, step_name: str, job_name: str, errors: list[str]) -> None:
+    lines = [line.strip() for line in run_cmd.splitlines() if line.strip() and not line.strip().startswith("#")]
+    p_idx, v_idx = _find_coverage_command_indices(lines)
+    if p_idx == -1 or v_idx == -1:
+        return
+    if v_idx != p_idx + 1:
+        errors.append(f"step {step_name!r} in '{job_name}': coverage threshold check must immediately follow pytest")
 
 
 def _validate_uses_step_inputs(
@@ -658,7 +739,7 @@ def _check_canonical_run_step(
     job_name: str,
     run_cmd: str,
     allowed_argvs: frozenset[tuple[str, ...]],
-    run_argvs_seen: set[tuple[str, ...]],
+    run_argvs_seen: OrderedArgvSet | set[tuple[str, ...]],
     errors: list[str],
 ) -> tuple[str, ...] | None:
     line_errs = check_banned_prefixes_and_operators(run_cmd)
@@ -685,7 +766,7 @@ def _inspect_tests_step(
     step: Any,
     job_name: str,
     uses_seen: set[str],
-    run_argvs_seen: set[tuple[str, ...]],
+    run_argvs_seen: OrderedArgvSet | set[tuple[str, ...]],
     primary_pip_step: dict[str, Any] | None,
     gates_found: dict[str, bool],
     errors: list[str],
@@ -720,6 +801,7 @@ def _inspect_tests_step(
     _check_canonical_run_step(step_name, job_name, run_cmd, CANONICAL_TESTS_RUN_ARGVS, run_argvs_seen, errors)
     is_primary = step is primary_pip_step
     _process_step_run_lines(run_cmd, is_primary, gates_found, errors)
+    _check_step_coverage_command_order(run_cmd, step_name, job_name, errors)
 
 
 def _validate_tests_job_steps(
@@ -730,7 +812,7 @@ def _validate_tests_job_steps(
     errors: list[str],
 ) -> None:
     uses_seen: set[str] = set()
-    run_argvs_seen: set[tuple[str, ...]] = set()
+    run_argvs_seen = OrderedArgvSet()
     for step in steps:
         _inspect_tests_step(step, job_name, uses_seen, run_argvs_seen, primary_pip_step, gates_found, errors)
 
@@ -740,6 +822,8 @@ def _validate_tests_job_steps(
     for cmd_tuple in CANONICAL_TESTS_RUN_ARGVS:
         if cmd_tuple not in run_argvs_seen:
             errors.append(f"job '{job_name}' missing required canonical run command: {' '.join(cmd_tuple)}")
+
+    _validate_tests_step_order(list(run_argvs_seen), job_name, errors)
 
 
 def _check_missing_gates(gates_found: dict[str, bool], job_name: str, errors: list[str]) -> None:
@@ -1085,6 +1169,10 @@ def validate_quality_workflow(workflow_input: dict[str, Any] | str | Path) -> li
 
     errors = list(validate_shell_configuration("quality workflow", doc))
     errors.extend(validate_env_configuration("quality workflow", doc, allowed_keys=frozenset()))
+    if isinstance(workflow_input, (str, Path)):
+        p = Path(workflow_input)
+        if p.is_file():
+            errors.extend(check_no_tracked_coverage_json(p.resolve().parents[2]))
     jobs = doc.get("jobs", {})
     if not isinstance(jobs, dict):
         return ["Quality workflow jobs must be a mapping"]
@@ -1117,7 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
     workflow_path = root / ".github" / "workflows" / "quality.yaml"
     wf_errors = validate_quality_workflow(workflow_path) if workflow_path.is_file() else ["quality.yaml not found"]
 
-    all_errors = list(skill_errors) + wf_errors
+    all_errors = list(skill_errors) + wf_errors + check_no_tracked_coverage_json(root)
     if all_errors:
         for err in all_errors:
             print(f"ERROR: {err}", file=sys.stderr)

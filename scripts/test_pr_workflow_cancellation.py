@@ -734,6 +734,26 @@ def _validate_job(path_name: str, job_name: str, job: dict[str, Any]) -> None:
     _check_quality_job_content(path_name, job_name, job)
 
 
+def _validate_quality_workflow_jobs(path_name: str, jobs: dict[str, Any]) -> None:
+    assert isinstance(jobs.get("quality"), dict), f"{path_name} missing required 'quality' job"
+    tests_job = jobs.get("tests") or jobs.get("test")
+    assert isinstance(tests_job, dict), f"{path_name} missing required 'tests' job"
+    extra_jobs = set(jobs.keys()) - {"quality", "tests", "test"}
+    assert not extra_jobs, (
+        f"{path_name} jobs must contain only 'quality' and 'tests', got unexpected: {sorted(extra_jobs)}"
+    )
+    gate_errors = validate_job_gates(tests_job, "tests")
+    assert not gate_errors, f"{path_name} tests job failed gate validation: {gate_errors}"
+
+
+def _validate_release_workflow_jobs(path_name: str, jobs: dict[str, Any]) -> None:
+    verify = jobs.get("verify")
+    if isinstance(verify, dict):
+        gate_errors = validate_job_gates(verify, "verify")
+        assert not gate_errors, f"{path_name} verify job failed gate validation: {gate_errors}"
+        _validate_release_verify_job(verify)
+
+
 def validate_workflow_steps(path_name: str, doc: dict[str, Any]) -> None:
     """Validate that jobs and steps are effective and do not bypass execution."""
     assert isinstance(doc, dict), f"{path_name} must be a mapping"
@@ -745,15 +765,9 @@ def validate_workflow_steps(path_name: str, doc: dict[str, Any]) -> None:
         if isinstance(job, dict):
             _validate_job(path_name, job_name, job)
     if "quality" in path_name:
-        assert isinstance(jobs.get("quality"), dict), f"{path_name} missing required 'quality' job"
-        tests_job = jobs.get("tests") or jobs.get("test")
-        assert isinstance(tests_job, dict), f"{path_name} missing required 'tests' job"
-        extra_jobs = set(jobs.keys()) - {"quality", "tests", "test"}
-        assert not extra_jobs, (
-            f"{path_name} jobs must contain only 'quality' and 'tests', got unexpected: {sorted(extra_jobs)}"
-        )
-        gate_errors = validate_job_gates(tests_job, "tests")
-        assert not gate_errors, f"{path_name} tests job failed gate validation: {gate_errors}"
+        _validate_quality_workflow_jobs(path_name, jobs)
+    elif "release" in path_name:
+        _validate_release_workflow_jobs(path_name, jobs)
 
 
 def test_pull_request_workflows_cancel_obsolete_runs() -> None:
@@ -862,6 +876,44 @@ def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:
     assert "python-hcl2==7.2.0" in pip_steps[0].get("run", ""), "verify job must pin python-hcl2==7.2.0"
 
 
+def _is_coverage_check_tokens(tokens: list[str]) -> bool:
+    if len(tokens) < 3:
+        return False
+    return tokens[:3] in (
+        ["python", "-m", "tests.test_coverage_threshold"],
+        ["python3", "-m", "tests.test_coverage_threshold"],
+        ["python", "-B", "-m", "tests.test_coverage_threshold"],
+        ["python3", "-B", "-m", "tests.test_coverage_threshold"],
+    )
+
+
+def _find_suite_step_coverage_indices(lines: list[str]) -> tuple[int, int]:
+    p_idx = -1
+    v_idx = -1
+    for idx, line in enumerate(lines):
+        try:
+            tokens = shlex.split(line, comments=True) if line and not line.startswith("#") else []
+        except ValueError:
+            tokens = []
+        if tokens and tokens[0] == "pytest":
+            p_idx = idx
+        elif _is_coverage_check_tokens(tokens):
+            v_idx = idx
+    return p_idx, v_idx
+
+
+def _validate_suite_step_coverage_order(verify_steps: list[Any]) -> None:
+    suite_step = next((s for s in verify_steps if isinstance(s, dict) and "lint_skills.py" in s.get("run", "")), None)
+    if not suite_step:
+        return
+    run_cmd = suite_step.get("run", "")
+    lines = [line.strip() for line in run_cmd.splitlines() if line.strip() and not line.strip().startswith("#")]
+    p_idx, v_idx = _find_suite_step_coverage_indices(lines)
+    assert p_idx != -1, "release verify job suite step must run pytest"
+    assert v_idx != -1, "release verify job suite step must run test_coverage_threshold"
+    assert v_idx == p_idx + 1, "release verify job suite step: coverage threshold must immediately follow pytest"
+
+
 def _validate_release_verify_job(verify: dict[str, Any]) -> None:
     validate_shell_configuration("verify job", verify)
     validate_env_configuration("verify job", verify, allowed_keys=frozenset())
@@ -875,6 +927,7 @@ def _validate_release_verify_job(verify: dict[str, Any]) -> None:
 
     gate_step = next(s for s in verify_steps if "tools/release_gate.py" in s.get("run", ""))
     _validate_release_gate_step_command(gate_step)
+    _validate_suite_step_coverage_order(verify_steps)
 
     found_scanners = _collect_scanner_commands(verify_steps)
     for scanner in REQUIRED_RELEASE_SCANNERS:

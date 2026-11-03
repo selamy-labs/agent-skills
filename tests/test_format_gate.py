@@ -30,6 +30,7 @@ from tools.validate_skills import (
     ALLOWED_USES_ACTIONS,
     CANONICAL_QUALITY_RUN_ARGVS,
     CANONICAL_TESTS_RUN_ARGVS,
+    CANONICAL_TESTS_RUN_SEQUENCE,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -627,7 +628,7 @@ def _inspect_quality_tests_step(
     step: dict[str, Any],
     primary_pip_step: dict[str, Any],
     uses_seen: set[str],
-    run_argvs_seen: set[tuple[str, ...]],
+    run_argvs_seen: list[tuple[str, ...]],
     detected_gates: set[str],
 ) -> None:
     step_name = str(step.get("name", "unnamed step"))
@@ -659,30 +660,46 @@ def _inspect_quality_tests_step(
         f"quality tests step {step_name!r} unrecognized run command: {lines[0]}"
     )
     assert cmd_tuple not in run_argvs_seen, f"quality tests step {step_name!r} duplicate run command: {lines[0]}"
-    run_argvs_seen.add(cmd_tuple)
+    run_argvs_seen.append(cmd_tuple)
 
     gate = _classify_quality_gate(step_name, run_cmd)
     if gate:
         detected_gates.add(gate)
 
 
+def _find_primary_pip_step(steps: list[Any]) -> dict[str, Any]:
+    pip_steps: list[dict[str, Any]] = []
+    for s in steps:
+        if not isinstance(s, dict):
+            continue
+        for line in s.get("run", "").splitlines():
+            trimmed = line.strip()
+            if trimmed and not trimmed.startswith("#") and _has_pip_install(trimmed):
+                pip_steps.append(s)
+                break
+    assert len(pip_steps) == 1, f"quality.yaml tests job must have exactly 1 pip install step, got {len(pip_steps)}"
+    return pip_steps[0]
+
+
+def _check_coverage_step_order(run_argvs_seen: list[tuple[str, ...]]) -> None:
+    assert run_argvs_seen == list(CANONICAL_TESTS_RUN_SEQUENCE), (
+        "quality.yaml tests job steps out of order: expected canonical step sequence"
+    )
+    p_idx = -1
+    v_idx = -1
+    for i, c in enumerate(run_argvs_seen):
+        if c and c[0] == "pytest":
+            p_idx = i
+        elif c and "test_coverage_threshold" in " ".join(c):
+            v_idx = i
+    assert v_idx == p_idx + 1, "quality.yaml tests job: coverage threshold check must immediately follow pytest"
+
+
 def _validate_quality_tests_steps(steps: list[Any]) -> None:
     detected_gates: set[str] = set()
     uses_seen: set[str] = set()
-    run_argvs_seen: set[tuple[str, ...]] = set()
-
-    pip_steps = [
-        s
-        for s in steps
-        if isinstance(s, dict)
-        and any(
-            _has_pip_install(line)
-            for line in s.get("run", "").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        )
-    ]
-    assert len(pip_steps) == 1, f"quality.yaml tests job must have exactly 1 pip install step, got {len(pip_steps)}"
-    primary_pip_step = pip_steps[0]
+    run_argvs_seen: list[tuple[str, ...]] = []
+    primary_pip_step = _find_primary_pip_step(steps)
 
     for step in steps:
         assert isinstance(step, dict), "quality tests step must be a mapping"
@@ -692,6 +709,8 @@ def _validate_quality_tests_steps(steps: list[Any]) -> None:
         assert action in uses_seen, f"quality.yaml tests job missing required action: {action}"
     for cmd_tuple in CANONICAL_TESTS_RUN_ARGVS:
         assert cmd_tuple in run_argvs_seen, f"quality.yaml tests job missing canonical run command: {cmd_tuple}"
+
+    _check_coverage_step_order(run_argvs_seen)
 
     expected_gates = {
         "format": "valid ruff format gate",
@@ -970,16 +989,21 @@ def _find_and_validate_suite_step(steps: list[dict[str, Any]]) -> None:
     pytest_cmds = [argv for argv in suite_argvs if argv[0] == "pytest"]
     assert pytest_cmds, "full test suite step must contain active pytest coverage command"
     validate_pytest_coverage_command(pytest_cmds[0], "full test suite")
-    assert any(
+    verify_cmds = [
         argv
+        for argv in suite_argvs
+        if argv
         in (
             ["python", "-m", "tests.test_coverage_threshold", "coverage.json"],
             ["python3", "-m", "tests.test_coverage_threshold", "coverage.json"],
             ["python", "-B", "-m", "tests.test_coverage_threshold", "coverage.json"],
             ["python3", "-B", "-m", "tests.test_coverage_threshold", "coverage.json"],
         )
-        for argv in suite_argvs
-    ), "missing tests.test_coverage_threshold in full test suite"
+    ]
+    assert verify_cmds, "missing tests.test_coverage_threshold in full test suite"
+    p_idx = suite_argvs.index(pytest_cmds[0])
+    v_idx = suite_argvs.index(verify_cmds[0])
+    assert v_idx == p_idx + 1, "release full test suite step: coverage threshold check must immediately follow pytest"
 
 
 def _validate_verify_job_permissions(verify: dict[str, Any]) -> None:
@@ -1495,6 +1519,30 @@ class TestFormatGateNegativeMutants:
         with pytest.raises(AssertionError, match="banned prefix|must have exactly 1 command line"):
             validate_quality_workflow(doc)
 
+    def test_all_validators_reject_reordering_verify_before_pytest_in_quality_workflow(self) -> None:
+        from scripts.test_pr_workflow_cancellation import validate_workflow_steps
+        from tools.validate_marketplace import validate_quality_workflow as vm_val
+        from tools.validate_skills import validate_quality_workflow as vs_val
+
+        doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        steps = doc["jobs"]["tests"]["steps"]
+        pytest_idx = next(i for i, s in enumerate(steps) if "pytest" in s.get("run", ""))
+        verify_idx = next(i for i, s in enumerate(steps) if "test_coverage_threshold" in s.get("run", ""))
+        assert pytest_idx < verify_idx
+        verify_step = steps.pop(verify_idx)
+        steps.insert(pytest_idx, verify_step)
+
+        with pytest.raises(AssertionError, match="out of order"):
+            validate_quality_workflow(doc)
+
+        with pytest.raises(AssertionError, match="out of order"):
+            validate_workflow_steps("quality.yaml", doc)
+
+        vs_errs = vs_val(doc)
+        assert any("out of order" in e for e in vs_errs)
+        vm_errs = vm_val(doc)
+        assert any("out of order" in e for e in vm_errs)
+
     def test_format_gate_fails_when_commented_out(self) -> None:
         doc = {
             "jobs": {
@@ -1740,6 +1788,24 @@ def _assert_all_validators_reject(doc: dict[str, Any], label: str) -> None:
     except AssertionError:
         fg_failed = True
     assert fg_failed, f"{label}: tests.test_format_gate accepted mutant"
+
+
+def _mutate_suite_step_coverage_order(run_cmd: str) -> str:
+    lines = run_cmd.splitlines()
+    p_idx = -1
+    v_idx = -1
+    for i, line in enumerate(lines):
+        clean = line.strip()
+        if not clean or clean.startswith("#"):
+            continue
+        if "pytest" in clean:
+            p_idx = i
+        elif "test_coverage_threshold" in clean:
+            v_idx = i
+    assert p_idx != -1 and v_idx != -1 and p_idx < v_idx
+    v_line = lines.pop(v_idx)
+    lines.insert(p_idx, v_line)
+    return "\n".join(lines)
 
 
 class TestReleaseWorkflowNegativeMutants:
@@ -2100,6 +2166,21 @@ class TestReleaseWorkflowNegativeMutants:
         from tools.validate_marketplace import validate_release_workflow as cli_validate
 
         assert any("pip install steps" in e or "secondary pip install" in e for e in cli_validate(doc))
+
+    def test_release_fails_when_verify_command_reordered_before_pytest(self) -> None:
+        from scripts.test_pr_workflow_cancellation import validate_workflow_steps
+
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        for step in doc["jobs"]["verify"]["steps"]:
+            if "lint_skills.py" in step.get("run", ""):
+                step["run"] = _mutate_suite_step_coverage_order(step["run"])
+                break
+
+        with pytest.raises(AssertionError, match="coverage threshold"):
+            validate_release_workflow(doc)
+
+        with pytest.raises(AssertionError, match="coverage threshold"):
+            validate_workflow_steps("release.yaml", doc)
 
     def test_execution_probe_failing_gate_command_exits_nonzero(self) -> None:
         """Execution probe test using bash -eo pipefail confirming failing gate command exits non-zero."""

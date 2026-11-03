@@ -3,3 +3,4 @@ __pycache__/
 .coverage
 .pytest_cache/
 coverage.json
+.coverage_session_start

@@ -4,19 +4,79 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 
-def verify_coverage_report(report_path: Path | str) -> tuple[float, float]:
+def is_tracked_by_git(path: Path | str) -> bool:
+    """Return True if path is tracked by git."""
+    target = Path(path)
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=target.parent if target.parent.is_dir() else None,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def check_report_freshness(path: Path, min_mtime: float | None = None) -> None:
+    """Verify that coverage report is not older than the current test run."""
+    if min_mtime is not None:
+        if path.stat().st_mtime < min_mtime - 0.05:
+            raise AssertionError(
+                f"Coverage report {path} is older than required run start time "
+                f"({path.stat().st_mtime:.2f} < {min_mtime:.2f}). Pre-existing reports are refused."
+            )
+        return
+
+    marker = path.parent / ".coverage_session_start"
+    if not marker.is_file():
+        if path.name == "coverage.json":
+            raise AssertionError(
+                f"Coverage report {path} was not produced by a pytest run in the current session "
+                f"(missing session marker {marker}). Pre-existing or unbound reports are refused."
+            )
+        return
+
+    try:
+        session_start = float(marker.read_text(encoding="utf-8").strip())
+    except ValueError:
+        raise AssertionError(f"Corrupt session marker: {marker}")
+
+    if path.stat().st_mtime < session_start - 0.05:
+        raise AssertionError(
+            f"Coverage report {path} is older than the current pytest run "
+            f"(mtime={path.stat().st_mtime:.2f} < session_start={session_start:.2f}). "
+            f"Stale or pre-existing reports are refused."
+        )
+
+
+def verify_coverage_report(
+    report_path: Path | str,
+    *,
+    min_mtime: float | None = None,
+    check_run: bool = True,
+) -> tuple[float, float]:
     """Verify coverage report has valid file, percent_covered >= 90.0, num_branches > 0,
     and raw branch coverage >= 90.0%.
     """
     path = Path(report_path)
     if not path.is_file():
         raise FileNotFoundError(f"Coverage JSON report not found: {path}")
+
+    if is_tracked_by_git(path):
+        raise AssertionError(f"Coverage report {path} is tracked in git; coverage reports must never be committed.")
+
+    if check_run:
+        check_report_freshness(path, min_mtime)
 
     data = json.loads(path.read_text(encoding="utf-8"))
     totals = data.get("totals", {})
@@ -290,6 +350,96 @@ def test_main_cli_success_and_failure(tmp_path: Path, monkeypatch: pytest.Monkey
         encoding="utf-8",
     )
     assert main([str(low_report)]) == 1
+
+
+def test_verify_coverage_report_refuses_git_tracked_coverage_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AS-TS-R17-01: Committed coverage report tracked by git must be refused."""
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "totals": {
+                    "percent_covered": 99.0,
+                    "covered_branches": 99,
+                    "num_branches": 100,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tests.test_coverage_threshold.is_tracked_by_git", lambda _p: True)
+    with pytest.raises(AssertionError, match="tracked in git"):
+        verify_coverage_report(report)
+    assert main([str(report)]) == 1
+
+
+def test_verify_coverage_report_refuses_pre_existing_stale_report(tmp_path: Path) -> None:
+    """AS-TS-R17-01: A pre-existing coverage report created before the test run started must be refused."""
+    marker = tmp_path / ".coverage_session_start"
+    run_start = 1700000100.0
+    marker.write_text(str(run_start), encoding="utf-8")
+
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "totals": {
+                    "percent_covered": 99.0,
+                    "covered_branches": 99,
+                    "num_branches": 100,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_time = run_start - 3600.0
+    os.utime(report, (old_time, old_time))
+
+    with pytest.raises(AssertionError, match="older than the current pytest run"):
+        verify_coverage_report(report)
+    assert main([str(report)]) == 1
+
+
+def test_verify_coverage_report_refuses_unbound_report_without_session(tmp_path: Path) -> None:
+    """AS-TS-R17-01: A coverage.json found when no pytest run occurred (missing session marker) must be refused."""
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "totals": {
+                    "percent_covered": 99.0,
+                    "covered_branches": 99,
+                    "num_branches": 100,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="missing session marker"):
+        verify_coverage_report(report)
+    assert main([str(report)]) == 1
+
+
+def test_verify_coverage_report_refuses_real_git_tracked_file(tmp_path: Path) -> None:
+    """AS-TS-R17-01: Exercise real git ls-files command on a tracked file in a git repo."""
+    repo = tmp_path / "git_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@selamy.dev"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+    cov = repo / "coverage.json"
+    cov.write_text(
+        json.dumps({"totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "coverage.json"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "add cov"], cwd=repo, check=True, capture_output=True)
+
+    with pytest.raises(AssertionError, match="tracked in git"):
+        verify_coverage_report(cov)
+    assert main([str(cov)]) == 1
 
 
 if __name__ == "__main__":

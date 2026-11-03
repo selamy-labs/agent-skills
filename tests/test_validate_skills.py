@@ -697,3 +697,44 @@ class TestJobLevelKeyValidation:
         doc["jobs"]["extra"] = {"runs-on": "ubuntu-latest", "steps": []}
         errs = validate_quality_workflow(doc)
         assert any("quality workflow jobs must contain only 'quality' and 'tests'" in e for e in errs)
+
+
+def test_validate_job_gates_rejects_reordered_tests_steps() -> None:
+    job = _make_valid_job()
+    steps = job["steps"]
+    pytest_idx = next(i for i, s in enumerate(steps) if "pytest" in s.get("run", ""))
+    verify_idx = next(i for i, s in enumerate(steps) if "test_coverage_threshold" in s.get("run", ""))
+    assert pytest_idx < verify_idx
+    verify_step = steps.pop(verify_idx)
+    steps.insert(pytest_idx, verify_step)
+    errs = validate_job_gates(job, "tests")
+    assert any("out of order" in e for e in errs)
+
+
+def test_validate_quality_workflow_rejects_reordered_tests_steps() -> None:
+    doc = yaml.safe_load(QUALITY_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["tests"]["steps"]
+    pytest_idx = next(i for i, s in enumerate(steps) if "pytest" in s.get("run", ""))
+    verify_idx = next(i for i, s in enumerate(steps) if "test_coverage_threshold" in s.get("run", ""))
+    assert pytest_idx < verify_idx
+    verify_step = steps.pop(verify_idx)
+    steps.insert(pytest_idx, verify_step)
+    errs = validate_quality_workflow(doc)
+    assert any("out of order" in e for e in errs)
+
+
+def test_check_no_tracked_coverage_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tools.validate_skills import check_no_tracked_coverage_json
+
+    monkeypatch.setattr("tools.validate_skills.is_tracked_by_git", lambda _p: False)
+    assert check_no_tracked_coverage_json(tmp_path) == []
+
+    monkeypatch.setattr("tools.validate_skills.is_tracked_by_git", lambda _p: True)
+    errs = check_no_tracked_coverage_json(tmp_path)
+    assert any("must not be tracked in git" in e for e in errs)
+
+
+def test_validate_quality_workflow_rejects_tracked_coverage_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("tools.validate_skills.is_tracked_by_git", lambda _p: True)
+    errs = validate_quality_workflow(QUALITY_WORKFLOW_PATH)
+    assert any("must not be tracked in git" in e for e in errs)
