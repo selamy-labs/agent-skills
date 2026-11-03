@@ -609,8 +609,11 @@ class TestProviders(unittest.TestCase):
         self.assertTrue(
             is_ci_check_passing({"head_sha": self.c_sha, "status": "COMPLETED", "conclusion": "SUCCESS"}, self.c_sha)
         )
-        self.assertTrue(
+        self.assertFalse(
             is_ci_check_passing({"head_sha": self.c_sha, "status": "COMPLETED", "conclusion": "SKIPPED"}, self.c_sha)
+        )
+        self.assertFalse(
+            is_ci_check_passing({"head_sha": self.c_sha, "status": "COMPLETED", "conclusion": "NEUTRAL"}, self.c_sha)
         )
 
         # verify_live_status_rollup

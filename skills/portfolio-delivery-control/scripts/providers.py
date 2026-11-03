@@ -400,11 +400,11 @@ def is_ci_check_passing(c: Any, cand_sha: str) -> bool:
     status = str(c.get("status") or "").upper()
     concl = str(c.get("conclusion") or "").upper()
     state = str(c.get("state") or "").upper()
-    if concl in {"FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
+    if concl in {"FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "SKIPPED", "NEUTRAL"}:
         return False
     if state in {"FAILURE", "ERROR"}:
         return False
-    return (status == "COMPLETED" and concl in {"SUCCESS", "NEUTRAL", "SKIPPED"}) or state == "SUCCESS"
+    return (status == "COMPLETED" and concl == "SUCCESS") or state == "SUCCESS"
 
 
 _is_ci_check_passing = is_ci_check_passing
@@ -519,7 +519,6 @@ def reconcile_and_merge_pr(
     pr_ref: str,
     commit_sha: str,
     merge_identity: str = "selamy-labs-bot",
-    ci_checks: list[dict[str, Any]] | None = None,
     runner: Callable[..., Any] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     id_ok, id_err = verify_provider_bot_actor(worktree, merge_identity, runner)

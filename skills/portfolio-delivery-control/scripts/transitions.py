@@ -78,20 +78,55 @@ def _guard_claim_freshness(wi: dict[str, Any], claim_token: str | None, now_dt: 
     return True, ""
 
 
-def _check_on_disk_report(rep_path_str: str | None, control_dir: Path | str | None) -> bool:
+def _matches_report_fields(
+    rep_data: dict[str, Any],
+    family: str,
+    session_id: str,
+    commit_sha: str,
+    tree_sha: str,
+    dispatch_id: str,
+) -> bool:
+    if rep_data.get("verdict") != "SHIP":
+        return False
+    if rep_data.get("commit_sha") != commit_sha or rep_data.get("tree_sha") != tree_sha:
+        return False
+    if rep_data.get("family") != family:
+        return False
+    rep_sess = rep_data.get("reviewer_session_id")
+    if rep_sess != session_id:
+        return False
+    if dispatch_id and rep_data.get("dispatch_id") != dispatch_id:
+        return False
+    return True
+
+
+def _check_on_disk_report(
+    rep_path_str: str | None,
+    expected_sha256: str | None,
+    control_dir: Path | str | None,
+    family: str,
+    session_id: str,
+    commit_sha: str,
+    tree_sha: str,
+    dispatch_id: str,
+) -> bool:
     if not rep_path_str:
         return False
     rep_p = Path(rep_path_str)
     if not rep_p.is_absolute() and control_dir:
         rep_p = Path(control_dir) / rep_p
-    if not rep_p.exists():
+    if not rep_p.is_file():
+        return False
+    if expected_sha256 and sha256_file(rep_p).lower() != expected_sha256.lower():
         return False
     try:
         rep_data = json.loads(rep_p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
     val_ok, _, _ = validate_review_receipt(rep_data)
-    return val_ok
+    if not val_ok:
+        return False
+    return _matches_report_fields(rep_data, family, session_id, commit_sha, tree_sha, dispatch_id)
 
 
 def _matches_receipt_fields(
@@ -104,13 +139,13 @@ def _matches_receipt_fields(
 ) -> bool:
     if data.get("verdict") != "SHIP":
         return False
-    rec_sess = data.get("reviewer_session_id") or data.get("session_id")
-    rec_fam = data.get("family") or data.get("reviewer_family")
+    rec_sess = data.get("reviewer_session_id")
+    rec_fam = data.get("family")
     if rec_fam != family or rec_sess != session_id:
         return False
     if dispatch_id and data.get("dispatch_id") != dispatch_id:
         return False
-    r_commit = data.get("commit_sha") or data.get("revision")
+    r_commit = data.get("commit_sha")
     r_tree = data.get("tree_sha")
     return r_commit == commit_sha and r_tree == tree_sha
 
@@ -135,7 +170,16 @@ def _check_receipt_file_on_disk(
         return False
     if not _matches_receipt_fields(data, family, session_id, commit_sha, tree_sha, dispatch_id):
         return False
-    return _check_on_disk_report(data.get("report_path"), control_dir)
+    return _check_on_disk_report(
+        data.get("report_path"),
+        data.get("report_sha256"),
+        control_dir,
+        family,
+        session_id,
+        commit_sha,
+        tree_sha,
+        dispatch_id,
+    )
 
 
 def _check_single_ship_match(
@@ -145,13 +189,13 @@ def _check_single_ship_match(
     control_dir: Path | str | None,
     work_id: str,
 ) -> bool:
-    r_commit = r.get("commit_sha") or r.get("revision")
+    r_commit = r.get("commit_sha")
     r_tree = r.get("tree_sha")
     if r_commit != commit_sha or r_tree != tree_sha:
         return False
     if control_dir and work_id:
-        fam = str(r.get("family") or r.get("reviewer_family") or "")
-        sess = str(r.get("reviewer_session_id") or r.get("session_id") or "")
+        fam = str(r.get("family") or "")
+        sess = str(r.get("reviewer_session_id") or "")
         disp = str(r.get("dispatch_id") or "")
         return _check_receipt_file_on_disk(control_dir, work_id, fam, sess, commit_sha, tree_sha, dispatch_id=disp)
     return True
@@ -230,108 +274,22 @@ def _guard_pre_transition(
     return True, ""
 
 
-def _extract_project_ci_checks(p_ci: dict[str, Any], commit_sha: str) -> tuple[bool, str, list[dict[str, Any]]]:
-    rev = str(p_ci.get("revision") or p_ci.get("head_sha") or "").strip()
-    if not rev or rev != commit_sha:
-        return False, "", []
-    status = str(p_ci.get("status") or "").lower()
-    ev = p_ci.get("evidence")
-    checks = [dict(c) for c in ev if isinstance(c, dict)] if isinstance(ev, list) else []
-    return True, status, checks
-
-
-def _check_project_row_ci(p_row: dict[str, Any], commit_sha: str) -> tuple[bool | None, list[dict[str, Any]] | None]:
-    p_ci = p_row.get("ci")
-    if not isinstance(p_ci, dict):
-        return None, None
-    valid, status, checks = _extract_project_ci_checks(p_ci, commit_sha)
-    if not valid:
-        return None, None
-    if status in {"failing", "failed", "failure"}:
-        return False, checks
-    if checks and not all(is_ci_check_passing(c, commit_sha) for c in checks):
-        return False, checks
-    if status in {"passing", "passed", "success"} and checks:
-        return True, checks
-    return None, None
-
-
-def _evaluate_live_ci_checks(
-    live_checks: list[dict[str, Any]], commit_sha: str
-) -> tuple[bool, str, list[dict[str, Any]]]:
-    if not live_checks:
-        return False, "required checks are missing", []
-    if not all(is_ci_check_passing(c, commit_sha) for c in live_checks):
-        return False, "exact-head provider required checks failed", live_checks
-    return True, "", live_checks
-
-
-def _evaluate_caller_ci_checks(ci_checks: Any, commit_sha: str) -> tuple[bool, str, list[dict[str, Any]]]:
-    if isinstance(ci_checks, list) and ci_checks:
-        if all(is_ci_check_passing(c, commit_sha) for c in ci_checks):
-            return True, "", ci_checks
-        return False, "exact-head provider required checks failed", ci_checks
-    return False, "required checks are missing", []
-
-
-def _guard_spec_task_ci(
-    doc: dict[str, Any],
-    wi: dict[str, Any],
-    commit_sha: str,
-    ci_checks: Any,
-    command_runner: Callable[..., Any] | None,
-    wt_path: Path,
-    pr_ref: str,
-) -> tuple[bool, str, list[dict[str, Any]]]:
-    project = wi.get("project") or wi.get("repo", "").split("/")[-1] or "default"
-    p_row = doc.get("delivery_control", {}).get("projects", {}).get(project, {})
-    p_res, p_checks = _check_project_row_ci(p_row, commit_sha)
-    if p_res is False:
-        return False, "provider CI status is failing", p_checks or []
-
-    if pr_ref:
-        live_checks = fetch_ci_checks_from_provider("", pr_ref, commit_sha, runner=command_runner, cwd=wt_path)
-        if live_checks is None:
-            return False, "exact-head provider required checks missing or failed", []
-        return _evaluate_live_ci_checks(live_checks, commit_sha)
-
-    if p_res is True and p_checks:
-        return True, "", p_checks
-
-    return _evaluate_caller_ci_checks(ci_checks, commit_sha)
-
-
-def _check_live_pr_ci_failure(
+def _guard_live_provider_ci(
     pr_ref: str,
     commit_sha: str,
     command_runner: Callable[..., Any] | None,
     wt_path: Path,
-) -> tuple[bool, list[dict[str, Any]]]:
+) -> tuple[bool, str]:
+    if not pr_ref:
+        return False, "pr_ref required for exact-head CI query"
     live_checks = fetch_ci_checks_from_provider("", pr_ref, commit_sha, runner=command_runner, cwd=wt_path)
     if live_checks is None:
-        return True, []
-    if not live_checks or not all(is_ci_check_passing(c, commit_sha) for c in live_checks):
-        return True, live_checks
-    return False, live_checks
-
-
-def _check_merge_pr_ci_failure(
-    p_row: dict[str, Any],
-    commit_sha: str,
-    ci_checks: list[dict[str, Any]] | None,
-    command_runner: Callable[..., Any] | None,
-    wt_path: Path,
-    pr_ref: str,
-) -> tuple[bool, list[dict[str, Any]]]:
-    p_res, p_checks = _check_project_row_ci(p_row, commit_sha)
-    if p_res is False:
-        return True, p_checks or []
-    if pr_ref:
-        return _check_live_pr_ci_failure(pr_ref, commit_sha, command_runner, wt_path)
-    if p_res is True and p_checks:
-        return False, p_checks
-    c_ok, _, c_checks = _evaluate_caller_ci_checks(ci_checks, commit_sha)
-    return not c_ok, c_checks
+        return False, "exact-head provider required checks missing or failed: provider returned None"
+    if not live_checks:
+        return False, "required checks are missing"
+    if not all(is_ci_check_passing(c, commit_sha) for c in live_checks):
+        return False, "exact-head provider required checks failed"
+    return True, ""
 
 
 def _dispatch_action(
@@ -345,7 +303,6 @@ def _dispatch_action(
     body: str,
     spec_path: Path | str | None,
     task_id: str,
-    ci_checks: list[dict[str, Any]] | None,
     command_runner: Callable[..., Any] | None,
     merge_identity: str = "selamy-labs-bot",
     remote: str = "origin",
@@ -357,9 +314,7 @@ def _dispatch_action(
             wt_path, target_branch, base_branch, commit_sha, title, body, runner=command_runner, remote=remote
         )
     if action == "merge_pr":
-        return reconcile_and_merge_pr(
-            wt_path, pr_ref, commit_sha, merge_identity=merge_identity, ci_checks=ci_checks, runner=command_runner
-        )
+        return reconcile_and_merge_pr(wt_path, pr_ref, commit_sha, merge_identity=merge_identity, runner=command_runner)
     if action == "complete_spec_task":
         return reconcile_and_complete_spec_task(spec_path, task_id)
     return False, {"error": f"Unknown action {action}", "reason_code": "INVALID_ACTION"}
@@ -422,33 +377,19 @@ def _validate_transition_args(
 
 def _guard_action_ci(
     action: str,
-    doc: dict[str, Any],
-    wi: dict[str, Any],
     commit_sha: str,
-    ci_checks: list[dict[str, Any]] | None,
     command_runner: Callable[..., Any] | None,
     wt_path: Path,
     pr_ref: str,
     iso_now: str,
 ) -> tuple[bool, dict[str, Any] | None]:
-    if action == "complete_spec_task":
-        ci_ok, ci_err, _ = _guard_spec_task_ci(doc, wi, commit_sha, ci_checks, command_runner, wt_path, pr_ref)
+    if action in {"complete_spec_task", "merge_pr"}:
+        ci_ok, ci_err = _guard_live_provider_ci(pr_ref, commit_sha, command_runner, wt_path)
         if not ci_ok:
             return False, {
                 "status": "refused",
                 "reason_code": "CI_CHECK_FAILED",
                 "error": ci_err,
-                "observed_at": iso_now,
-            }
-    if action == "merge_pr":
-        project = wi.get("repo", "").split("/")[-1]
-        p_row = doc.setdefault("delivery_control", {}).setdefault("projects", {}).setdefault(project, {})
-        fail_ci, _ = _check_merge_pr_ci_failure(p_row, commit_sha, ci_checks, command_runner, wt_path, pr_ref)
-        if fail_ci:
-            return False, {
-                "status": "refused",
-                "reason_code": "CI_CHECK_FAILED",
-                "error": "CI checks missing or failed",
                 "observed_at": iso_now,
             }
     return True, None
@@ -515,7 +456,15 @@ def _load_and_guard_transition_item(
         )
     wi = work_items[work_id]
 
-    ledger = dc.get("dispatch_ledger", {})
+    ledger = dc.get("dispatch_ledger")
+    if not isinstance(ledger, dict) or not ledger:
+        return (
+            False,
+            {"status": "refused", "reason_code": "MISSING_QUALIFICATION", "observed_at": iso_now},
+            doc,
+            wi,
+            status_file,
+        )
     g_ok, g_err = _guard_pre_transition(
         wi, action, claim_token, now_dt, control_dir=control_dir, dispatch_ledger=ledger
     )
@@ -533,7 +482,6 @@ def _dispatch_and_record_transition(
     commit_sha: str,
     pr_ref: str,
     params: tuple[str, str, str, str],
-    ci_checks: list[dict[str, Any]] | None,
     command_runner: Callable[..., Any] | None,
     merge_identity: str,
     remote: str,
@@ -553,7 +501,6 @@ def _dispatch_and_record_transition(
         body,
         wi.get("spec_path"),
         wi.get("task_id", ""),
-        ci_checks,
         command_runner,
         merge_identity=merge_identity,
         remote=remote,
@@ -587,7 +534,6 @@ def execute_transition(
     pr_title: str | None = None,
     pr_body: str | None = None,
     merge_identity: str = "selamy-labs-bot",
-    ci_checks: list[dict[str, Any]] | None = None,
     command_runner: Callable[..., Any] | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
@@ -607,9 +553,10 @@ def execute_transition(
     cand = wi.get("candidate", {})
     commit_sha = str(wi.get("commit_sha") or cand.get("commit_sha") or "")
     wt_path = Path(wi.get("claim", {}).get("worktree", "."))
-    pr_ref = str(pr_number or wi.get("issue_num") or target_branch)
+    pr_val = pr_number if pr_number is not None else wi.get("pr_number")
+    pr_ref = str(pr_val if pr_val is not None else (target_branch or "")).strip()
 
-    _, ci_ref = _guard_action_ci(action, doc, wi, commit_sha, ci_checks, command_runner, wt_path, pr_ref, iso_now)
+    _, ci_ref = _guard_action_ci(action, commit_sha, command_runner, wt_path, pr_ref, iso_now)
     if ci_ref:
         return ci_ref
 
@@ -623,7 +570,6 @@ def execute_transition(
         commit_sha,
         pr_ref,
         (target_branch, base_branch, title, body),
-        ci_checks,
         command_runner,
         merge_identity,
         remote,

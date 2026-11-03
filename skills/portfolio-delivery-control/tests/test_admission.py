@@ -216,6 +216,8 @@ class TestAdmission(unittest.TestCase):
         claim_token = c_res.get("claim_token")
 
         def mock_runner(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
+            if "diff-tree" in cmd:
+                return 0, "skills/portfolio-delivery-control/scripts/workflow.py\n"
             if "log" in cmd:
                 author_log = (
                     "claude-cir <claude-cir@selamy.dev>\n"
@@ -514,6 +516,8 @@ class TestAdmission(unittest.TestCase):
 
         # Path scope escape (e.g., ../outside or /etc/passwd)
         def mock_runner_good_git(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "diff-tree" in " ".join(cmd):
+                return 0, "../outside/file.py\n"
             if "log" in " ".join(cmd):
                 return (
                     0,
@@ -626,6 +630,8 @@ class TestAdmission(unittest.TestCase):
 
         # Mandatory gates failed
         def mock_runner_good(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            if "diff-tree" in " ".join(cmd):
+                return 0, "skills/portfolio-delivery-control/scripts/workflow.py\n"
             if "log" in " ".join(cmd):
                 return (
                     0,

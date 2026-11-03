@@ -403,7 +403,6 @@ def execute_transition(
     pr_title: str | None = None,
     pr_body: str | None = None,
     merge_identity: str = "selamy-labs-bot",
-    ci_checks: list[dict[str, Any]] | None = None,
     command_runner: Any = None,
     now: str | None = None,
 ) -> dict[str, Any]:
@@ -420,7 +419,6 @@ def execute_transition(
             pr_title=pr_title,
             pr_body=pr_body,
             merge_identity=merge_identity,
-            ci_checks=ci_checks,
             command_runner=command_runner,
             now=now,
         )

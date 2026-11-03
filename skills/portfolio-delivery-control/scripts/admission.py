@@ -50,6 +50,8 @@ def validate_worktree(
     worktree: Path | str,
     allowed_roots: list[str] | None = None,
 ) -> tuple[bool, str, Path]:
+    if not str(worktree).strip():
+        return False, "INVALID_WORKTREE_PATH", Path(worktree)
     roots = allowed_roots or DEFAULT_ALLOWED_ROOTS
     try:
         wt_path = Path(worktree).resolve()
@@ -321,10 +323,12 @@ def _verify_single_artifact(path_val: Path | str | None, hash_val: str | None) -
         return False, "ARTIFACT_NOT_FOUND"
     if not path_val:
         return True, ""
+    if not hash_val:
+        return False, "ARTIFACT_HASH_MISMATCH"
     p = Path(path_val)
     if not p.is_file():
         return False, "ARTIFACT_NOT_FOUND"
-    if hash_val and sha256_file(p).lower() != hash_val.lower():
+    if sha256_file(p).lower() != hash_val.lower():
         return False, "ARTIFACT_HASH_MISMATCH"
     return True, ""
 
@@ -377,6 +381,48 @@ def _build_candidate_dict(
     }
 
 
+def _validate_impl_claim_and_revision(
+    wi: dict[str, Any],
+    claim_token: str,
+    commit_sha: str,
+    tree_sha: str,
+    now_dt: datetime.datetime,
+    runner: Callable[..., Any] | None = None,
+) -> tuple[bool, str, Path]:
+    claim = wi.get("claim")
+    if not claim or claim.get("claim_token") != claim_token:
+        return False, "INVALID_CLAIM_TOKEN", Path(".")
+    if not _is_claim_active(claim, now_dt):
+        return False, "CLAIM_EXPIRED", Path(".")
+    if not (is_hex_40(commit_sha) and is_hex_40(tree_sha)):
+        return False, "INVALID_REVISION_SHA", Path(".")
+    wt_path = Path(claim["worktree"])
+    git_ok, git_err = _verify_git_commit_and_tree(wt_path, commit_sha, tree_sha, runner=runner)
+    if not git_ok:
+        return False, git_err, Path(".")
+    return True, "", wt_path
+
+
+def _validate_impl_paths_and_gates(
+    wt_path: Path,
+    commit_sha: str,
+    modified_paths: list[str] | None,
+    gate_results: dict[str, Any] | None,
+    runner: Callable[..., Any] | None = None,
+) -> tuple[bool, str, list[str]]:
+    derived_paths = get_commit_modified_paths(wt_path, commit_sha, runner=runner)
+    if not derived_paths:
+        return False, "EMPTY_MODIFIED_PATHS", []
+    if modified_paths is not None and set(modified_paths) != set(derived_paths):
+        return False, "PATH_SCOPE_ESCAPE", []
+    p_ok, p_err = inspect_modified_paths(derived_paths, [PROTECTED_SKILL_REL, "tests", "scripts"])
+    if not p_ok:
+        return False, p_err, []
+    if not verify_mandatory_gates(gate_results):
+        return False, "MANDATORY_GATES_FAILED", []
+    return True, "", derived_paths
+
+
 def _validate_impl_preconditions(
     wi: dict[str, Any],
     claim_token: str,
@@ -387,28 +433,10 @@ def _validate_impl_preconditions(
     now_dt: datetime.datetime,
     runner: Callable[..., Any] | None = None,
 ) -> tuple[bool, str, list[str]]:
-    claim = wi.get("claim")
-    if not claim or claim.get("claim_token") != claim_token:
-        return False, "INVALID_CLAIM_TOKEN", []
-    if not _is_claim_active(claim, now_dt):
-        return False, "CLAIM_EXPIRED", []
-    if not (is_hex_40(commit_sha) and is_hex_40(tree_sha)):
-        return False, "INVALID_REVISION_SHA", []
-    wt_path = Path(claim["worktree"])
-    git_ok, git_err = _verify_git_commit_and_tree(wt_path, commit_sha, tree_sha, runner=runner)
-    if not git_ok:
-        return False, git_err, []
-    paths = modified_paths
-    if not paths:
-        paths = get_commit_modified_paths(wt_path, commit_sha, runner=runner)
-    if not paths:
-        return False, "EMPTY_MODIFIED_PATHS", []
-    p_ok, p_err = inspect_modified_paths(paths, [PROTECTED_SKILL_REL, "tests", "scripts"])
-    if not p_ok:
-        return False, p_err, []
-    if not verify_mandatory_gates(gate_results):
-        return False, "MANDATORY_GATES_FAILED", []
-    return True, "", paths
+    ok, err, wt_path = _validate_impl_claim_and_revision(wi, claim_token, commit_sha, tree_sha, now_dt, runner=runner)
+    if not ok:
+        return False, err, []
+    return _validate_impl_paths_and_gates(wt_path, commit_sha, modified_paths, gate_results, runner=runner)
 
 
 def record_implementation(

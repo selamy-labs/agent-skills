@@ -477,8 +477,9 @@ class TestReviewReceipts(unittest.TestCase):
                 "tree_sha": self.t_sha,
             },
         ]
-        # Without dispatch_ledger (dispatch_ledger=None)
-        self.assertTrue(check_qualification(reviews, self.c_sha, self.t_sha, dispatch_ledger=None))
+        # Without dispatch_ledger (dispatch_ledger=None or empty) refuses
+        self.assertFalse(check_qualification(reviews, self.c_sha, self.t_sha, dispatch_ledger=None))
+        self.assertFalse(check_qualification(reviews, self.c_sha, self.t_sha, dispatch_ledger={}))
 
         # Ledger with non-dict entry
         bad_ledger1 = {"d1": "not-a-dict", "d2": {}, "d3": {}}

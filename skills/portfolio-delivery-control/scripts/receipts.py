@@ -116,13 +116,44 @@ def _filter_ship_reviews(reviews: list[dict[str, Any]], commit_sha: str, tree_sh
     return out
 
 
+def _collect_family_reviews(
+    ship_revs: list[dict[str, Any]],
+) -> tuple[bool, dict[str, dict[str, Any]]]:
+    by_family: dict[str, dict[str, Any]] = {}
+    for r in ship_revs:
+        fam = r.get("family")
+        if fam in by_family:
+            return False, {}
+        by_family[fam] = r
+    if set(by_family.keys()) != VALID_FAMILIES:
+        return False, {}
+    return True, by_family
+
+
+def _verify_distinct_identities(
+    reviews: list[dict[str, Any]],
+) -> bool:
+    sessions: set[str] = set()
+    dispatches: set[str] = set()
+    for r in reviews:
+        sess = r.get("reviewer_session_id")
+        disp = r.get("dispatch_id")
+        if not isinstance(sess, str) or not sess.strip():
+            return False
+        if not isinstance(disp, str) or not disp.strip():
+            return False
+        sessions.add(sess.strip())
+        dispatches.add(disp.strip())
+    return len(sessions) == 3 and len(dispatches) == 3
+
+
 def _check_ship_sets(ship_revs: list[dict[str, Any]]) -> bool:
     if len(ship_revs) < 3:
         return False
-    families = {r.get("family") for r in ship_revs}
-    sessions = {r.get("reviewer_session_id") or r.get("session_id") for r in ship_revs}
-    dispatches = {r.get("dispatch_id") for r in ship_revs if r.get("dispatch_id")}
-    return families == VALID_FAMILIES and len(sessions) >= 3 and len(dispatches) >= 3
+    ok, by_fam = _collect_family_reviews(ship_revs)
+    if not ok:
+        return False
+    return _verify_distinct_identities(list(by_fam.values()))
 
 
 def _is_single_ship_ledger_bound(
@@ -134,7 +165,7 @@ def _is_single_ship_ledger_bound(
     entry = dispatch_ledger.get(d_id)
     if not isinstance(entry, dict):
         return False
-    sess = r.get("reviewer_session_id") or r.get("session_id")
+    sess = r.get("reviewer_session_id")
     entry_sess = entry.get("reviewer_session_id") or entry.get("session_id")
     if entry.get("family") != r.get("family") or entry_sess != sess:
         return False
@@ -158,12 +189,12 @@ def check_qualification(
     dispatch_ledger: dict[str, Any] | None = None,
     work_id: str = "",
 ) -> bool:
+    if not isinstance(dispatch_ledger, dict) or not dispatch_ledger:
+        return False
     ship_revs = _filter_ship_reviews(reviews, commit_sha, tree_sha)
     if not _check_ship_sets(ship_revs):
         return False
-    if dispatch_ledger is not None:
-        return _check_ship_ledger_bindings(ship_revs, dispatch_ledger, work_id=work_id)
-    return True
+    return _check_ship_ledger_bindings(ship_revs, dispatch_ledger, work_id=work_id)
 
 
 def _is_session_already_dispatched(ledger: dict[str, Any], work_id: str, session_id: str) -> bool:
@@ -286,6 +317,7 @@ def build_review_receipt(
         "dispatch_id": dispatch_id,
         "findings": findings,
         "report_path": str(report_path),
+        "report_sha256": str(extra.get("report_sha256", "")),
         "observed_at": iso_now,
     }
     receipt.update(extra)
@@ -345,7 +377,7 @@ def _apply_review_state(
         p_row["next_action"] = f"Remediate defects for {work_id}"
         return {"stage": "implementing", "remediation_required": True, "defects": findings}
 
-    qualified = check_qualification(wi.get("reviews", []), cand_commit, cand_tree, dispatch_ledger)
+    qualified = check_qualification(wi.get("reviews", []), cand_commit, cand_tree, dispatch_ledger, work_id=work_id)
     wi["qualified"] = qualified
     if qualified:
         wi["remediation_required"] = False
@@ -585,6 +617,8 @@ def record_review(
     p_row = doc.setdefault("delivery_control", {}).setdefault("projects", {}).setdefault(project, {})
     p_row["last_progress_at"] = iso_now
     extra = _apply_review_state(wi, p_row, verdict, findings, cand_commit, cand_tree, ledger, work_id)
+    extra["report_sha256"] = report_sha256
+    extra["reviewer_id"] = reviewer_id
     return _write_review_receipt_file(
         cdir,
         doc,
