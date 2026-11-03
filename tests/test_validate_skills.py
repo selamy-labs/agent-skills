@@ -34,7 +34,8 @@ def _make_valid_job() -> dict[str, Any]:
         "steps": [
             {"uses": "actions/checkout@v7.0.0"},
             {"uses": "actions/setup-python@v6.3.0", "with": {"python-version": "3.12"}},
-            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1 python-hcl2==7.2.0"},
+            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
+            {"run": "python scripts/install_hcl_parser.py"},
             {"run": "python -m ruff check ."},
             {"run": "python -m ruff format --check --diff ."},
             {"run": "python tools/validate_skills.py"},
@@ -206,36 +207,39 @@ def test_validate_ruff_format_command() -> None:
 
 
 def test_validate_dependency_install_step() -> None:
-    valid_step = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1 python-hcl2==7.2.0"}
+    valid_step = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"}
     assert validate_dependency_install_step(valid_step) == []
-    unpinned = {"run": "pip install ruff==0.15.21 python-hcl2==7.2.0 pytest"}
+    unpinned = {"run": "pip install ruff==0.15.21 pytest"}
     assert any("Disallowed pip pin for 'pytest'" in e for e in validate_dependency_install_step(unpinned))
-    hcl2_only = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 python-hcl2==7.2.0"}
-    assert any("missing 'ruff==0.15.21'" in e for e in validate_dependency_install_step(hcl2_only))
+    cov_only = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0"}
+    assert any("missing 'ruff==0.15.21'" in e for e in validate_dependency_install_step(cov_only))
     ruff_only = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21"}
-    assert any("missing 'python-hcl2==7.2.0'" in e for e in validate_dependency_install_step(ruff_only))
+    assert validate_dependency_install_step(ruff_only) == []
+    hcl2_disallowed = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 python-hcl2==7.2.0"}
+    errs_hcl2 = validate_dependency_install_step(hcl2_disallowed)
+    assert any("Disallowed pip installation of 'python-hcl2'" in e for e in errs_hcl2)
     assert any("missing 'pip install'" in e for e in validate_dependency_install_step({"run": "npm install"}))
 
 
 def test_validate_dependency_install_step_rejects_suffix_pins() -> None:
-    ruff_suffix = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.210 python-hcl2==7.2.0"}
+    ruff_suffix = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.210"}
     errs = validate_dependency_install_step(ruff_suffix)
     assert any("missing 'ruff==0.15.21' pin" in e or "Disallowed pip pin" in e for e in errs)
 
-    hcl2_suffix = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 python-hcl2==7.2.0rc1"}
-    errs2 = validate_dependency_install_step(hcl2_suffix)
-    assert any("missing 'python-hcl2==7.2.0' pin" in e or "Disallowed pip pin" in e for e in errs2)
+    pytest_suffix = {"run": "pip install pytest==8.3.40 pytest-cov==6.0.0 ruff==0.15.21"}
+    errs2 = validate_dependency_install_step(pytest_suffix)
+    assert any("missing 'pytest==8.3.4' pin" in e or "Disallowed pip pin" in e for e in errs2)
 
 
 def test_validate_dependency_install_step_requires_actual_pip_install() -> None:
-    not_real_pip = {"run": "echo pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 python-hcl2==7.2.0"}
+    not_real_pip = {"run": "echo pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21"}
     errs = validate_dependency_install_step(not_real_pip)
     assert any("missing 'pip install' command" in e for e in errs)
 
-    python_m_pip = {"run": "python -m pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 python-hcl2==7.2.0"}
+    python_m_pip = {"run": "python -m pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21"}
     assert validate_dependency_install_step(python_m_pip) == []
 
-    python3_m_pip = {"run": "python3 -m pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 python-hcl2==7.2.0"}
+    python3_m_pip = {"run": "python3 -m pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21"}
     assert validate_dependency_install_step(python3_m_pip) == []
 
 
@@ -287,7 +291,7 @@ def test_validate_job_gates_missing_gates() -> None:
     job: dict[str, Any] = {"steps": []}
     errs = validate_job_gates(job, "tests")
     assert any("missing required gate: pip_ruff_pin" in e for e in errs)
-    assert any("missing required gate: pip_hcl2_pin" in e for e in errs)
+    assert any("missing required gate: install_hcl_parser" in e for e in errs)
     assert any("missing required gate: ruff_check" in e for e in errs)
     assert any("missing required gate: ruff_format" in e for e in errs)
     assert any("missing required gate: pytest" in e for e in errs)
@@ -784,7 +788,8 @@ def test_validate_job_gates_verify_permissions() -> None:
     job = {
         "permissions": {"contents": "read", "checks": "read"},
         "steps": [
-            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1 python-hcl2==7.2.0"},
+            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
+            {"run": "python scripts/install_hcl_parser.py"},
             {"run": "pytest --cov=tools --cov-branch --cov-report=json:coverage.json --cov-fail-under=90"},
             {"run": "python -m tests.test_coverage_threshold coverage.json"},
             {"run": "python -m ruff check ."},

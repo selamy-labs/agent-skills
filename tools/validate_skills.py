@@ -66,7 +66,6 @@ PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
     "pytest": "pytest==8.3.4",
     "pytest-cov": "pytest-cov==6.0.0",
     "ruff": "ruff==0.15.21",
-    "python-hcl2": "python-hcl2==7.2.0",
 }
 
 GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "python-hcl2", "complexipy", "vulture"})
@@ -324,7 +323,7 @@ def _check_single_pip_token(token: str, errors: list[str]) -> None:
         if expected is not None:
             if token != expected:
                 errors.append(f"Disallowed pip pin for {pkg_name!r}: got {token!r}, expected {expected!r}")
-        elif pkg_name in ("complexipy", "vulture"):
+        elif pkg_name in ("complexipy", "vulture", "python-hcl2"):
             errors.append(f"Disallowed pip installation of {pkg_name!r} in workflow: {token!r}")
 
 
@@ -362,7 +361,7 @@ def _find_pip_install_line(lines: list[str]) -> list[str] | None:
 
 
 def validate_dependency_install_step(step: dict[str, Any]) -> list[str]:
-    """Verify that dependency install step pins ruff, python-hcl2, pytest, and pytest-cov."""
+    """Verify that dependency install step pins ruff, pytest, and pytest-cov."""
     run_cmd = step.get("run", "")
     lines = [line.strip() for line in run_cmd.splitlines() if line.strip() and not line.strip().startswith("#")]
     tokens = _find_pip_install_line(lines)
@@ -412,6 +411,13 @@ def _check_script_token(tokens: list[str], gates_found: dict[str, bool]) -> None
     ):
         gates_found["tf_module_layout"] = True
     elif tok_tuple in (
+        ("python", "scripts/install_hcl_parser.py"),
+        ("python3", "scripts/install_hcl_parser.py"),
+        ("python", "-B", "scripts/install_hcl_parser.py"),
+        ("python3", "-B", "scripts/install_hcl_parser.py"),
+    ):
+        gates_found["install_hcl_parser"] = True
+    elif tok_tuple in (
         ("python", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"),
         ("python3", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"),
         ("python", "-B", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"),
@@ -458,7 +464,6 @@ def _handle_pip_tokens(
         errors.extend(prim_errs)
         return
     gates_found["pip_ruff_pin"] = True
-    gates_found["pip_hcl2_pin"] = True
     gates_found["pip_pytest_pin"] = True
     gates_found["pip_pytest_cov_pin"] = True
 
@@ -566,7 +571,7 @@ ALLOWED_USES_ACTIONS: frozenset[str] = frozenset({"actions/checkout@v7.0.0", "ac
 
 CANONICAL_QUALITY_RUN_ARGVS: frozenset[tuple[str, ...]] = frozenset(
     {
-        ("pip", "install", "pyyaml==6.0.1", "python-hcl2==7.2.0"),
+        ("pip", "install", "pyyaml==6.0.1"),
         ("python", "scripts/lint_skills.py"),
         ("python", "scripts/privacy_scan.py"),
         ("python", "scripts/test_privacy_scan.py"),
@@ -587,8 +592,8 @@ CANONICAL_TESTS_RUN_SEQUENCE: tuple[tuple[str, ...], ...] = (
         "pytest-cov==6.0.0",
         "ruff==0.15.21",
         "pyyaml==6.0.1",
-        "python-hcl2==7.2.0",
     ),
+    ("python", "scripts/install_hcl_parser.py"),
     ("python", "-m", "ruff", "check", "."),
     ("python", "-m", "ruff", "format", "--check", "--diff", "."),
     ("python", "tools/validate_skills.py"),
@@ -887,9 +892,9 @@ def _check_job_coe(job: dict[str, Any], job_name: str, errors: list[str]) -> Non
 def _init_gates_found(job_name: str) -> dict[str, bool]:
     gates_found = {
         "pip_ruff_pin": False,
-        "pip_hcl2_pin": False,
         "pip_pytest_pin": False,
         "pip_pytest_cov_pin": False,
+        "install_hcl_parser": False,
         "ruff_check": False,
         "ruff_format": False,
         "pytest": False,

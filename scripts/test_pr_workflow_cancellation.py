@@ -163,7 +163,6 @@ PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
     "pytest": "pytest==8.3.4",
     "pytest-cov": "pytest-cov==6.0.0",
     "ruff": "ruff==0.15.21",
-    "python-hcl2": "python-hcl2==7.2.0",
 }
 
 GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "python-hcl2", "complexipy", "vulture"})
@@ -878,7 +877,10 @@ def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:
     assert "pytest==8.3.4" in pip_steps[0].get("run", ""), "verify job must pin pytest==8.3.4"
     assert "pytest-cov==6.0.0" in pip_steps[0].get("run", ""), "verify job must pin pytest-cov==6.0.0"
     assert "ruff==0.15.21" in pip_steps[0].get("run", ""), "verify job must pin ruff==0.15.21"
-    assert "python-hcl2==7.2.0" in pip_steps[0].get("run", ""), "verify job must pin python-hcl2==7.2.0"
+    parser_steps = [
+        s for s in verify_steps if isinstance(s, dict) and "scripts/install_hcl_parser.py" in s.get("run", "")
+    ]
+    assert len(parser_steps) == 1, "verify job must run scripts/install_hcl_parser.py"
 
 
 def _find_suite_step_coverage_indices(lines: list[str]) -> tuple[int, int]:

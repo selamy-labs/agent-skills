@@ -153,7 +153,6 @@ PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
     "pytest": "pytest==8.3.4",
     "pytest-cov": "pytest-cov==6.0.0",
     "ruff": "ruff==0.15.21",
-    "python-hcl2": "python-hcl2==7.2.0",
 }
 
 GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "python-hcl2", "complexipy", "vulture"})
@@ -551,6 +550,10 @@ CANONICAL_TESTS_SCRIPT_COMMANDS: dict[tuple[str, ...], str] = {
     ("python3", "tools/tf_module_layout.py", "--self-test"): "tf_module_layout",
     ("python", "-B", "tools/tf_module_layout.py", "--self-test"): "tf_module_layout",
     ("python3", "-B", "tools/tf_module_layout.py", "--self-test"): "tf_module_layout",
+    ("python", "scripts/install_hcl_parser.py"): "install_hcl_parser",
+    ("python3", "scripts/install_hcl_parser.py"): "install_hcl_parser",
+    ("python", "-B", "scripts/install_hcl_parser.py"): "install_hcl_parser",
+    ("python3", "-B", "scripts/install_hcl_parser.py"): "install_hcl_parser",
     ("python", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"): "unittest",
     ("python3", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"): "unittest",
     ("python", "-B", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"): "unittest",
@@ -567,6 +570,7 @@ def _classify_script_gate(step_name: str, run_cmd: str) -> str | None:
         "tools/validate_skills.py",
         "tools/validate_marketplace.py",
         "tools/tf_module_layout.py",
+        "scripts/install_hcl_parser.py",
         "unittest discover",
         "skills/portfolio-delivery-control/tests",
         "tests.test_coverage_threshold",
@@ -720,6 +724,7 @@ def _validate_quality_tests_steps(steps: list[Any]) -> None:
         "validate_skills": "validate_skills.py",
         "validate_marketplace": "validate_marketplace.py",
         "tf_module_layout": "tf_module_layout.py --self-test",
+        "install_hcl_parser": "install_hcl_parser.py",
         "unittest": "unittest discover",
     }
     for gate_key, gate_desc in expected_gates.items():
@@ -1374,6 +1379,7 @@ class TestFormatGateNegativeMutants:
     @pytest.mark.parametrize(
         "target_script",
         [
+            "python scripts/install_hcl_parser.py",
             "python tools/validate_skills.py",
             "python tools/validate_marketplace.py",
             "python tools/tf_module_layout.py --self-test",

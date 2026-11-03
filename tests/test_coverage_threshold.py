@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -74,12 +76,27 @@ def _validate_session_marker_fields(data: dict[str, Any], marker: Path) -> None:
         raise AssertionError(f"Invalid timestamp in {marker}: {data.get('timestamp')}")
 
     import math
+    import time
 
     if not math.isfinite(ts) or ts <= 0:
         raise AssertionError(f"Invalid session marker timestamp in {marker}: {ts}")
     if ts < 1000000000.0:
         raise AssertionError(
             f"Invalid session marker timestamp in {marker}: {ts}. Ancient or forged marker timestamps are refused."
+        )
+    now = time.time()
+    max_age_seconds = 3600.0
+    if not (now - max_age_seconds <= ts <= now + 300.0):
+        raise AssertionError(
+            f"Session marker in {marker} timestamp {ts} is outside allowed recency window. "
+            "Stale, ancient, or future marker timestamps are refused."
+        )
+
+    report_digest = data.get("report_digest")
+    if not isinstance(report_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", report_digest):
+        raise AssertionError(
+            f"Session marker in {marker} is missing required valid 64-hex 'report_digest'. "
+            "Markers without report digest are refused."
         )
 
 
@@ -106,15 +123,18 @@ def _verify_report_session_binding(path: Path, marker_data: dict[str, Any], repo
             f"pytest session marker session_id ({expected_session_id!r}). Forged or unbound reports are refused."
         )
     expected_digest = marker_data.get("report_digest")
-    if expected_digest:
-        import hashlib
+    if not expected_digest or not isinstance(expected_digest, str):
+        raise AssertionError(
+            "Coverage session marker is missing required 'report_digest'. Markers without report digest are refused."
+        )
+    import hashlib
 
-        actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual_digest != expected_digest:
-            raise AssertionError(
-                f"Coverage report {path} digest ({actual_digest}) does not match "
-                f"session marker report_digest ({expected_digest}). Forged or replayed reports are refused."
-            )
+    actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual_digest != expected_digest:
+        raise AssertionError(
+            f"Coverage report {path} digest ({actual_digest}) does not match "
+            f"session marker report_digest ({expected_digest}). Forged or replayed reports are refused."
+        )
 
 
 def check_report_freshness(
@@ -149,12 +169,23 @@ def check_report_freshness(
             f"Stale or pre-existing reports are refused."
         )
 
+    import time
+
+    now = time.time()
+    max_age_seconds = 3600.0
+    report_mtime = path.stat().st_mtime
+    if not (now - max_age_seconds <= report_mtime <= now + 300.0):
+        raise AssertionError(
+            f"Coverage report {path} mtime {report_mtime:.2f} is outside the allowed recency window. "
+            "Stale, ancient, or future reports are refused."
+        )
+
     _verify_report_session_binding(path, marker_data, report_data)
 
     try:
-        marker.unlink(missing_ok=True)
-    except OSError:
-        pass
+        marker.unlink()
+    except Exception as exc:
+        raise AssertionError(f"Failed to consume single-use coverage session marker {marker}: {exc}")
 
 
 def verify_coverage_report(
@@ -474,9 +505,14 @@ def test_verify_coverage_report_refuses_git_tracked_coverage_json(
 
 def test_verify_coverage_report_refuses_pre_existing_stale_report(tmp_path: Path) -> None:
     """AS-TS-R17-01: A pre-existing coverage report created before the test run started must be refused."""
+    import time
+
     marker = tmp_path / ".coverage_session_start"
-    run_start = 1700000100.0
-    marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": run_start}), encoding="utf-8")
+    run_start = time.time()
+    marker.write_text(
+        json.dumps({"session_id": "test-sess", "timestamp": run_start, "report_digest": "0" * 64}),
+        encoding="utf-8",
+    )
 
     report = tmp_path / "coverage.json"
     report.write_text(
@@ -492,7 +528,7 @@ def test_verify_coverage_report_refuses_pre_existing_stale_report(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    old_time = run_start - 3600.0
+    old_time = run_start - 100.0
     os.utime(report, (old_time, old_time))
 
     with pytest.raises(AssertionError, match="older than the current pytest run"):
@@ -582,7 +618,10 @@ def test_verify_coverage_report_refuses_tracked_marker(tmp_path: Path, monkeypat
         encoding="utf-8",
     )
     marker = tmp_path / ".coverage_session_start"
-    marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": 1700000000.0}), encoding="utf-8")
+    marker.write_text(
+        json.dumps({"session_id": "test-sess", "timestamp": time.time(), "report_digest": "0" * 64}),
+        encoding="utf-8",
+    )
 
     def _mock_is_tracked(p: Path | str) -> bool:
         return str(p).endswith(".coverage_session_start")
@@ -660,7 +699,10 @@ def test_verify_coverage_report_refuses_mismatched_session_id(tmp_path: Path) ->
 
     now = time.time()
     marker = tmp_path / ".coverage_session_start"
-    marker.write_text(json.dumps({"session_id": "session-active", "timestamp": now}), encoding="utf-8")
+    marker.write_text(
+        json.dumps({"session_id": "session-active", "timestamp": now, "report_digest": "0" * 64}),
+        encoding="utf-8",
+    )
 
     report = tmp_path / "coverage.json"
     report.write_text(
@@ -677,21 +719,24 @@ def test_verify_coverage_report_refuses_mismatched_session_id(tmp_path: Path) ->
 
 
 def test_verify_coverage_report_accepts_valid_matching_session(tmp_path: Path) -> None:
-    """AS-TS-R20-02 / SOL61-03: Valid matching session_id and fresh timestamp passes."""
+    """AS-TS-R20-02 / SOL61-03: Valid matching session_id, digest, and fresh timestamp passes."""
+    import hashlib
     import time
 
     now = time.time()
-    marker = tmp_path / ".coverage_session_start"
-    marker.write_text(json.dumps({"session_id": "sess-ok", "timestamp": now}), encoding="utf-8")
-
     report = tmp_path / "coverage.json"
-    report.write_text(
-        json.dumps(
-            {
-                "session_id": "sess-ok",
-                "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
-            }
-        ),
+    rep_content = json.dumps(
+        {
+            "session_id": "sess-ok",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(rep_content, encoding="utf-8")
+    digest = hashlib.sha256(rep_content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps({"session_id": "sess-ok", "timestamp": now, "report_digest": digest}),
         encoding="utf-8",
     )
     percent, branch_pct = verify_coverage_report(report)
@@ -775,16 +820,134 @@ def test_replaying_older_report_with_forged_marker_fails(tmp_path: Path) -> None
         ),
         encoding="utf-8",
     )
-    old_time = now - 7200.0
+    old_time = now - 100.0
     os.utime(report, (old_time, old_time))
 
     marker = tmp_path / ".coverage_session_start"
     marker.write_text(
-        json.dumps({"session_id": "previous-pytest-session", "timestamp": now}),
+        json.dumps({"session_id": "previous-pytest-session", "timestamp": now, "report_digest": "0" * 64}),
         encoding="utf-8",
     )
 
     with pytest.raises(AssertionError, match="older than the current pytest run"):
+        verify_coverage_report(report)
+
+
+def test_marker_missing_report_digest_fails(tmp_path: Path) -> None:
+    """TS22-04 / SOL61-04: Marker without report_digest is refused."""
+    import time
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "session_id": "sess-no-digest",
+                "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps({"session_id": "sess-no-digest", "timestamp": now}),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="report_digest"):
+        verify_coverage_report(report)
+
+
+def test_sol61_04_forged_marker_ancient_timestamp_replay_fails(tmp_path: Path) -> None:
+    """SOL61-04 / ARGON-TS-R22-002: Replaying historical report (mtime=1700000001)
+    with forged marker (ts=1700000000) is refused.
+    """
+    import hashlib
+
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "previous-pytest-session",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    os.utime(report, (1700000001.0, 1700000001.0))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "previous-pytest-session",
+                "timestamp": 1700000000.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+    expected_err = "Stale, ancient, or future marker timestamps are refused|outside allowed recency window"
+    with pytest.raises(AssertionError, match=expected_err):
+        verify_coverage_report(report)
+
+
+def test_stale_report_outside_recency_window_fails(tmp_path: Path) -> None:
+    """ARGON-TS-R22-002: Report with mtime older than allowed recency window (now - 7200s) fails closed."""
+    import hashlib
+    import time
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "sess-too-old",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    os.utime(report, (now - 7200.0, now - 7200.0))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "sess-too-old",
+                "timestamp": now - 7300.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="outside allowed recency window|Stale, ancient, or future"):
+        verify_coverage_report(report)
+
+
+def test_marker_unlink_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SOL61-04: Failure to consume marker must fail closed."""
+    import hashlib
+    import time
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "sess-unlink-fail",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps({"session_id": "sess-unlink-fail", "timestamp": now, "report_digest": digest}),
+        encoding="utf-8",
+    )
+
+    def _mock_unlink(self: Path) -> None:
+        raise PermissionError("Access denied")
+
+    monkeypatch.setattr(Path, "unlink", _mock_unlink)
+    with pytest.raises(AssertionError, match="Failed to consume single-use coverage session marker"):
         verify_coverage_report(report)
 
 

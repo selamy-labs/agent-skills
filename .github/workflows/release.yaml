@@ -43,7 +43,9 @@ jobs:
         # unpinned formatter would let a future release turn main red with no
         # code change — defeating the "formatter output is the source of truth"
         # goal of the format gate (#101).
-        run: pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1 python-hcl2==7.2.0
+        run: pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1
+      - name: Install HCL parser
+        run: python scripts/install_hcl_parser.py
       - name: Full test suite verification on exact commit
         run: |
           python3 -B scripts/lint_skills.py

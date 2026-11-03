@@ -29,7 +29,8 @@ def _make_valid_verify_job() -> dict[str, Any]:
         "runs-on": "ubuntu-latest",
         "steps": [
             {"uses": "actions/checkout@v7.0.0"},
-            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1 python-hcl2==7.2.0"},
+            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
+            {"run": "python scripts/install_hcl_parser.py"},
             {"run": "python -m ruff check ."},
             {"run": "python -m ruff format --check --diff ."},
             {"run": "python tools/validate_skills.py"},

@@ -507,19 +507,19 @@ class TestHcl2StructuredParser:
             violation, _, _ = scan_tf_file(snippet)
             assert violation, f"Unterminated heredoc must fail as syntax violation: {snippet!r}"
 
-    def test_parse_hcl2_content_detects_blocks(self) -> None:
-        from tools.tf_module_layout import _parse_hcl2_content
+    def test_parse_hcl_content_detects_blocks(self) -> None:
+        from tools.tf_module_layout import _parse_hcl_content
 
         hcl = 'provider "google" {}\nterraform {\n  backend "gcs" {\n    bucket = "b"\n  }\n}\n'
-        violation, prov, back = _parse_hcl2_content(hcl)
+        violation, prov, back = _parse_hcl_content(hcl)
         assert not violation
         assert prov
         assert back
 
-    def test_parse_hcl2_content_syntax_error(self) -> None:
-        from tools.tf_module_layout import _parse_hcl2_content
+    def test_parse_hcl_content_syntax_error(self) -> None:
+        from tools.tf_module_layout import _parse_hcl_content
 
-        violation, _, _ = _parse_hcl2_content("locals { x =")
+        violation, _, _ = _parse_hcl_content("locals { x =")
         assert violation
 
     def test_syntax_error_in_child_module_flagged(self, tmp_path: Path) -> None:
@@ -539,9 +539,9 @@ class TestHcl2StructuredParser:
     def test_as_ts_r8_001_reproduction_cases_pass_hcl2_and_child_lint(
         self, tmp_path: Path, case_name: str, content: str
     ) -> None:
-        from tools.tf_module_layout import _parse_hcl2_content
+        from tools.tf_module_layout import _parse_hcl_content
 
-        violation, has_prov, has_back = _parse_hcl2_content(content)
+        violation, has_prov, has_back = _parse_hcl_content(content)
         assert not violation, f"Expected hcl2_violation == False for {case_name}"
         assert not has_prov, f"Expected has_provider == False for {case_name}"
         assert not has_back, f"Expected has_backend == False for {case_name}"
@@ -556,7 +556,7 @@ class TestHcl2StructuredParser:
         assert errors == [], f"Expected errors == [] for {case_name}, got: {errors}"
 
     def test_odd_identifiers_and_unparseable_content_fail_closed(self) -> None:
-        from tools.tf_module_layout import _parse_hcl2_content
+        from tools.tf_module_layout import _parse_hcl_content
 
         for snippet in (
             'locals {\n  x = "${join(\\"\\", [<<\u2118OF\n{\n\u2118OF\n])}"\n}\n',
@@ -564,7 +564,7 @@ class TestHcl2StructuredParser:
             "locals {\n  x = <<EOF\n}\n",
             "locals {\n  bad_syntax =\n",
         ):
-            violation, _, _ = _parse_hcl2_content(snippet)
+            violation, _, _ = _parse_hcl_content(snippet)
             assert violation, f"Expected violation == True for unparseable snippet: {snippet!r}"
 
 
@@ -798,13 +798,13 @@ class TestArgonR19HclCases:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (mod / name).write_text("# core\n", encoding="utf-8")
         snippet = (
-            'locals {\n  x = "%{if var.a == \\"/*\\"}a%{endif}"\n}\n'
+            'locals {\n  x = "%{if var.a == "/*"}a%{endif}"\n}\n'
             'provider "aws" {}\n'
-            'locals {\n  y = "%{if var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+            'locals {\n  y = "%{if var.a == "*/z = "}b%{endif}"\n}\n'
         )
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+        assert any("provider configuration in non-root module" in e for e in errors), (
             f"Expected provider error, got: {errors}"
         )
 
@@ -834,9 +834,7 @@ class TestR20ReviewerProbes:
         snippet = 'locals {\n  x = "%%{ "\n}\nprovider "aws" {}\nlocals {\n  y = "a" # " }"\n}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
-            f"Expected provider error, got: {errors}"
-        )
+        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"
 
     def test_opus_escaped_percent_detects_backend(self, tmp_path: Path) -> None:
         mod = tmp_path / "mod_opus_back"
@@ -860,7 +858,7 @@ class TestR20ReviewerProbes:
         )
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+        assert any("provider configuration in non-root module" in e for e in errors), (
             f"Expected provider error, got: {errors}"
         )
 
@@ -886,9 +884,7 @@ class TestR20ReviewerProbes:
         snippet = 'locals {\n  x = <<EOF\nEOF\n  y = <<EOF\nEOF\n}\nprovider "aws" {}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
-            f"Expected provider error, got: {errors}"
-        )
+        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"
 
     def test_sol_empty_heredoc_detects_backend(self, tmp_path: Path) -> None:
         mod = tmp_path / "mod_sol_empty_back"
@@ -919,3 +915,122 @@ class TestR20ReviewerProbes:
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
         assert errors == [], f"Commented empty heredoc must pass, got: {errors}"
+
+    def test_intervening_comment_detects_provider(self, tmp_path: Path) -> None:
+        """ARGON-TS-R21-002 / SOL61-05: Intervening comment after heredoc does not hide provider."""
+        mod = tmp_path / "mod_intervening"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  x = <<EOF\nEOF\n}\n# comment\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("provider configuration in non-root module" in e for e in errors), errors
+
+    def test_nospace_provider_header_detects_provider(self, tmp_path: Path) -> None:
+        """ARGON-TS-R21-002 / SOL61-05: provider"aws"{} without space detects provider."""
+        mod = tmp_path / "mod_nospace"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  x = <<EOF\nEOF\n}\nprovider"aws"{}\nlocals {\n  y = <<EOF\nEOF\n}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("provider configuration in non-root module" in e for e in errors), errors
+
+    def test_provider_attribute_collision_fails_closed(self, tmp_path: Path) -> None:
+        """SOL61-02: provider "aws" {} followed by provider = {} must fail closed."""
+        mod = tmp_path / "mod_prov_coll"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'provider "aws" {}\nprovider = {}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+
+    def test_terraform_attribute_collision_fails_closed(self, tmp_path: Path) -> None:
+        """SOL61-02: terraform { backend "s3" {} } followed by terraform = {} must fail closed."""
+        mod = tmp_path / "mod_tf_coll"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'terraform {\n  backend "s3" {}\n}\nterraform = {}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
+
+    def test_bare_cr_and_double_bom_fail_closed(self) -> None:
+        """SOL61-03: Bare carriage returns and double UTF-8 BOM must fail closed as syntax violations."""
+        v_cr, _, _ = scan_tf_file("locals {\r x = 1\r}\r")
+        assert v_cr, "Bare CR without LF must fail closed"
+
+        v_bom, _, _ = scan_tf_file("\ufeff\ufefflocals { x = 1 }\n")
+        assert v_bom, "Double UTF-8 BOM must fail closed"
+
+    def test_mismatched_binary_sha256_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TS22-01 / SOL61-01: A binary with mismatched SHA-256 must fail closed."""
+        fake_bin = tmp_path / "fake_hcl2json"
+        fake_bin.write_text("#!/bin/sh\necho '{}'\n")
+        fake_bin.chmod(0o755)
+        monkeypatch.setenv("HCL2JSON_PATH", str(fake_bin))
+
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b, "Mismatched binary must fail closed as syntax violation"
+
+    def test_unsupported_platform_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TS22-01 / SOL61-01: Unsupported platform must fail closed."""
+        import tools.tf_module_layout as tml
+
+        monkeypatch.setattr(tml, "_get_platform_key", lambda: "solaris_sparc")
+
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b, "Unsupported platform must fail closed as syntax violation"
+
+    def test_missing_binary_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TS22-01 / SOL61-01: Missing binary must fail closed."""
+        monkeypatch.setenv("HCL2JSON_PATH", str(tmp_path / "nonexistent_hcl2json"))
+
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b, "Missing binary must fail closed as syntax violation"
+
+    @pytest.mark.parametrize(
+        "location_probe",
+        ["tmp_hcl2json", "path_lookup", "local_bin", "cache_path", "tools_bin"],
+    )
+    def test_mismatched_binary_at_probed_locations_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location_probe: str
+    ) -> None:
+        """ARGON-TS-R22-001 / TS22-01: Mismatched binary at /tmp or probed locations fails closed."""
+        fake_bin = tmp_path / "fake_hcl2json"
+        fake_bin.write_text("#!/bin/sh\necho '{}'\n")
+        fake_bin.chmod(0o755)
+
+        if location_probe == "tmp_hcl2json":
+            tmp_bin = Path("/tmp/hcl2json_test_probe_mismatch")
+            try:
+                tmp_bin.write_text("#!/bin/sh\necho '{}'\n")
+                tmp_bin.chmod(0o755)
+                monkeypatch.setenv("HCL2JSON_PATH", str(tmp_bin))
+                v, p, b = scan_tf_file('provider "aws" {}\n')
+                assert v and not p and not b
+            finally:
+                try:
+                    tmp_bin.unlink()
+                except OSError:
+                    pass
+        elif location_probe == "path_lookup":
+            import os
+
+            fake_dir = tmp_path / "bin"
+            fake_dir.mkdir()
+            (fake_dir / "hcl2json").write_text("#!/bin/sh\necho '{}'\n")
+            (fake_dir / "hcl2json").chmod(0o755)
+            monkeypatch.setenv("PATH", f"{fake_dir}:{os.environ.get('PATH', '')}")
+            monkeypatch.setenv("HCL2JSON_PATH", str(tmp_path / "nonexistent_hcl2json"))
+            v, p, b = scan_tf_file('provider "aws" {}\n')
+            assert v and not p and not b
+        else:
+            monkeypatch.setenv("HCL2JSON_PATH", str(fake_bin))
+            v, p, b = scan_tf_file('provider "aws" {}\n')
+            assert v and not p and not b
