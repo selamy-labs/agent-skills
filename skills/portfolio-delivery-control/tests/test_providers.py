@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -22,8 +23,11 @@ from providers import (  # noqa: E402
     _extract_repo_required_checks,
     _is_named_check_passing,
     _merge_check_descriptors,
+    _normalize_commit_status_item,
+    _parse_statuses_data,
     _post_merge_verify,
     _read_policy_dict,
+    _resolve_merge_required_checks,
     _run_cmd,
     _verify_created_pr,
     _verify_merge_pr_view,
@@ -121,6 +125,45 @@ def _make_app_pinned_merge_runner(c_sha: str, merged: list[bool], fail_check_run
         if "pr merge" in cmd_str:
             merged[0] = True
             return 0, "Merged"
+        return 0, ""
+
+    return runner
+
+
+def _make_merge_flow_runner(
+    c_sha: str, merged_state: list[bool], check_name: str = "test", empty_provider_checks: bool = False
+) -> Callable[..., tuple[int, str]]:
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "api user" in cmd_str:
+            return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+        if "required_status_checks" in cmd_str:
+            return 0, json.dumps([] if empty_provider_checks else {"contexts": [check_name]})
+        if "rules/branches" in cmd_str:
+            return 0, json.dumps([])
+        if "pr view" in cmd_str:
+            if merged_state[0]:
+                return 0, json.dumps(
+                    {
+                        "state": "MERGED",
+                        "mergedAt": "2026-11-03T10:00:00Z",
+                        "mergeCommit": {"oid": "c" * 40},
+                        "headRefOid": c_sha,
+                    }
+                )
+            return 0, json.dumps(
+                {
+                    "state": "OPEN",
+                    "headRefOid": c_sha,
+                    "baseRefName": "main",
+                    "statusCheckRollup": [
+                        {"name": check_name, "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                    ],
+                }
+            )
+        if "pr merge" in cmd_str:
+            merged_state[0] = True
+            return 0, "Merged PR #152"
         return 0, ""
 
     return runner
@@ -262,6 +305,7 @@ class TestProviders(unittest.TestCase):
     def test_reconcile_and_merge_pr_already_merged(self) -> None:
         merged_pr_view = {
             "state": "MERGED",
+            "baseRefName": "main",
             "mergedAt": "2026-11-03T10:00:00Z",
             "mergeCommit": {"oid": "c" * 40},
             "headRefOid": self.c_sha,
@@ -276,6 +320,8 @@ class TestProviders(unittest.TestCase):
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "pr view" in cmd_str:
                 return 0, json.dumps(merged_pr_view)
             return 0, ""
@@ -459,41 +505,8 @@ class TestProviders(unittest.TestCase):
 
     def test_reconcile_and_merge_pr_execution_and_post_verify(self) -> None:
         merged_state = [False]
-
-        def _flow_pr_view() -> str:
-            if merged_state[0]:
-                return json.dumps(
-                    {
-                        "state": "MERGED",
-                        "mergedAt": "2026-11-03T10:00:00Z",
-                        "mergeCommit": {"oid": "c" * 40},
-                        "headRefOid": self.c_sha,
-                    }
-                )
-            return json.dumps(
-                {
-                    "state": "OPEN",
-                    "headRefOid": self.c_sha,
-                    "statusCheckRollup": [
-                        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
-                    ],
-                }
-            )
-
-        def merge_flow_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            cmd_str = " ".join(cmd)
-            if "api user" in cmd_str:
-                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
-            if "required_status_checks" in cmd_str:
-                return 0, json.dumps({"contexts": ["test"]})
-            if "pr view" in cmd_str:
-                return 0, _flow_pr_view()
-            if "pr merge" in cmd_str:
-                merged_state[0] = True
-                return 0, "Merged PR #152"
-            return 0, ""
-
-        ok, res = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=merge_flow_runner)
+        runner = _make_merge_flow_runner(self.c_sha, merged_state)
+        ok, res = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=runner)
         self.assertTrue(ok)
         self.assertEqual(res.get("state"), "MERGED")
 
@@ -850,11 +863,14 @@ class TestProviders(unittest.TestCase):
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "pr view" in cmd_str:
                 return 0, json.dumps(
                     {
                         "state": "MERGED",
                         "headRefOid": self.c_sha,
+                        "baseRefName": "main",
                         "mergedAt": "2026-11-03T10:00:00Z",
                         "mergeCommit": {"oid": "d" * 40},
                         "statusCheckRollup": [
@@ -876,11 +892,14 @@ class TestProviders(unittest.TestCase):
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "pr view" in cmd_str:
                 return 0, json.dumps(
                     {
                         "state": "OPEN",
                         "headRefOid": self.c_sha,
+                        "baseRefName": "main",
                         "statusCheckRollup": [
                             {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
                         ],
@@ -901,6 +920,8 @@ class TestProviders(unittest.TestCase):
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "pr merge" in cmd_str:
                 return 0, "Merge queued"
             if "pr view" in cmd_str:
@@ -908,6 +929,7 @@ class TestProviders(unittest.TestCase):
                     {
                         "state": "OPEN",
                         "headRefOid": self.c_sha,
+                        "baseRefName": "main",
                         "statusCheckRollup": [
                             {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
                         ],
@@ -1115,6 +1137,93 @@ class TestProviders(unittest.TestCase):
         self.assertTrue(ok6)
         self.assertEqual(reason6, "")
         self.assertEqual(info6.get("baseRefName"), "main")
+
+        def missing_base_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"headRefOid": self.c_sha})
+
+        ok7, reason7, _, _ = _verify_merge_pr_view(
+            self.worktree, "152", self.c_sha, runner=missing_base_runner, expected_base_branch="main"
+        )
+        self.assertFalse(ok7)
+        self.assertEqual(reason7, "BASE_BRANCH_MISMATCH")
+
+        def empty_base_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"headRefOid": self.c_sha, "baseRefName": ""})
+
+        ok8, reason8, _, _ = _verify_merge_pr_view(
+            self.worktree, "152", self.c_sha, runner=empty_base_runner, expected_base_branch="main"
+        )
+        self.assertFalse(ok8)
+        self.assertEqual(reason8, "BASE_BRANCH_MISMATCH")
+
+    def test_resolve_merge_required_checks_contract(self) -> None:
+        """ARGON-R18-002: _resolve_merge_required_checks contract and control_dir propagation."""
+        ok, res = _resolve_merge_required_checks(
+            "selamy-labs/agent-skills", "152", "main", self.worktree, None, [{"context": "Explicit"}]
+        )
+        self.assertTrue(ok)
+        self.assertEqual(res, [{"context": "Explicit"}])
+
+        def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "error"
+
+        ok_none, res_none = _resolve_merge_required_checks(
+            "selamy-labs/agent-skills",
+            "152",
+            expected_base_branch="",
+            worktree=self.worktree,
+            runner=fail_runner,
+            required_checks=None,
+            info={},
+        )
+        self.assertFalse(ok_none)
+        self.assertIsNone(res_none)
+
+        ctrl = self.worktree / "ctrl_merge"
+        ctrl.mkdir(parents=True, exist_ok=True)
+        (ctrl / "delivery-policy.json").write_text(
+            json.dumps({"authoritative": True, "required_checks": {"agent-skills": ["PolicyGate"]}}),
+            encoding="utf-8",
+        )
+
+        def empty_provider_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps([])
+
+        ok_ctrl, res_ctrl = _resolve_merge_required_checks(
+            "selamy-labs/agent-skills",
+            "152",
+            expected_base_branch="",
+            worktree=self.worktree,
+            runner=empty_provider_runner,
+            required_checks=None,
+            control_dir=ctrl,
+            info={"baseRefName": "release"},
+        )
+        self.assertTrue(ok_ctrl)
+        self.assertIsNotNone(res_ctrl)
+        self.assertEqual(res_ctrl[0]["context"], "PolicyGate")  # type: ignore[index]
+
+    def test_reconcile_and_merge_pr_forwards_control_dir(self) -> None:
+        """ARGON-R18-002: reconcile_and_merge_pr forwards control_dir to resolve checks."""
+        ctrl = self.worktree / "ctrl_fwd"
+        ctrl.mkdir(parents=True, exist_ok=True)
+        (ctrl / "delivery-policy.json").write_text(
+            json.dumps({"authoritative": True, "required_checks": {"agent-skills": ["PolicyCheck"]}}),
+            encoding="utf-8",
+        )
+        merged_state = [False]
+        runner = _make_merge_flow_runner(self.c_sha, merged_state, check_name="PolicyCheck", empty_provider_checks=True)
+
+        ok, res = reconcile_and_merge_pr(
+            self.worktree,
+            "152",
+            self.c_sha,
+            runner=runner,
+            control_dir=ctrl,
+            repo="selamy-labs/agent-skills",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(res.get("state"), "MERGED")
 
     def test_fetch_pr_base_branch_variations(self) -> None:
         def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
@@ -1570,7 +1679,7 @@ class TestProviders(unittest.TestCase):
                         {
                             "context": "CommitStatusA",
                             "state": "success",
-                            "creator": {"id": 30},
+                            "app": {"id": 30},
                         }
                     ]
                 )
@@ -1645,6 +1754,344 @@ class TestProviders(unittest.TestCase):
         )
         self.assertFalse(ok_w)
         self.assertEqual(code_w, "CI_CHECK_MISSING")
+
+    def test_commit_status_history_pending_then_success_passes(self) -> None:
+        """WFM18-01 / SOL-R18-006: Older pending status superseded by newer success passes."""
+        statuses_history = [
+            {"context": "codecov/patch", "state": "success"},
+            {"context": "codecov/patch", "state": "pending"},
+        ]
+        parsed = _parse_statuses_data(json.dumps(statuses_history))
+        self.assertIsNotNone(parsed)
+        self.assertEqual(len(parsed), 1)  # type: ignore[arg-type]
+        self.assertEqual(parsed[0]["state"], "success")  # type: ignore[index]
+
+        req = [{"context": "Quality", "app_id": 100}]
+        rollup = [
+            {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha},
+        ]
+        check_runs = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 100},
+            },
+            {
+                "name": "codecov/patch",
+                "context": "codecov/patch",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "state": "SUCCESS",
+                "head_sha": self.c_sha,
+                "app": None,
+            },
+        ]
+        ok, err = verify_live_status_rollup(rollup, self.c_sha, required_checks=req, check_runs=check_runs)
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+
+    def test_commit_status_history_failure_then_success_passes(self) -> None:
+        """SOL-R18-006: Older failure status superseded by newer success passes."""
+        statuses_history = [
+            {"context": "deploy/preview", "state": "success"},
+            {"context": "deploy/preview", "state": "failure"},
+        ]
+        parsed = _parse_statuses_data(json.dumps(statuses_history))
+        self.assertIsNotNone(parsed)
+        self.assertEqual(len(parsed), 1)  # type: ignore[arg-type]
+        self.assertEqual(parsed[0]["state"], "success")  # type: ignore[index]
+
+    def test_commit_status_history_latest_pending_refuses_when_required(self) -> None:
+        """WFM18-01: Latest pending status refuses when that context is required."""
+        req = [{"context": "ci/e2e", "app_id": 50}]
+        rollup = [
+            {
+                "name": "ci/e2e",
+                "status": "IN_PROGRESS",
+                "conclusion": "PENDING",
+                "state": "PENDING",
+                "head_sha": self.c_sha,
+            }
+        ]
+        check_runs = [
+            {
+                "name": "ci/e2e",
+                "context": "ci/e2e",
+                "status": "IN_PROGRESS",
+                "conclusion": "PENDING",
+                "state": "PENDING",
+                "head_sha": self.c_sha,
+                "app": {"id": 50},
+            }
+        ]
+        ok, err = verify_live_status_rollup(rollup, self.c_sha, required_checks=req, check_runs=check_runs)
+        self.assertFalse(ok)
+        self.assertEqual(err, "CI_CHECK_FAILED")
+
+    def test_commit_status_history_latest_pending_does_not_poison_unrelated_rollup(self) -> None:
+        """WFM18-01: An unrelated latest pending status does not trip clean rollup sweep."""
+        req = [{"context": "Quality", "app_id": 100}]
+        rollup = [{"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}]
+        check_runs = [
+            {
+                "name": "Quality",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": self.c_sha,
+                "app": {"id": 100},
+            },
+            {
+                "name": "external/unrelated",
+                "context": "external/unrelated",
+                "status": "IN_PROGRESS",
+                "conclusion": "PENDING",
+                "state": "PENDING",
+                "head_sha": self.c_sha,
+                "app": None,
+            },
+        ]
+        ok, err = verify_live_status_rollup(rollup, self.c_sha, required_checks=req, check_runs=check_runs)
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+
+    def test_commit_status_history_latest_failure_refuses(self) -> None:
+        """WFM18-01 / SOL-R18-006: Latest failure status refuses."""
+        statuses_history = [
+            {"context": "deploy/preview", "state": "failure"},
+            {"context": "deploy/preview", "state": "success"},
+        ]
+        parsed = _parse_statuses_data(json.dumps(statuses_history))
+        self.assertIsNotNone(parsed)
+        self.assertEqual(len(parsed), 1)  # type: ignore[arg-type]
+        self.assertEqual(parsed[0]["state"], "failure")  # type: ignore[index]
+
+        norm = _normalize_commit_status_item(parsed[0], self.c_sha)  # type: ignore[index]
+        self.assertIsNotNone(norm)
+        self.assertEqual(norm["conclusion"], "FAILURE")  # type: ignore[index]
+        self.assertEqual(norm["state"], "FAILURE")  # type: ignore[index]
+
+    def test_commit_status_creator_id_cannot_impersonate_app_id(self) -> None:
+        """SOL-R18-003 / WFM18-02(a): creator.id is a user ID and must NOT satisfy an app_id pin."""
+        req = [{"context": "Quality", "app_id": 100}]
+        rollup = [{"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}]
+        status_with_creator_only = [
+            {
+                "name": "Quality",
+                "context": "Quality",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "state": "SUCCESS",
+                "head_sha": self.c_sha,
+                "app": None,
+            }
+        ]
+        ok, code = verify_live_status_rollup(
+            rollup, self.c_sha, required_checks=req, check_runs=status_with_creator_only
+        )
+        self.assertFalse(ok)
+        self.assertEqual(code, "CI_CHECK_MISSING")
+
+    def test_check_runs_pagination_failure_fails_closed_without_unpaginated_fallback(self) -> None:
+        """SOL-R18-004 / WFM18-02(b): Failed pagination does NOT fall back to unpaginated query."""
+        call_count = [0]
+
+        def fail_paginate_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            call_count[0] += 1
+            if "--paginate" in cmd:
+                return 1, "Pagination error: unexpected disconnect"
+            return 0, json.dumps(
+                {
+                    "check_runs": [
+                        {"name": "Quality", "status": "completed", "conclusion": "success", "app": {"id": 100}}
+                    ]
+                }
+            )
+
+        runs = fetch_commit_check_runs_from_provider(
+            "selamy-labs/agent-skills", self.c_sha, runner=fail_paginate_runner
+        )
+        self.assertIsNone(runs)
+        self.assertEqual(call_count[0], 1, "Must not retry without --paginate")
+
+    def test_paginated_statuses_multi_page_combined(self) -> None:
+        """SOL-R18-005: Multiple pages of statuses are combined across all pages."""
+        page1 = json.dumps(
+            [
+                {"context": "StatusPage1", "state": "success", "app": {"id": 11}},
+                {"context": "StatusOverlap", "state": "success", "app": {"id": 12}},
+            ]
+        )
+        page2 = json.dumps(
+            [
+                {"context": "StatusOverlap", "state": "pending", "app": {"id": 12}},
+                {"context": "StatusPage2", "state": "success", "app": {"id": 13}},
+            ]
+        )
+        concatenated = f"{page1}\n{page2}"
+
+        def multi_status_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "check-runs" in cmd_str:
+                return 0, json.dumps({"check_runs": []})
+            if "statuses" in cmd_str:
+                return 0, concatenated
+            return 0, ""
+
+        runs = fetch_commit_check_runs_from_provider("selamy-labs/agent-skills", self.c_sha, runner=multi_status_runner)
+        self.assertIsNotNone(runs)
+        names = [r["name"] for r in runs]  # type: ignore[union-attr]
+        self.assertIn("StatusPage1", names)
+        self.assertIn("StatusOverlap", names)
+        self.assertIn("StatusPage2", names)
+        overlap_item = next(r for r in runs if r["name"] == "StatusOverlap")  # type: ignore[union-attr]
+        self.assertEqual(overlap_item["conclusion"], "SUCCESS")
+
+    def test_ruleset_pagination_across_multiple_pages(self) -> None:
+        """SOL-R18-007: Branch rules are paginated and requirements on page 2 are merged."""
+        page1_rules = [{"type": "pull_request", "parameters": {}} for _ in range(30)]
+        page1 = json.dumps(page1_rules)
+        page2_rules = [
+            {
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [{"context": "Page2ReleaseCheck", "integration_id": 200}]},
+            }
+        ]
+        page2 = json.dumps(page2_rules)
+        concatenated = f"{page1}\n{page2}"
+
+        def paginated_rules_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["Quality"]})
+            if "rules/branches" in cmd_str:
+                return 0, concatenated
+            return 0, ""
+
+        checks = fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=paginated_rules_runner)
+        self.assertIsNotNone(checks)
+        contexts = [c["context"] for c in checks]  # type: ignore[union-attr]
+        self.assertIn("Quality", contexts)
+        self.assertIn("Page2ReleaseCheck", contexts)
+        page2_check = next(c for c in checks if c["context"] == "Page2ReleaseCheck")  # type: ignore[union-attr]
+        self.assertEqual(page2_check["app_id"], 200)
+
+    def test_malformed_policy_responses_fail_closed(self) -> None:
+        """SOL-R18-001: Malformed branch protection and ruleset responses refuse."""
+        bad_bp_list = ["", "   ", "null", "{}", '{"contexts": null}', '{"checks": null}', '{"contexts": [123]}']
+        for bad_bp in bad_bp_list:
+
+            def bad_bp_runner(cmd: list[str], cwd: Any = None, val: str = bad_bp) -> tuple[int, str]:
+                cmd_str = " ".join(cmd)
+                if "protection/required_status_checks" in cmd_str:
+                    return 0, val
+                if "rules/branches" in cmd_str:
+                    return 0, json.dumps([])
+                return 0, ""
+
+            self.assertIsNone(
+                fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=bad_bp_runner)
+            )
+
+        bad_rules = [
+            "",
+            "   ",
+            "null",
+            "{}",
+            json.dumps([{"type": "required_status_checks", "parameters": None}]),
+            json.dumps([{"type": "required_status_checks", "parameters": {"required_status_checks": None}}]),
+            json.dumps([{"type": "required_status_checks", "parameters": {"required_status_checks": ["not-a-dict"]}}]),
+            json.dumps(
+                [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": ""}]}}]
+            ),
+        ]
+        for bad_r in bad_rules:
+
+            def bad_rules_runner(cmd: list[str], cwd: Any = None, val: str = bad_r) -> tuple[int, str]:
+                cmd_str = " ".join(cmd)
+                if "protection/required_status_checks" in cmd_str:
+                    return 0, json.dumps({"contexts": ["Quality"]})
+                if "rules/branches" in cmd_str:
+                    return 0, val
+                return 0, ""
+
+            self.assertIsNone(
+                fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=bad_rules_runner)
+            )
+
+    def test_ambiguous_404_refuses_branch_protection(self) -> None:
+        """SOL-R18-002 / WFM18-02(c): Ambiguous 404 on branch protection refuses."""
+
+        def ambiguous_bp_404(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 1, "gh: Not Found (HTTP 404)"
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
+            return 0, ""
+
+        self.assertIsNone(
+            fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=ambiguous_bp_404)
+        )
+
+    def test_ambiguous_404_refuses_rulesets(self) -> None:
+        """SOL-R18-002 / WFM18-02(c): Ambiguous 404 on rulesets refuses."""
+
+        def ambiguous_rules_404(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["Quality"]})
+            if "rules/branches" in cmd_str:
+                return 1, "gh: Not Found (HTTP 404)"
+            return 0, ""
+
+        self.assertIsNone(
+            fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=ambiguous_rules_404)
+        )
+
+    def test_confirmed_absence_branch_protection(self) -> None:
+        """SOL-R18-002 / WFM18-02(c): Confirmed absence on branch protection succeeds."""
+
+        def confirmed_bp_absence(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 1, "HTTP 404: Branch not protected"
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps(
+                    [
+                        {
+                            "type": "required_status_checks",
+                            "parameters": {"required_status_checks": [{"context": "FromRules", "integration_id": 55}]},
+                        }
+                    ]
+                )
+            return 0, ""
+
+        res_bp_abs = fetch_required_checks_from_provider(
+            "selamy-labs/agent-skills", "main", runner=confirmed_bp_absence
+        )
+        self.assertIsNotNone(res_bp_abs)
+        self.assertEqual(len(res_bp_abs), 1)  # type: ignore[arg-type]
+        self.assertEqual(res_bp_abs[0]["context"], "FromRules")  # type: ignore[index]
+
+    def test_confirmed_absence_rulesets(self) -> None:
+        """SOL-R18-002 / WFM18-02(c): Confirmed absence on rulesets succeeds."""
+
+        def confirmed_rules_absence(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["FromBP"]})
+            if "rules/branches" in cmd_str:
+                return 1, "HTTP 404: No rules found"
+            return 0, ""
+
+        res_r_abs = fetch_required_checks_from_provider(
+            "selamy-labs/agent-skills", "main", runner=confirmed_rules_absence
+        )
+        self.assertIsNotNone(res_r_abs)
+        self.assertEqual(len(res_r_abs), 1)  # type: ignore[arg-type]
+        self.assertEqual(res_r_abs[0]["context"], "FromBP")  # type: ignore[index]
 
 
 if __name__ == "__main__":

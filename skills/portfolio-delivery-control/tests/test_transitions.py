@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,8 @@ def _merge_flow_cmd(cmd_str: str, c_sha: str, log_out: str) -> tuple[int, str]:
         return 0, "Logged in to github.com as selamy-labs-bot"
     if "required_status_checks" in cmd_str:
         return 0, json.dumps({"contexts": ["ci/test"]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
     if "pr view" in cmd_str:
         return _pr_view_resp(cmd_str, c_sha)
     if "pr merge" in cmd_str:
@@ -140,10 +143,13 @@ class _RepoCaptureRunner:
             return 0, json.dumps({"baseRefName": "main"})
         if "required_status_checks" in cmd_str:
             return 0, json.dumps({"contexts": ["test-gate"]})
+        if "rules/branches" in cmd_str:
+            return 0, json.dumps([])
         if "statusCheckRollup" in cmd_str:
             return 0, json.dumps(
                 {
                     "headRefOid": self.c_sha,
+                    "baseRefName": "main",
                     "statusCheckRollup": [
                         {
                             "name": "test-gate",
@@ -160,6 +166,7 @@ class _RepoCaptureRunner:
             return 0, json.dumps(
                 {
                     "state": "MERGED",
+                    "baseRefName": "main",
                     "mergedAt": "2026-11-03T12:00:00Z",
                     "mergeCommit": {"oid": "4" * 40},
                     "headRefOid": self.c_sha,
@@ -174,6 +181,18 @@ class _RepoCaptureRunner:
                 }
             )
         return 0, ""
+
+
+def _make_status_check_runner(c_sha: str, checks: list[dict[str, Any]]) -> Callable[..., tuple[int, str]]:
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "required_status_checks" in cmd_str:
+            return 0, json.dumps({"contexts": ["pytest"]})
+        if "rules/branches" in cmd_str:
+            return 0, json.dumps([])
+        return 0, json.dumps({"headRefOid": c_sha, "statusCheckRollup": checks})
+
+    return runner
 
 
 class TestTransitions(unittest.TestCase):
@@ -370,6 +389,8 @@ class TestTransitions(unittest.TestCase):
                 return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["ci/test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "statusCheckRollup" in cmd_str:
                 runner_calls[0] += 1
                 return 0, json.dumps(
@@ -439,6 +460,10 @@ class TestTransitions(unittest.TestCase):
                 return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "statusCheckRollup" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -477,6 +502,10 @@ class TestTransitions(unittest.TestCase):
                 return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "statusCheckRollup" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -539,6 +568,8 @@ class TestTransitions(unittest.TestCase):
                 return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "statusCheckRollup" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -585,6 +616,8 @@ class TestTransitions(unittest.TestCase):
                 return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "statusCheckRollup" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -894,6 +927,8 @@ class TestTransitions(unittest.TestCase):
                 return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["test"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "statusCheckRollup" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -1022,48 +1057,25 @@ class TestTransitions(unittest.TestCase):
         self.assertEqual(err2, "CI_CHECK_MISSING")
 
         # 3. Provider returns empty rollup
-        def empty_rollup_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            cmd_str = " ".join(cmd)
-            if "required_status_checks" in cmd_str:
-                return 0, json.dumps({"contexts": ["pytest"]})
-            return 0, json.dumps({"headRefOid": self.c_sha, "statusCheckRollup": []})
-
+        empty_rollup_runner = _make_status_check_runner(self.c_sha, [])
         ok3, err3 = _guard_live_provider_ci("152", self.c_sha, empty_rollup_runner, self.worktree)
         self.assertFalse(ok3)
         self.assertEqual(err3, "CI_CHECK_MISSING")
 
         # 4. Provider returns failing check
-        def failing_check_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            cmd_str = " ".join(cmd)
-            if "required_status_checks" in cmd_str:
-                return 0, json.dumps({"contexts": ["pytest"]})
-            return 0, json.dumps(
-                {
-                    "headRefOid": self.c_sha,
-                    "statusCheckRollup": [
-                        {"name": "pytest", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": self.c_sha}
-                    ],
-                }
-            )
-
+        failing_check_runner = _make_status_check_runner(
+            self.c_sha,
+            [{"name": "pytest", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": self.c_sha}],
+        )
         ok4, err4 = _guard_live_provider_ci("152", self.c_sha, failing_check_runner, self.worktree)
         self.assertFalse(ok4)
         self.assertEqual(err4, "CI_CHECK_FAILED")
 
         # 5. Provider returns passing checks for exact head
-        def success_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            cmd_str = " ".join(cmd)
-            if "required_status_checks" in cmd_str:
-                return 0, json.dumps({"contexts": ["pytest"]})
-            return 0, json.dumps(
-                {
-                    "headRefOid": self.c_sha,
-                    "statusCheckRollup": [
-                        {"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
-                    ],
-                }
-            )
-
+        success_runner = _make_status_check_runner(
+            self.c_sha,
+            [{"name": "pytest", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}],
+        )
         ok5, err5 = _guard_live_provider_ci("152", self.c_sha, success_runner, self.worktree)
         self.assertTrue(ok5)
         self.assertEqual(err5, "")
@@ -1340,6 +1352,10 @@ case "$*" in
     echo '{{"contexts": ["test"]}}'
     exit 0
     ;;
+  *rules/branches*)
+    echo '[]'
+    exit 0
+    ;;
   *statusCheckRollup*)
     echo '{{"headRefOid": "{self.c_sha}", "statusCheckRollup": ['\\
          '{{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}}]}}'
@@ -1377,6 +1393,8 @@ exit 0
                 return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": ["Quality"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "statusCheckRollup" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -1441,6 +1459,8 @@ exit 0
                 return 0, json.dumps({"baseRefName": "main"})
             if "required_status_checks" in cmd_str:
                 return 0, json.dumps({"contexts": []})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps([])
             if "statusCheckRollup" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -1957,6 +1977,8 @@ def _weak_base_branch_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
         return 0, "Logged in to github.com as selamy-labs-bot"
     if "required_status_checks" in cmd_str:
         return 0, json.dumps({"contexts": ["test"]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
     if "pr view" in cmd_str:
         return 0, json.dumps(
             {

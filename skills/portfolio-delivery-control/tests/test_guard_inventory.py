@@ -238,6 +238,8 @@ def _mod_ci_check_failed(ctx: dict[str, Any]) -> None:
             return 0, json.dumps({"baseRefName": "main"})
         if "required_status_checks" in cmd_str:
             return 0, json.dumps({"contexts": ["ci/test"]})
+        if "rules/branches" in cmd_str:
+            return 0, json.dumps([])
         if "statusCheckRollup" in cmd_str:
             return 0, json.dumps(
                 {
@@ -262,6 +264,8 @@ def _mod_ci_check_missing(ctx: dict[str, Any]) -> None:
             return 0, json.dumps({"baseRefName": "main"})
         if "required_status_checks" in cmd_str:
             return 0, json.dumps({"contexts": ["Quality"]})
+        if "rules/branches" in cmd_str:
+            return 0, json.dumps([])
         if "statusCheckRollup" in cmd_str:
             return 0, json.dumps(
                 {
@@ -336,12 +340,13 @@ def _merge_pr_view_cmd(
     if view_fail:
         return 1, "pr view query failed"
     if head_mismatch:
-        return 0, json.dumps({"headRefOid": "0" * 40, "state": "OPEN"})
+        return 0, json.dumps({"headRefOid": "0" * 40, "state": "OPEN", "baseRefName": "main"})
     if cand_mismatch and merged_flag and merged_flag[0]:
         return 0, json.dumps(
             {
                 "headRefOid": "8" * 40,
                 "state": "MERGED",
+                "baseRefName": "main",
                 "mergedAt": "2026-11-03T12:00:00Z",
                 "mergeCommit": {"oid": "3" * 40},
             }
@@ -351,6 +356,7 @@ def _merge_pr_view_cmd(
             {
                 "headRefOid": c_sha,
                 "state": "OPEN",
+                "baseRefName": "main",
                 "statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}],
             }
         )
@@ -358,6 +364,7 @@ def _merge_pr_view_cmd(
         {
             "headRefOid": c_sha,
             "state": "OPEN",
+            "baseRefName": "main",
             "statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}],
         }
     )
@@ -391,6 +398,8 @@ def _merge_pr_driver_runner(
         return 0, "Logged in to github.com as selamy-labs-bot"
     if "required_status_checks" in cmd_str:
         return 0, json.dumps({"contexts": ["test"]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
     if "mergeCommit" in cmd_str:
         return _merge_pr_view_cmd(cmd_str, c_sha, head_mismatch, view_fail, cand_mismatch, queued, merged_flag)
     if "statusCheckRollup" in cmd_str:
@@ -409,55 +418,55 @@ def _merge_pr_driver_runner(
     return 0, ""
 
 
+def _auth_failed_cmd(cmd_str: str, c_sha: str) -> tuple[int, str]:
+    if "baseRefName" in cmd_str:
+        return 0, json.dumps({"baseRefName": "main"})
+    if "api user" in cmd_str:
+        return 1, "unauthorized"
+    if "auth status" in cmd_str:
+        return 1, "not logged in"
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"contexts": ["test"]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
+    if "statusCheckRollup" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "statusCheckRollup": [
+                    {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                ],
+            }
+        )
+    return 0, ""
+
+
 def _mod_provider_auth_failed(ctx: dict[str, Any]) -> None:
     ctx["action"] = "merge_pr"
     c_sha = ctx["c_sha"]
+    ctx["cmd_runner"] = lambda cmd, cwd=None: _auth_failed_cmd(" ".join(cmd), c_sha)
 
-    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-        cmd_str = " ".join(cmd)
-        if "baseRefName" in cmd_str:
-            return 0, json.dumps({"baseRefName": "main"})
-        if "api user" in cmd_str:
-            return 1, "unauthorized"
-        if "auth status" in cmd_str:
-            return 1, "not logged in"
-        if "required_status_checks" in cmd_str:
-            return 0, json.dumps({"contexts": ["test"]})
-        if "statusCheckRollup" in cmd_str:
-            return 0, json.dumps(
-                {
-                    "headRefOid": c_sha,
-                    "statusCheckRollup": [
-                        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
-                    ],
-                }
-            )
-        return 0, ""
 
-    ctx["cmd_runner"] = runner
+def _missing_exact_head_ci_cmd(cmd_str: str, c_sha: str) -> tuple[int, str]:
+    if "api user" in cmd_str:
+        return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+    if "auth status" in cmd_str:
+        return 0, "Logged in to github.com as selamy-labs-bot"
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"contexts": ["test"]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
+    if "statusCheckRollup" in cmd_str:
+        return 0, json.dumps({"headRefOid": c_sha, "state": "OPEN", "baseRefName": "main", "statusCheckRollup": None})
+    if "baseRefName" in cmd_str:
+        return 0, json.dumps({"baseRefName": "main"})
+    return 0, ""
 
 
 def _mod_missing_exact_head_ci(ctx: dict[str, Any]) -> None:
     ctx["action"] = "merge_pr"
     c_sha = ctx["c_sha"]
-
-    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-        cmd_str = " ".join(cmd)
-        if "api user" in cmd_str:
-            return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
-        if "auth status" in cmd_str:
-            return 0, "Logged in to github.com as selamy-labs-bot"
-        if "required_status_checks" in cmd_str:
-            return 0, json.dumps({"contexts": ["test"]})
-        if "statusCheckRollup" in cmd_str:
-            return 0, json.dumps(
-                {"headRefOid": c_sha, "state": "OPEN", "baseRefName": "main", "statusCheckRollup": None}
-            )
-        if "baseRefName" in cmd_str:
-            return 0, json.dumps({"baseRefName": "main"})
-        return 0, ""
-
-    ctx["cmd_runner"] = runner
+    ctx["cmd_runner"] = lambda cmd, cwd=None: _missing_exact_head_ci_cmd(" ".join(cmd), c_sha)
 
 
 def _mod_pr_head_mismatch(ctx: dict[str, Any]) -> None:
@@ -503,6 +512,8 @@ def _mod_base_branch_mismatch(ctx: dict[str, Any]) -> None:
             return 0, "Logged in to github.com as selamy-labs-bot"
         if "required_status_checks" in cmd_str:
             return 0, json.dumps({"contexts": ["test"]})
+        if "rules/branches" in cmd_str:
+            return 0, json.dumps([])
         if "pr view" in cmd_str:
             return 0, json.dumps(
                 {
