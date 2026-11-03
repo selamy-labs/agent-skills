@@ -914,6 +914,10 @@ def _validate_quality_workflow_job_header(job_key: str, job: dict[str, Any]) -> 
 def validate_quality_workflow(doc: dict[str, Any]) -> None:
     """Validate quality.yaml contract, requiring unconditional jobs, valid coverage and format gates."""
     assert isinstance(doc, dict), "Quality workflow must parse as a mapping"
+    wf_perms = doc.get("permissions")
+    assert wf_perms == {"contents": "read"}, (
+        f"quality.yaml permissions must be {{'contents': 'read'}}, got: {wf_perms!r}"
+    )
     validate_shell_configuration("quality workflow", doc)
     validate_env_configuration("quality workflow", doc, allowed_keys=frozenset())
     jobs = doc.get("jobs", {})
@@ -1010,10 +1014,10 @@ def _validate_verify_job_permissions(verify: dict[str, Any]) -> None:
     assert "permissions" in verify, "'verify' job must declare permissions"
     raw_perms = verify["permissions"]
     assert raw_perms != "write-all", "'verify' job must not have write-all permissions"
-    assert isinstance(raw_perms, dict), "'verify' job must declare permissions"
-    assert raw_perms.get("contents") != "write", "'verify' job must not have contents: write permission"
-    assert raw_perms.get("contents") == "read", "'verify' job must declare contents: read"
-    assert raw_perms.get("checks") == "read", "'verify' job must declare checks: read"
+    assert isinstance(raw_perms, dict), "'verify' job must declare permissions mapping"
+    assert raw_perms == {"contents": "read", "checks": "read"}, (
+        f"'verify' job permissions must be exactly {{'contents': 'read', 'checks': 'read'}}, got: {raw_perms!r}"
+    )
 
 
 def _validate_verify_job_step_guards(steps: list[Any]) -> None:
@@ -1764,6 +1768,25 @@ class TestFormatGateNegativeMutants:
         doc["jobs"]["extra"] = {"runs-on": "ubuntu-latest", "steps": []}
         _assert_all_validators_reject(doc, "extra job in quality workflow")
 
+    @pytest.mark.parametrize(
+        "perm_val,label",
+        [
+            ("write-all", "permissions write-all"),
+            ("read-all", "permissions read-all"),
+            ({"contents": "write"}, "permissions contents write"),
+            ({"contents": "read", "issues": "write"}, "permissions extra issues write"),
+            ({"contents": "read", "actions": "write"}, "permissions extra actions write"),
+            (None, "missing permissions"),
+        ],
+    )
+    def test_all_validators_reject_workflow_permissions_mutants(self, perm_val: Any, label: str) -> None:
+        doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        if perm_val is None:
+            doc.pop("permissions", None)
+        else:
+            doc["permissions"] = perm_val
+        _assert_all_validators_reject(doc, f"quality workflow {label}")
+
 
 def _assert_all_validators_reject(doc: dict[str, Any], label: str) -> None:
     from scripts.test_pr_workflow_cancellation import validate_workflow_steps as sp_val
@@ -1833,7 +1856,17 @@ class TestReleaseWorkflowNegativeMutants:
     def test_giving_verify_job_contents_write_fails(self) -> None:
         doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
         doc["jobs"]["verify"]["permissions"]["contents"] = "write"
-        with pytest.raises(AssertionError, match="must not have contents: write permission"):
+        with pytest.raises(AssertionError, match="permissions must be exactly"):
+            validate_release_workflow(doc)
+
+    @pytest.mark.parametrize(
+        "extra_scope",
+        ["actions", "issues", "id-token", "pull-requests", "packages"],
+    )
+    def test_giving_verify_job_extra_write_scopes_fails(self, extra_scope: str) -> None:
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc["jobs"]["verify"]["permissions"][extra_scope] = "write"
+        with pytest.raises(AssertionError, match="permissions must be exactly"):
             validate_release_workflow(doc)
 
     def test_appending_or_true_to_gate_command_fails(self) -> None:

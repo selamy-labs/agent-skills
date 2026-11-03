@@ -22,18 +22,21 @@ Designed as a reusable tool consumed by CI, pre-commit, and agent skills.
 from __future__ import annotations
 
 import argparse
+import functools
 import re
 import sys
 from pathlib import Path
 from typing import Any
 
 try:
-    from hcl2.api import loads as hcl2_loads
+    from hcl2.transformer import DictTransformer
+    from lark import Lark
 except ModuleNotFoundError:
     for _sp in (Path(__file__).resolve().parents[1] / ".venv" / "lib").glob("python*/site-packages"):
         if _sp.is_dir() and str(_sp) not in sys.path:
             sys.path.insert(0, str(_sp))
-    from hcl2.api import loads as hcl2_loads
+    from hcl2.transformer import DictTransformer
+    from lark import Lark
 
 CORE_REQUIRED_FILES = {"main.tf", "variables.tf", "outputs.tf", "versions.tf", "README.md"}
 ROOT_ONLY_FILES = {"providers.tf", "backend.tf"}
@@ -43,18 +46,56 @@ ALLOWED_NON_TF_FILES = {"README.md", "LICENSE", ".terraform.lock.hcl"}
 TF_FILENAME_RE = re.compile(r"^[a-z0-9_]+\.tf$")
 
 
-def _preprocess_fallback_hcl(text: str) -> str:
-    """Fallback normalization for HCL2 inner quotes inside unescaped ${...} interpolations."""
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"(?m)^([ \t]*[a-zA-Z0-9_.-]+)[ \t]+$", r"\1", text)
-    text = "".join(c if ord(c) < 128 else f"u{ord(c):04x}" for c in text)
-    text = re.sub(r"((?<!\$)\$\{[\s\S]*?\})", lambda m: m.group(0).replace(r"\"", '"'), text)
-    if not text.endswith("\n"):
-        text += "\n"
-    return text
+class RobustDictTransformer(DictTransformer):
+    """DictTransformer with robust heredoc parsing supporting Unicode and empty heredocs."""
+
+    def heredoc_template(self, args: list[Any]) -> str:
+        s = str(args[0])
+        m = re.match(r"<<([^\s\r\n]+)\r?\n([\s\S]*?)\r?\n\s*\1", s)
+        if m:
+            trim_chars = "\n\t "
+            return f'"{m.group(2).rstrip(trim_chars)}"'
+        return f'"{s}"'
+
+    def heredoc_template_trim(self, args: list[Any]) -> str:
+        s = str(args[0])
+        m = re.match(r"<<-([^\s\r\n]+)\r?\n([\s\S]*?)\r?\n\s*\1", s)
+        if m:
+            trim_chars = "\n\t "
+            return f'"{m.group(2).rstrip(trim_chars)}"'
+        return f'"{s}"'
 
 
-_preprocess_hcl2_content = _preprocess_fallback_hcl
+@functools.lru_cache(maxsize=1)
+def _get_hcl2_parser() -> Lark:
+    import hcl2
+
+    lark_path = Path(hcl2.__file__).parent / "hcl2.lark"
+    grammar = lark_path.read_text(encoding="utf-8")
+    grammar = (
+        grammar.replace(
+            "NAME : /[a-zA-Z_][a-zA-Z0-9_-]*/",
+            'NAME : /[^\\s\\r\\n=(){}\\[\\],.:;"\\x27\\$#\\/]+/',
+        )
+        .replace(
+            "/<<(?P<heredoc>[a-zA-Z][a-zA-Z0-9._-]+)\\n?(?:.|\\n)*?\\n\\s*(?P=heredoc)\\n/",
+            "/<<(?P<heredoc>[^\\s\\r\\n]+)\\r?\\n(?:(?:.|\\n)*?\\r?\\n)??\\s*(?P=heredoc)[ \\t]*\\r?\\n/",
+        )
+        .replace(
+            "/<<-(?P<heredoc_trim>[a-zA-Z][a-zA-Z0-9._-]+)\\n?(?:.|\\n)*?\\n\\s*(?P=heredoc_trim)\\n/",
+            "/<<-(?P<heredoc_trim>[^\\s\\r\\n]+)\\r?\\n(?:(?:.|\\n)*?\\r?\\n)??\\s*(?P=heredoc_trim)[ \\t]*\\r?\\n/",
+        )
+    )
+    return Lark(grammar, parser="lalr", propagate_positions=True)
+
+
+def _preprocess_interpolation_quotes(text: str) -> str:
+    """Normalize inner quotes inside unescaped ${...} interpolations without semantic character rewriting."""
+    return re.sub(r"((?<!\$)\$\{[\s\S]*?\})", lambda m: m.group(0).replace(r"\"", '"'), text)
+
+
+_preprocess_hcl2_content = _preprocess_interpolation_quotes
+_preprocess_fallback_hcl = _preprocess_interpolation_quotes
 
 
 def _fallback_scan_blocks(text: str) -> tuple[bool, bool]:
@@ -83,29 +124,26 @@ def _inspect_parsed_hcl(parsed: dict[str, Any]) -> tuple[bool, bool]:
 
 
 def _parse_hcl2_content(content: str) -> tuple[bool, bool, bool]:
-    """Parse HCL2 text using structured python-hcl2 parser.
+    """Parse HCL2 text using structured parser without semantic character rewriting.
 
     Returns (has_syntax_violation, has_provider, has_backend).
     """
-    try:
-        parsed = hcl2_loads(content)
-        if isinstance(parsed, dict):
-            has_provider, has_backend = _inspect_parsed_hcl(parsed)
-            return False, has_provider, has_backend
-    except Exception:
-        pass
+    clean_text = content.replace("\r\n", "\n").replace("\r", "\n")
+    if not clean_text.endswith("\n"):
+        clean_text += "\n"
 
-    try:
-        normalized = _preprocess_fallback_hcl(content)
-        parsed = hcl2_loads(normalized)
-        if isinstance(parsed, dict):
-            has_provider, has_backend = _inspect_parsed_hcl(parsed)
-            return False, has_provider, has_backend
-    except Exception:
-        pass
+    for candidate in (clean_text, _preprocess_interpolation_quotes(clean_text)):
+        try:
+            tree = _get_hcl2_parser().parse(candidate)
+            parsed = RobustDictTransformer().transform(tree)
+            if isinstance(parsed, dict):
+                p, b = _inspect_parsed_hcl(parsed)
+                return False, p, b
+        except Exception:
+            pass
 
-    p, b = _fallback_scan_blocks(content)
-    return True, p, b
+    raw_provider, raw_backend = _fallback_scan_blocks(content)
+    return True, raw_provider, raw_backend
 
 
 def scan_tf_file(content: str) -> tuple[bool, bool]:
@@ -269,6 +307,18 @@ def self_test() -> int:
 
     prov6, back6 = scan_tf_file(hcl_test)
     assert prov6 and back6, "scan_tf_file must detect provider and backend"
+
+    sol_empty = 'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
+    syntax_err_sol, prov_sol, _ = _parse_hcl2_content(sol_empty)
+    assert not syntax_err_sol and prov_sol, "Empty repeated heredocs must detect provider"
+
+    sol_unicode = 'locals {\n  a = <<é\nhello\né\n  b = <<u00e9\nworld\nu00e9\n}\nprovider "aws" {}\n'
+    syntax_err_uni, prov_uni, _ = _parse_hcl2_content(sol_unicode)
+    assert not syntax_err_uni and prov_uni, "Unicode delimiters must not collide"
+
+    sol_unclosed = 'locals {\n  a = <<EOF\nprovider "aws" {}\n'
+    syntax_err_unc, prov_unc, _ = _parse_hcl2_content(sol_unclosed)
+    assert syntax_err_unc and prov_unc, "Unclosed heredoc must fail closed"
 
     print("tf_module_layout: all self-tests passed.")
     return 0

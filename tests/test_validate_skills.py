@@ -738,3 +738,41 @@ def test_validate_quality_workflow_rejects_tracked_coverage_json(monkeypatch: py
     monkeypatch.setattr("tools.validate_skills.is_tracked_by_git", lambda _p: True)
     errs = validate_quality_workflow(QUALITY_WORKFLOW_PATH)
     assert any("must not be tracked in git" in e for e in errs)
+
+
+def test_validate_quality_workflow_rejects_bad_permissions() -> None:
+    doc = yaml.safe_load(QUALITY_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    doc["permissions"] = "write-all"
+    errs = validate_quality_workflow(doc)
+    assert any("quality workflow permissions must be {'contents': 'read'}" in e for e in errs)
+
+    doc["permissions"] = {"contents": "write"}
+    errs = validate_quality_workflow(doc)
+    assert any("quality workflow permissions must be {'contents': 'read'}" in e for e in errs)
+
+    del doc["permissions"]
+    errs = validate_quality_workflow(doc)
+    assert any("quality workflow permissions must be {'contents': 'read'}" in e for e in errs)
+
+
+def test_validate_job_gates_verify_permissions() -> None:
+    job = {
+        "permissions": {"contents": "read", "checks": "read"},
+        "steps": [
+            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1 python-hcl2==7.2.0"},
+            {"run": "pytest --cov=tools --cov-branch --cov-report=json:coverage.json --cov-fail-under=90"},
+            {"run": "python -m tests.test_coverage_threshold coverage.json"},
+            {"run": "python -m ruff check ."},
+            {"run": "python -m ruff format --check ."},
+            {"run": "python tools/validate_skills.py"},
+            {"run": "python tools/validate_marketplace.py"},
+            {"run": "python tools/tf_module_layout.py --self-test"},
+            {"run": "python -m unittest discover -s skills/portfolio-delivery-control/tests"},
+        ],
+    }
+    errs = validate_job_gates(job, "verify")
+    assert not any("permissions" in e for e in errs)
+
+    job["permissions"]["actions"] = "write"
+    errs = validate_job_gates(job, "verify")
+    assert any("job 'verify' permissions must be {'contents': 'read', 'checks': 'read'}" in e for e in errs)

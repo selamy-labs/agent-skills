@@ -615,7 +615,7 @@ class OrderedArgvSet(list[tuple[str, ...]]):
 
 
 def is_tracked_by_git(path: Path | str) -> bool:
-    """Return True if path is tracked by git."""
+    """Return True if path is tracked by git (fails closed on error)."""
     target = Path(path)
     try:
         proc = subprocess.run(
@@ -627,15 +627,19 @@ def is_tracked_by_git(path: Path | str) -> bool:
         )
         return proc.returncode == 0
     except (FileNotFoundError, OSError):
-        return False
+        return True
 
 
 def check_no_tracked_coverage_json(repo_root: Path) -> list[str]:
     """Ensure coverage.json is not tracked in git."""
     cov_path = repo_root / "coverage.json"
+    errors: list[str] = []
     if is_tracked_by_git(cov_path):
-        return ["coverage.json must not be tracked in git repository"]
-    return []
+        errors.append("coverage.json must not be tracked in git repository")
+    marker_path = repo_root / ".coverage_session_start"
+    if is_tracked_by_git(marker_path):
+        errors.append(".coverage_session_start must not be tracked in git repository")
+    return errors
 
 
 def _validate_tests_step_order(run_argvs_order: list[tuple[str, ...]], job_name: str, errors: list[str]) -> None:
@@ -665,6 +669,9 @@ def _is_coverage_threshold_tokens(tokens: list[str]) -> bool:
         ["python", "-B", "-m", "tests.test_coverage_threshold"],
         ["python3", "-B", "-m", "tests.test_coverage_threshold"],
     )
+
+
+is_coverage_check_tokens = _is_coverage_threshold_tokens
 
 
 def _find_coverage_command_indices(lines: list[str]) -> tuple[int, int]:
@@ -884,12 +891,20 @@ def _init_gates_found(job_name: str) -> dict[str, bool]:
     return gates_found
 
 
+def _check_verify_job_permissions(job: dict[str, Any], errors: list[str]) -> None:
+    perms = job.get("permissions")
+    if perms != {"contents": "read", "checks": "read"}:
+        errors.append(f"job 'verify' permissions must be {{'contents': 'read', 'checks': 'read'}}, got: {perms!r}")
+
+
 def validate_job_gates(job: dict[str, Any], job_name: str) -> list[str]:
     """Verify that target job contains all gates + pins and no banned prefixes or bypasses."""
     errors: list[str] = list(validate_shell_configuration(f"job '{job_name}'", job))
     errors.extend(validate_env_configuration(f"job '{job_name}'", job, allowed_keys=frozenset()))
     if job_name in ("tests", "test"):
         errors.extend(validate_job_level_keys(job, job_name))
+    elif job_name == "verify":
+        _check_verify_job_permissions(job, errors)
 
     _check_job_coe(job, job_name, errors)
 
@@ -1169,6 +1184,9 @@ def validate_quality_workflow(workflow_input: dict[str, Any] | str | Path) -> li
 
     errors = list(validate_shell_configuration("quality workflow", doc))
     errors.extend(validate_env_configuration("quality workflow", doc, allowed_keys=frozenset()))
+    wf_perms = doc.get("permissions")
+    if wf_perms != {"contents": "read"}:
+        errors.append(f"quality workflow permissions must be {{'contents': 'read'}}, got: {wf_perms!r}")
     if isinstance(workflow_input, (str, Path)):
         p = Path(workflow_input)
         if p.is_file():

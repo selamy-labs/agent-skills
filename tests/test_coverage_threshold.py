@@ -7,24 +7,31 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+try:
+    from tools.validate_skills import is_tracked_by_git
+except ModuleNotFoundError:
+    _root = Path(__file__).resolve().parents[1]
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from tools.validate_skills import is_tracked_by_git
 
-def is_tracked_by_git(path: Path | str) -> bool:
-    """Return True if path is tracked by git."""
-    target = Path(path)
+
+def _read_session_marker_timestamp(marker: Path) -> float:
+    if is_tracked_by_git(marker):
+        raise AssertionError(f"Refusing session marker tracked in git: {marker}")
     try:
-        proc = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", str(target)],
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=target.parent if target.parent.is_dir() else None,
+        session_start = float(marker.read_text(encoding="utf-8").strip())
+    except ValueError:
+        raise AssertionError(f"Corrupt session marker: {marker}")
+    if session_start <= 0:
+        raise AssertionError(
+            f"Invalid session marker timestamp in {marker}: {session_start}. Markers must have positive timestamp."
         )
-        return proc.returncode == 0
-    except (FileNotFoundError, OSError):
-        return False
+    return session_start
 
 
 def check_report_freshness(path: Path, min_mtime: float | None = None) -> None:
@@ -46,11 +53,7 @@ def check_report_freshness(path: Path, min_mtime: float | None = None) -> None:
             )
         return
 
-    try:
-        session_start = float(marker.read_text(encoding="utf-8").strip())
-    except ValueError:
-        raise AssertionError(f"Corrupt session marker: {marker}")
-
+    session_start = _read_session_marker_timestamp(marker)
     if path.stat().st_mtime < session_start - 0.05:
         raise AssertionError(
             f"Coverage report {path} is older than the current pytest run "
@@ -440,6 +443,50 @@ def test_verify_coverage_report_refuses_real_git_tracked_file(tmp_path: Path) ->
     with pytest.raises(AssertionError, match="tracked in git"):
         verify_coverage_report(cov)
     assert main([str(cov)]) == 1
+
+
+def test_is_tracked_by_git_fails_closed_when_git_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AS-TS-R18-01: When git cannot execute, is_tracked_by_git must fail closed (return True)."""
+
+    def _mock_run(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr(subprocess, "run", _mock_run)
+    assert is_tracked_by_git("any_file.txt") is True
+
+
+def test_verify_coverage_report_refuses_zero_or_negative_timestamp_marker(tmp_path: Path) -> None:
+    """AS-TS-R18-01: A forged session marker containing 0 or negative timestamp must be refused."""
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps({"totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100}}),
+        encoding="utf-8",
+    )
+    marker = tmp_path / ".coverage_session_start"
+    for bad_ts in ("0", "0.0", "-100.5"):
+        marker.write_text(bad_ts, encoding="utf-8")
+        with pytest.raises(AssertionError, match="Invalid session marker timestamp"):
+            verify_coverage_report(report)
+
+
+def test_verify_coverage_report_refuses_tracked_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AS-TS-R18-01: A session marker tracked in git must be refused."""
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps({"totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100}}),
+        encoding="utf-8",
+    )
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text("1700000000.0", encoding="utf-8")
+
+    def _mock_is_tracked(p: Path | str) -> bool:
+        if str(p).endswith(".coverage_session_start"):
+            return True
+        return False
+
+    monkeypatch.setattr("tests.test_coverage_threshold.is_tracked_by_git", _mock_is_tracked)
+    with pytest.raises(AssertionError, match="Refusing session marker tracked in git"):
+        verify_coverage_report(report)
 
 
 if __name__ == "__main__":

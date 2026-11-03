@@ -487,7 +487,7 @@ class TestHcl2StructuredParser:
             '\u092a\u094d\u0930\u0926\u093e\u0924\u093e "google" {\n  bucket = "hello \u092c"\n  # comment \u092c\n}\n'
         )
         normalized = _preprocess_hcl2_content(sample)
-        assert "u092a" in normalized
+        assert "\u092a\u094d\u0930\u0926\u093e\u0924\u093e" in normalized
         assert "# comment" in normalized
 
     def test_parse_hcl2_content_detects_blocks(self) -> None:
@@ -683,3 +683,54 @@ class TestSol61HclCases:
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
         assert errors == [], f"Expected 0 errors for escaped interpolation, got: {errors}"
+
+
+class TestSol61R18HclCases:
+    """Regression tests for Sol's cases in AS-TS-R18-SOL61-01."""
+
+    def test_empty_repeated_heredoc_detects_child_provider(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_empty_heredoc"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"
+
+    def test_empty_repeated_heredoc_detects_child_backend(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_empty_heredoc_backend"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = (
+            "locals {\n  x = <<-EOF\nEOF\n}\n"
+            'terraform {\n  backend "s3" {\n    bucket = "b"\n  }\n}\n'
+            "locals {\n  y = <<-EOF\nEOF\n}\n"
+        )
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors), f"Expected backend error, got: {errors}"
+
+    def test_unicode_delimiter_collision_detects_provider(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_unicode_collision"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  a = <<é\nhello\né\n  b = <<u00e9\nworld\nu00e9\n}\nprovider "aws" {}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"
+
+    def test_unclosed_heredoc_fails_closed(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_unclosed"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  a = <<EOF\nprovider "aws" {}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("unclosed or malformed heredoc" in e for e in errors), (
+            f"Expected malformed heredoc error, got: {errors}"
+        )
+        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"

@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from tools.validate_skills import (
+    is_coverage_check_tokens,
     validate_job_gates,
     validate_quality_job,
 )
@@ -765,6 +766,10 @@ def validate_workflow_steps(path_name: str, doc: dict[str, Any]) -> None:
         if isinstance(job, dict):
             _validate_job(path_name, job_name, job)
     if "quality" in path_name:
+        wf_perms = doc.get("permissions")
+        assert wf_perms == {"contents": "read"}, (
+            f"{path_name} permissions must be {{'contents': 'read'}}, got: {wf_perms!r}"
+        )
         _validate_quality_workflow_jobs(path_name, jobs)
     elif "release" in path_name:
         _validate_release_workflow_jobs(path_name, jobs)
@@ -827,9 +832,9 @@ def _validate_verify_permissions(verify: dict[str, Any]) -> None:
     assert "permissions" in verify, "verify job must declare permissions"
     verify_perms = verify["permissions"]
     assert isinstance(verify_perms, dict), "verify job must declare permissions mapping"
-    assert verify_perms.get("contents") == "read", "verify job must have contents: read permission"
-    assert verify_perms.get("checks") == "read", "verify job must have checks: read permission"
-    assert verify_perms.get("contents") != "write", "verify job must not have contents: write permission"
+    assert verify_perms == {"contents": "read", "checks": "read"}, (
+        f"verify job permissions must be exactly {{'contents': 'read', 'checks': 'read'}}, got: {verify_perms!r}"
+    )
 
 
 def _validate_verify_checkout(verify_steps: list[Any]) -> None:
@@ -876,17 +881,6 @@ def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:
     assert "python-hcl2==7.2.0" in pip_steps[0].get("run", ""), "verify job must pin python-hcl2==7.2.0"
 
 
-def _is_coverage_check_tokens(tokens: list[str]) -> bool:
-    if len(tokens) < 3:
-        return False
-    return tokens[:3] in (
-        ["python", "-m", "tests.test_coverage_threshold"],
-        ["python3", "-m", "tests.test_coverage_threshold"],
-        ["python", "-B", "-m", "tests.test_coverage_threshold"],
-        ["python3", "-B", "-m", "tests.test_coverage_threshold"],
-    )
-
-
 def _find_suite_step_coverage_indices(lines: list[str]) -> tuple[int, int]:
     p_idx = -1
     v_idx = -1
@@ -897,15 +891,14 @@ def _find_suite_step_coverage_indices(lines: list[str]) -> tuple[int, int]:
             tokens = []
         if tokens and tokens[0] == "pytest":
             p_idx = idx
-        elif _is_coverage_check_tokens(tokens):
+        elif is_coverage_check_tokens(tokens):
             v_idx = idx
     return p_idx, v_idx
 
 
 def _validate_suite_step_coverage_order(verify_steps: list[Any]) -> None:
     suite_step = next((s for s in verify_steps if isinstance(s, dict) and "lint_skills.py" in s.get("run", "")), None)
-    if not suite_step:
-        return
+    assert suite_step is not None, "release verify job must contain a step running lint_skills.py"
     run_cmd = suite_step.get("run", "")
     lines = [line.strip() for line in run_cmd.splitlines() if line.strip() and not line.strip().startswith("#")]
     p_idx, v_idx = _find_suite_step_coverage_indices(lines)
@@ -1097,6 +1090,40 @@ def _test_mutants_basic_step_and_job_guards() -> None:
     )
 
 
+def _test_mutants_release_verify_permissions(release_path: Path) -> None:
+    from tests.test_format_gate import validate_release_workflow as fg_rel_val
+    from tools.validate_marketplace import validate_release_workflow as vm_rel_val
+
+    bad_verify_scopes = [
+        {"contents": "read", "checks": "read", "actions": "write"},
+        {"contents": "read", "checks": "read", "issues": "write"},
+        {"contents": "read", "checks": "read", "id-token": "write"},
+        {"contents": "read", "checks": "read", "pull-requests": "write"},
+        {"contents": "read", "checks": "read", "packages": "write"},
+        "write-all",
+        {"contents": "write", "checks": "read"},
+    ]
+    for bad_perm in bad_verify_scopes:
+        doc = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+        doc["jobs"]["verify"]["permissions"] = bad_perm
+        sp_failed = False
+        try:
+            validate_workflow_steps("release.yaml", doc)
+        except AssertionError:
+            sp_failed = True
+        assert sp_failed, f"scripts.test_pr_workflow_cancellation accepted bad verify perms {bad_perm}"
+
+        vm_errs = vm_rel_val(doc)
+        assert len(vm_errs) > 0, f"tools.validate_marketplace accepted bad verify perms {bad_perm}"
+
+        fg_failed = False
+        try:
+            fg_rel_val(doc)
+        except AssertionError:
+            fg_failed = True
+        assert fg_failed, f"tests.test_format_gate accepted bad verify perms {bad_perm}"
+
+
 def _test_mutants_release_and_shell_overrides() -> None:
     release_path = WORKFLOWS_DIR / "release.yaml"
     rel_doc = yaml.safe_load(release_path.read_text(encoding="utf-8"))
@@ -1115,6 +1142,8 @@ def _test_mutants_release_and_shell_overrides() -> None:
         raise AssertionError("Expected missing verify permissions to fail")
     except AssertionError as err:
         assert "declare permissions" in str(err)
+
+    _test_mutants_release_verify_permissions(release_path)
 
     _assert_mutant_fails(
         {"jobs": {"test": {"steps": [{"name": "bad", "run": "pytest", "shell": "bash {0}"}]}}},
@@ -1417,6 +1446,24 @@ def _test_mutants_setup_python_with_inputs(quality_path: Path) -> None:
             _assert_all_validators_reject(doc, f"setup-python with {with_dict} in {target_job}")
 
 
+def _test_mutants_workflow_permissions(quality_path: Path) -> None:
+    bad_wf_perms: list[tuple[Any, str]] = [
+        ("write-all", "permissions write-all"),
+        ("read-all", "permissions read-all"),
+        ({"contents": "write"}, "permissions contents write"),
+        ({"contents": "read", "issues": "write"}, "permissions extra issues write"),
+        ({"contents": "read", "actions": "write"}, "permissions extra actions write"),
+        (None, "missing permissions"),
+    ]
+    for perm_val, label in bad_wf_perms:
+        doc = yaml.safe_load(quality_path.read_text(encoding="utf-8"))
+        if perm_val is None:
+            doc.pop("permissions", None)
+        else:
+            doc["permissions"] = perm_val
+        _assert_all_validators_reject(doc, f"quality workflow {label}")
+
+
 def _test_mutants_quality_workflow_integrity() -> None:
     quality_path = WORKFLOWS_DIR / "quality.yaml"
     _test_mutant_del_quality_job(quality_path)
@@ -1430,6 +1477,7 @@ def _test_mutants_quality_workflow_integrity() -> None:
     _test_mutants_checkout_with_inputs(quality_path)
     _test_mutants_setup_python_with_inputs(quality_path)
     _test_mutants_job_level_keys(quality_path)
+    _test_mutants_workflow_permissions(quality_path)
 
 
 def _test_mutants_job_level_keys(quality_path: Path) -> None:
