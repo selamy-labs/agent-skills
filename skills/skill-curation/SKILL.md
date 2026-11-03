@@ -11,7 +11,16 @@ How to **scope, place, deduplicate, and share** skills so a fleet builds a coher
 **Check for an existing skill before authoring a new one.** The best skills usually already exist publicly. Order of preference: **reuse > compose/extend an existing skill > author new.** Author new only for a genuinely-uncovered gap, and say what you searched. (Reinventing a skill that already exists publicly is the most common curation failure.)
 
 ## 1. Audience-scoping
-Every skill declares an **audience**: `control-plane-only` | `worker` | `universal`.
+Declare an audience under frontmatter `metadata.audience`:
+`control-plane-only` | `worker` | `universal`. The existing library validator
+accepts legacy `agent` as a `worker` alias for compatibility. Other legacy
+values require explicit migration to the canonical vocabulary before validation.
+Missing audience remains advisory during migration; do not infer a routing default.
+Declare packaged executable paths in space-separated `metadata.helpers`; the
+validator rejects absent paths and paths/symlinks escaping the skill directory.
+Run `python3 scripts/lint_skills.py` at the catalog root before packaging.
+Existing naming validation also rejects duplicate names in that catalog. Cross-root
+precedence still requires an explicit bundle/source policy.
 - Bundles compose **only the right audiences** — a control-plane-only skill must never ship into a worker's bundle, and vice versa.
 - This prevents the classic leak: operational control-plane skills (queue management, dispatch) reaching worker agents that should never see them. Scope at authoring time; enforce at bundle-composition time.
 

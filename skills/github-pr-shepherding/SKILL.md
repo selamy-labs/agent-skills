@@ -1,9 +1,20 @@
 ---
 name: github-pr-shepherding
 description: Use when monitoring, unblocking, or driving GitHub PRs or native stacks through required checks, group merge, merge queues, auto-merge for ordinary PRs, runner pickup, or blocker comments. Verify current GitHub state and report merged or blocked with evidence.
+metadata:
+  audience: universal
+  helpers: scripts/review_monitor.py
 ---
 
 # GitHub PR Shepherding
+
+
+## Deterministic helper
+
+Call the bundled helper from this skill directory; see `references/helper.md`
+for input contracts and examples. It collects mechanical evidence. Keep readiness,
+authority and semantic decisions with the reviewer. Missing evidence remains pending.
+
 
 ## Overview
 
