@@ -34,8 +34,12 @@ def _make_valid_job() -> dict[str, Any]:
         "steps": [
             {"uses": "actions/checkout@v7.0.0"},
             {"uses": "actions/setup-python@v6.3.0", "with": {"python-version": "3.12"}},
+            {
+                "uses": "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+                "with": {"go-version-file": "tools/hclblocks/go.mod"},
+            },
             {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
-            {"run": "python scripts/install_hcl_parser.py"},
+            {"name": "Verify Go helper", "working-directory": "tools/hclblocks", "run": "go vet ./..."},
             {"run": "python -m ruff check ."},
             {"run": "python -m ruff format --check --diff ."},
             {"run": "python tools/validate_skills.py"},
@@ -291,7 +295,7 @@ def test_validate_job_gates_missing_gates() -> None:
     job: dict[str, Any] = {"steps": []}
     errs = validate_job_gates(job, "tests")
     assert any("missing required gate: pip_ruff_pin" in e for e in errs)
-    assert any("missing required gate: install_hcl_parser" in e for e in errs)
+    assert any("missing required gate: go_vet" in e for e in errs)
     assert any("missing required gate: ruff_check" in e for e in errs)
     assert any("missing required gate: ruff_format" in e for e in errs)
     assert any("missing required gate: pytest" in e for e in errs)
@@ -789,7 +793,7 @@ def test_validate_job_gates_verify_permissions() -> None:
         "permissions": {"contents": "read", "checks": "read"},
         "steps": [
             {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
-            {"run": "python scripts/install_hcl_parser.py"},
+            {"name": "Verify Go helper", "working-directory": "tools/hclblocks", "run": "go vet ./..."},
             {"run": "pytest --cov=tools --cov-branch --cov-report=json:coverage.json --cov-fail-under=90"},
             {"run": "python -m tests.test_coverage_threshold coverage.json"},
             {"run": "python -m ruff check ."},

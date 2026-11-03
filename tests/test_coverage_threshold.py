@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ except ModuleNotFoundError:
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
     from tools.validate_skills import is_tracked_by_git
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _has_enclosing_git_repo(target: Path) -> bool:
@@ -190,6 +193,30 @@ def _check_report_age(path: Path, session_start: float, max_age_seconds: float) 
         )
 
 
+def _handle_missing_marker(path: Path, min_mtime: float | None, marker: Path) -> None:
+    if path.name == "coverage.json":
+        raise AssertionError(
+            f"Coverage report {path} was not produced by a pytest run in the current session "
+            f"(missing session marker {marker}). Pre-existing or unbound reports are refused."
+        )
+    if min_mtime is not None and path.stat().st_mtime < min_mtime - 0.05:
+        raise AssertionError(
+            f"Coverage report {path} is older than required run start time "
+            f"({path.stat().st_mtime:.2f} < {min_mtime:.2f}). Pre-existing reports are refused."
+        )
+
+
+def _resolve_expected_session_id(path: Path, expected_session_id: str | None) -> str | None:
+    if expected_session_id is not None:
+        return expected_session_id
+    if path.resolve() == (REPO_ROOT / "coverage.json").resolve() or path.resolve() == Path("coverage.json").resolve():
+        env_id = os.environ.get("COVERAGE_SESSION_ID")
+        if env_id:
+            return env_id
+        return f"untrusted-nonce-{uuid.uuid4().hex}"
+    return None
+
+
 def check_report_freshness(
     path: Path,
     min_mtime: float | None = None,
@@ -201,24 +228,16 @@ def check_report_freshness(
     """Verify that coverage report is not older than the current test run and matches session marker."""
     marker = path.parent / ".coverage_session_start"
     if not marker.is_file():
-        if path.name == "coverage.json":
-            raise AssertionError(
-                f"Coverage report {path} was not produced by a pytest run in the current session "
-                f"(missing session marker {marker}). Pre-existing or unbound reports are refused."
-            )
-        if min_mtime is not None and path.stat().st_mtime < min_mtime - 0.05:
-            raise AssertionError(
-                f"Coverage report {path} is older than required run start time "
-                f"({path.stat().st_mtime:.2f} < {min_mtime:.2f}). Pre-existing reports are refused."
-            )
+        _handle_missing_marker(path, min_mtime, marker)
         return
 
     marker_data = _read_session_marker(marker, max_age_seconds=max_age_seconds)
     session_start = float(marker_data["timestamp"])
+    target_session_id = _resolve_expected_session_id(path, expected_session_id)
 
     _check_run_start_bound(path, session_start, min_mtime, marker)
     _check_report_age(path, session_start, max_age_seconds)
-    _verify_report_session_binding(path, marker_data, report_data, expected_session_id=expected_session_id)
+    _verify_report_session_binding(path, marker_data, report_data, expected_session_id=target_session_id)
 
     try:
         marker.unlink()
@@ -302,11 +321,9 @@ def verify_coverage_json_thresholds(
     return percent_covered, branch_pct, covered_branches, num_branches
 
 
-def test_coverage_threshold_and_raw_branch_metric(request: pytest.FixtureRequest | None = None) -> None:
+def test_coverage_threshold_and_raw_branch_metric(request: pytest.FixtureRequest) -> None:
     """Test assertion verifying raw branch coverage and combined coverage."""
-    expected_session_id = (
-        getattr(request.session, "session_id", None) if request is not None else None
-    ) or os.environ.get("COVERAGE_SESSION_ID")
+    expected_session_id = getattr(request.session, "session_id", None) or os.environ.get("COVERAGE_SESSION_ID")
     if "COVERAGE_JSON_PATH" in os.environ:
         verify_coverage_report(os.environ["COVERAGE_JSON_PATH"], expected_session_id=expected_session_id)
         return
@@ -342,13 +359,15 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     report_path = args[0] if args else os.environ.get("COVERAGE_JSON_PATH", "coverage.json")
     expected_session_id = os.environ.get("COVERAGE_SESSION_ID")
-    if os.environ.get("GITHUB_ACTIONS") and not expected_session_id:
-        print(
-            "Coverage threshold check failed: In GitHub Actions CI, "
-            "COVERAGE_SESSION_ID environment variable is required",
-            file=sys.stderr,
-        )
-        return 1
+    if not expected_session_id:
+        if os.environ.get("GITHUB_ACTIONS"):
+            print(
+                "Coverage threshold check failed: In GitHub Actions CI, "
+                "COVERAGE_SESSION_ID environment variable is required",
+                file=sys.stderr,
+            )
+            return 1
+        expected_session_id = f"cli-nonce-{uuid.uuid4().hex}"
     min_mtime: float | None = None
     if "COVERAGE_RUN_START" in os.environ:
         try:
@@ -503,11 +522,13 @@ def test_verify_coverage_json_thresholds_synthetic(tmp_path: Path) -> None:
         verify_coverage_json_thresholds(tmp_path / "nonexistent.json")
 
 
-def test_coverage_threshold_fails_when_env_path_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_coverage_threshold_fails_when_env_path_missing(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
     """AS-TS-R16-SOL61-01: Explicitly requested non-existent report must fail closed."""
     monkeypatch.setenv("COVERAGE_JSON_PATH", "/tmp/deliberately-missing-coverage-report.json")
     with pytest.raises(FileNotFoundError, match="Coverage JSON report not found"):
-        test_coverage_threshold_and_raw_branch_metric()
+        test_coverage_threshold_and_raw_branch_metric(request)
 
 
 def test_main_cli_success_and_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1177,10 +1198,83 @@ def test_sol61_04_github_actions_requires_coverage_session_id(tmp_path: Path, mo
     assert ret == 1, "main() in GITHUB_ACTIONS must fail if COVERAGE_SESSION_ID is unset"
 
 
-def test_argon_ts_r24_003_recent_forged_marker_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """ARGON-TS-R24-003: A recent forged matching pair (now - 300s) from a previous session must be refused."""
+def test_sol_ts_r25_sol61_02_recent_foreign_marker_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AS-TS-R25-SOL61-02: Sol's 30s forged matching pair with GITHUB_ACTIONS and
+    COVERAGE_SESSION_ID unset must fail closed in default CLI and API.
+    """
     import hashlib
     import time
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("COVERAGE_SESSION_ID", raising=False)
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "previous-pytest-session",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    os.utime(report, (now - 29.0, now - 29.0))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "previous-pytest-session",
+                "timestamp": now - 30.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # 1. Default CLI invocation without optional identity arguments must exit 1
+    assert main([str(report)]) == 1
+
+    # 2. In repository root, default API invocation without optional identity arguments must raise AssertionError
+    root_report = REPO_ROOT / "coverage.json"
+    root_marker = REPO_ROOT / ".coverage_session_start"
+    saved_rep = root_report.read_bytes() if root_report.is_file() else None
+    saved_mark = root_marker.read_bytes() if root_marker.is_file() else None
+    try:
+        root_report.write_text(content, encoding="utf-8")
+        os.utime(root_report, (now - 29.0, now - 29.0))
+        root_marker.write_text(
+            json.dumps(
+                {
+                    "session_id": "previous-pytest-session",
+                    "timestamp": now - 30.0,
+                    "report_digest": digest,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(AssertionError, match="does not match independently supplied expected_session_id"):
+            verify_coverage_report(root_report)
+    finally:
+        if saved_rep is not None:
+            root_report.write_bytes(saved_rep)
+        elif root_report.is_file():
+            root_report.unlink()
+        if saved_mark is not None:
+            root_marker.write_bytes(saved_mark)
+        elif root_marker.is_file():
+            root_marker.unlink()
+
+
+def test_argon_ts_r25_002_recent_foreign_marker_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARGON-TS-R25-002: Argon's 300s forged matching pair with GITHUB_ACTIONS and
+    COVERAGE_SESSION_ID unset must fail closed in default CLI and API.
+    """
+    import hashlib
+    import time
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("COVERAGE_SESSION_ID", raising=False)
 
     now = time.time()
     report = tmp_path / "coverage.json"
@@ -1206,11 +1300,38 @@ def test_argon_ts_r24_003_recent_forged_marker_refused(tmp_path: Path, monkeypat
         encoding="utf-8",
     )
 
-    with pytest.raises(AssertionError, match="does not match independently supplied expected_session_id"):
-        verify_coverage_report(report, expected_session_id="current-session-id")
-
-    monkeypatch.setenv("COVERAGE_SESSION_ID", "current-run-session")
+    # 1. Default CLI invocation without optional identity arguments must exit 1
     assert main([str(report)]) == 1
+
+    # 2. In repository root, default API invocation without optional identity arguments must raise AssertionError
+    root_report = REPO_ROOT / "coverage.json"
+    root_marker = REPO_ROOT / ".coverage_session_start"
+    saved_rep = root_report.read_bytes() if root_report.is_file() else None
+    saved_mark = root_marker.read_bytes() if root_marker.is_file() else None
+    try:
+        root_report.write_text(content, encoding="utf-8")
+        os.utime(root_report, (now - 299.0, now - 299.0))
+        root_marker.write_text(
+            json.dumps(
+                {
+                    "session_id": "previous-pytest-session",
+                    "timestamp": now - 300.0,
+                    "report_digest": digest,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(AssertionError, match="does not match independently supplied expected_session_id"):
+            verify_coverage_report(root_report)
+    finally:
+        if saved_rep is not None:
+            root_report.write_bytes(saved_rep)
+        elif root_report.is_file():
+            root_report.unlink()
+        if saved_mark is not None:
+            root_marker.write_bytes(saved_mark)
+        elif root_marker.is_file():
+            root_marker.unlink()
 
 
 def test_argon_ts_r24_003_malformed_run_start_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:

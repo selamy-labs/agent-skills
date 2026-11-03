@@ -31,6 +31,7 @@ from tools.validate_skills import (
     CANONICAL_QUALITY_RUN_ARGVS,
     CANONICAL_TESTS_RUN_ARGVS,
     CANONICAL_TESTS_RUN_SEQUENCE,
+    QUALITY_JOB_ALLOWED_ACTIONS,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -106,7 +107,7 @@ BANNED_PREFIXES = frozenset(
         "printf",
     }
 )
-ALLOWED_GATE_EXECUTABLES = frozenset({"python", "python3", "pytest", "ruff", "git", "uvx", "pip"})
+ALLOWED_GATE_EXECUTABLES = frozenset({"python", "python3", "pytest", "ruff", "git", "uvx", "pip", "go"})
 
 EXPECTED_RUFF_FORMAT_ARGV = ["python", "-m", "ruff", "format", "--check", "--diff", "."]
 EXPECTED_RUFF_LINT_ARGV = ["python", "-m", "ruff", "check", "."]
@@ -202,9 +203,11 @@ def _has_pip_install(line: str) -> bool:
 
 
 def _check_mapping_workdir(entity_name: str, mapping: dict[str, Any]) -> None:
-    assert "working-directory" not in mapping and "working_directory" not in mapping, (
-        f"{entity_name} specifies disallowed working-directory override"
-    )
+    wd = mapping.get("working-directory") or mapping.get("working_directory")
+    if wd:
+        if wd == "tools/hclblocks" and mapping.get("run", "").strip() == "go vet ./...":
+            return
+        assert False, f"{entity_name} specifies disallowed working-directory override"
 
 
 def _check_mapping_shell(entity_name: str, shell_val: Any) -> None:
@@ -553,10 +556,8 @@ CANONICAL_TESTS_SCRIPT_COMMANDS: dict[tuple[str, ...], str] = {
     ("python3", "tools/tf_module_layout.py", "--self-test"): "tf_module_layout",
     ("python", "-B", "tools/tf_module_layout.py", "--self-test"): "tf_module_layout",
     ("python3", "-B", "tools/tf_module_layout.py", "--self-test"): "tf_module_layout",
-    ("python", "scripts/install_hcl_parser.py"): "install_hcl_parser",
-    ("python3", "scripts/install_hcl_parser.py"): "install_hcl_parser",
-    ("python", "-B", "scripts/install_hcl_parser.py"): "install_hcl_parser",
-    ("python3", "-B", "scripts/install_hcl_parser.py"): "install_hcl_parser",
+    ("go", "vet", "./..."): "go_vet",
+    ("go", "vet", "./tools/hclblocks/..."): "go_vet",
     ("python", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"): "unittest",
     ("python3", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"): "unittest",
     ("python", "-B", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"): "unittest",
@@ -573,7 +574,7 @@ def _classify_script_gate(step_name: str, run_cmd: str) -> str | None:
         "tools/validate_skills.py",
         "tools/validate_marketplace.py",
         "tools/tf_module_layout.py",
-        "scripts/install_hcl_parser.py",
+        "go vet",
         "unittest discover",
         "skills/portfolio-delivery-control/tests",
         "tests.test_coverage_threshold",
@@ -629,6 +630,14 @@ def _validate_step_uses(step: dict[str, Any], uses: str, step_name: str, prefix:
             f"{prefix} step {step_name!r} invalid setup-python 'with:': "
             f"expected {{'python-version': '3.12'}}, got {step.get('with')!r}"
         )
+    elif uses.startswith("actions/setup-go@") or _is_pinned_action(uses, "actions/setup-go"):
+        assert _is_pinned_action(uses, "actions/setup-go"), (
+            f"{prefix} step {step_name!r} actions/setup-go must be pinned by commit SHA: {uses!r}"
+        )
+        assert step.get("with") == {"go-version-file": "tools/hclblocks/go.mod"}, (
+            f"{prefix} step {step_name!r} actions/setup-go 'with:' must be exactly "
+            f"{{'go-version-file': 'tools/hclblocks/go.mod'}}, got: {step.get('with')!r}"
+        )
 
 
 def _inspect_quality_tests_step(
@@ -657,7 +666,9 @@ def _inspect_quality_tests_step(
     )
     if uses is not None:
         assert isinstance(uses, str)
-        assert uses in ALLOWED_USES_ACTIONS, f"quality tests step {step_name!r} has unrecognized uses action: {uses!r}"
+        assert uses in ALLOWED_USES_ACTIONS or _is_pinned_action(uses, "actions/setup-go"), (
+            f"quality tests step {step_name!r} has unrecognized uses action: {uses!r}"
+        )
         assert uses not in uses_seen, f"quality tests step {step_name!r} duplicate uses step: {uses!r}"
         uses_seen.add(uses)
         _validate_step_uses(step, uses, step_name, "quality tests")
@@ -718,7 +729,9 @@ def _validate_quality_tests_steps(steps: list[Any]) -> None:
         _inspect_quality_tests_step(step, primary_pip_step, uses_seen, run_argvs_seen, detected_gates)
 
     for action in ALLOWED_USES_ACTIONS:
-        assert action in uses_seen, f"quality.yaml tests job missing required action: {action}"
+        assert action in uses_seen or (
+            action.startswith("actions/setup-go") and any(_is_pinned_action(u, "actions/setup-go") for u in uses_seen)
+        ), f"quality.yaml tests job missing required action: {action}"
     for cmd_tuple in CANONICAL_TESTS_RUN_ARGVS:
         assert cmd_tuple in run_argvs_seen, f"quality.yaml tests job missing canonical run command: {cmd_tuple}"
 
@@ -732,7 +745,7 @@ def _validate_quality_tests_steps(steps: list[Any]) -> None:
         "validate_skills": "validate_skills.py",
         "validate_marketplace": "validate_marketplace.py",
         "tf_module_layout": "tf_module_layout.py --self-test",
-        "install_hcl_parser": "install_hcl_parser.py",
+        "go_vet": "go vet ./...",
         "unittest": "unittest discover",
     }
     for gate_key, gate_desc in expected_gates.items():
@@ -872,7 +885,9 @@ def _validate_quality_job_steps(steps: list[Any]) -> None:
         )
         if uses is not None:
             assert isinstance(uses, str)
-            assert uses in ALLOWED_USES_ACTIONS, f"quality step {step_name!r} has unrecognized uses action: {uses!r}"
+            assert uses in QUALITY_JOB_ALLOWED_ACTIONS, (
+                f"quality step {step_name!r} has unrecognized uses action: {uses!r}"
+            )
             assert uses not in uses_seen, f"quality step {step_name!r} duplicate uses step: {uses!r}"
             uses_seen.add(uses)
             _validate_step_uses(step, uses, str(step_name), "quality")
@@ -889,7 +904,7 @@ def _validate_quality_job_steps(steps: list[Any]) -> None:
         assert cmd_tuple not in run_argvs_seen, f"quality step {step_name!r} duplicate run command: {lines[0]}"
         run_argvs_seen.add(cmd_tuple)
 
-    for action in ALLOWED_USES_ACTIONS:
+    for action in QUALITY_JOB_ALLOWED_ACTIONS:
         assert action in uses_seen, f"quality.yaml quality job missing required action: {action}"
     for cmd_tuple in CANONICAL_QUALITY_RUN_ARGVS:
         assert cmd_tuple in run_argvs_seen, f"quality.yaml quality job missing canonical run command: {cmd_tuple}"
@@ -1393,7 +1408,7 @@ class TestFormatGateNegativeMutants:
     @pytest.mark.parametrize(
         "target_script",
         [
-            "python scripts/install_hcl_parser.py",
+            "go vet ./...",
             "python tools/validate_skills.py",
             "python tools/validate_marketplace.py",
             "python tools/tf_module_layout.py --self-test",
@@ -2494,3 +2509,46 @@ def test_ruff_is_pinned_consistently_across_repo() -> None:
     pre_commit = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     ruff_repo = next(r for r in pre_commit.get("repos", []) if "ruff-pre-commit" in r.get("repo", ""))
     assert ruff_repo.get("rev") == "v0.15.21"
+
+
+def _find_setup_go_step(steps: list[Any]) -> dict[str, Any]:
+    step = next((s for s in steps if isinstance(s, dict) and "actions/setup-go" in str(s.get("uses", ""))), None)
+    assert step is not None, "missing actions/setup-go step"
+    return step
+
+
+def test_setup_go_is_pinned_by_sha_and_uses_go_mod_file() -> None:
+    """TS25-01 / AS-TS-R25-SOL61-01 / ARGON-TS-R25-001: CI workflows must pin actions/setup-go
+    by 40-hex commit SHA and specify go-version-file: tools/hclblocks/go.mod.
+    """
+    quality_doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    go_step = _find_setup_go_step(quality_doc["jobs"]["tests"]["steps"])
+    uses = str(go_step.get("uses", ""))
+    assert re.fullmatch(r"actions/setup-go@[0-9a-fA-F]{40}", uses), (
+        f"setup-go must be pinned by 40-hex commit SHA: {uses}"
+    )
+    assert go_step.get("with") == {"go-version-file": "tools/hclblocks/go.mod"}
+
+    release_doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+    rel_go_step = _find_setup_go_step(release_doc["jobs"]["verify"]["steps"])
+    rel_uses = str(rel_go_step.get("uses", ""))
+    assert re.fullmatch(r"actions/setup-go@[0-9a-fA-F]{40}", rel_uses), (
+        f"release setup-go must be pinned by SHA: {rel_uses}"
+    )
+    assert rel_go_step.get("with") == {"go-version-file": "tools/hclblocks/go.mod"}
+
+
+def test_setup_go_mutants_rejected_by_validator() -> None:
+    from tools.validate_skills import validate_quality_workflow as vs_validate
+
+    mutant_unpinned = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for s in mutant_unpinned["jobs"]["tests"]["steps"]:
+        if "actions/setup-go" in str(s.get("uses", "")):
+            s["uses"] = "actions/setup-go@v5"
+    assert any("must be pinned by commit SHA" in e for e in vs_validate(mutant_unpinned))
+
+    mutant_wrong_with = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for s in mutant_wrong_with["jobs"]["tests"]["steps"]:
+        if "actions/setup-go" in str(s.get("uses", "")):
+            s["with"] = {"go-version": "1.26"}
+    assert any("must be exactly" in e for e in vs_validate(mutant_wrong_with))

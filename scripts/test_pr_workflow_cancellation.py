@@ -116,7 +116,7 @@ BANNED_PREFIXES = frozenset(
         "printf",
     }
 )
-ALLOWED_GATE_EXECUTABLES = frozenset({"python", "python3", "pytest", "ruff", "git", "uvx"})
+ALLOWED_GATE_EXECUTABLES = frozenset({"python", "python3", "pytest", "ruff", "git", "uvx", "pip", "go"})
 
 EXPECTED_RUFF_FORMAT_ARGV = ["python", "-m", "ruff", "format", "--check", "--diff", "."]
 EXPECTED_RUFF_LINT_ARGV = ["python", "-m", "ruff", "check", "."]
@@ -212,9 +212,11 @@ def _has_pip_install(line: str) -> bool:
 
 
 def _check_mapping_workdir(entity_name: str, mapping: dict[str, Any]) -> None:
-    assert "working-directory" not in mapping and "working_directory" not in mapping, (
-        f"{entity_name} specifies disallowed working-directory override"
-    )
+    wd = mapping.get("working-directory") or mapping.get("working_directory")
+    if wd:
+        if wd == "tools/hclblocks" and mapping.get("run", "").strip() == "go vet ./...":
+            return
+        assert False, f"{entity_name} specifies disallowed working-directory override"
 
 
 def _check_mapping_shell(entity_name: str, shell_val: Any) -> None:
@@ -622,6 +624,14 @@ def _check_step_uses_inputs(
             f"{path_name} job {job_name} step {step_name!r} invalid setup-python 'with:': "
             f"expected {{'python-version': '3.12'}}, got {step.get('with')!r}"
         )
+    elif str(uses).startswith("actions/setup-go@") or _is_pinned_action(uses, "actions/setup-go"):
+        assert _is_pinned_action(uses, "actions/setup-go"), (
+            f"{path_name} job {job_name} step {step_name!r} setup-go must be pinned by commit SHA: {uses!r}"
+        )
+        assert step.get("with") == {"go-version-file": "tools/hclblocks/go.mod"}, (
+            f"{path_name} job {job_name} step {step_name!r} invalid setup-go 'with:': "
+            f"expected {{'go-version-file': 'tools/hclblocks/go.mod'}}, got {step.get('with')!r}"
+        )
 
 
 def _validate_step(
@@ -873,6 +883,22 @@ def _validate_verify_ancestor(verify_steps: list[Any]) -> None:
     _validate_command_lines("release.yaml", "verify", "ancestor check", ancestor_step.get("run", ""))
 
 
+def _validate_verify_go_steps(verify_steps: list[Any]) -> None:
+    parser_steps = [
+        s for s in verify_steps if isinstance(s, dict) and "scripts/install_hcl_parser.py" in s.get("run", "")
+    ]
+    assert len(parser_steps) == 0, "verify job must not run scripts/install_hcl_parser.py"
+    setup_go_steps = [
+        s for s in verify_steps if isinstance(s, dict) and _is_pinned_action(s.get("uses"), "actions/setup-go")
+    ]
+    assert len(setup_go_steps) == 1, "verify job must use pinned actions/setup-go"
+    assert setup_go_steps[0].get("with", {}).get("go-version-file") == "tools/hclblocks/go.mod", (
+        "verify job actions/setup-go must specify go-version-file: tools/hclblocks/go.mod"
+    )
+    go_vet_steps = [s for s in verify_steps if isinstance(s, dict) and "go vet" in s.get("run", "")]
+    assert len(go_vet_steps) == 1, "verify job must run go vet"
+
+
 def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:
     pip_steps = [
         s
@@ -888,10 +914,7 @@ def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:
     assert "pytest==8.3.4" in pip_steps[0].get("run", ""), "verify job must pin pytest==8.3.4"
     assert "pytest-cov==6.0.0" in pip_steps[0].get("run", ""), "verify job must pin pytest-cov==6.0.0"
     assert "ruff==0.15.21" in pip_steps[0].get("run", ""), "verify job must pin ruff==0.15.21"
-    parser_steps = [
-        s for s in verify_steps if isinstance(s, dict) and "scripts/install_hcl_parser.py" in s.get("run", "")
-    ]
-    assert len(parser_steps) == 1, "verify job must run scripts/install_hcl_parser.py"
+    _validate_verify_go_steps(verify_steps)
 
 
 def _find_suite_step_coverage_indices(lines: list[str]) -> tuple[int, int]:

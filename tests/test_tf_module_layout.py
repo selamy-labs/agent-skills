@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -1120,41 +1119,6 @@ class TestR20ReviewerProbes:
 
         v, p, b = scan_tf_file('provider "aws" {}\n')
         assert v and not p and not b, "Helper build failure must fail closed as syntax violation"
-
-    def test_sol61_04_installer_failure_exits_nonzero(self) -> None:
-        """AS-TS-R23-SOL61-04: Installer returns 1 on unwritable or unsafe target."""
-        from scripts.install_hcl_parser import install_parser
-
-        with pytest.raises(Exception):
-            install_parser(Path("/tmp/hclblocks_cannot_install_here"))
-
-    def test_installer_builds_and_verifies_cleanly(self) -> None:
-        """TS24-02 / AS-TS-R24-SOL61-02: Installer provisions into a private 0700 directory and verifies."""
-        import shutil
-
-        from scripts.install_hcl_parser import install_parser
-
-        dest_dir = Path.home() / ".cache" / f"test_hclblocks_{os.getpid()}"
-        dest = dest_dir / "hclblocks"
-        try:
-            rc = install_parser(dest)
-            assert rc == 0
-            assert dest.is_file()
-            st = dest_dir.stat()
-            assert (st.st_mode & 0o077) == 0, f"Parent directory must be private 0700, got {oct(st.st_mode)}"
-        finally:
-            shutil.rmtree(dest_dir, ignore_errors=True)
-
-    def test_installer_fails_closed_when_go_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Installer fails closed when go compiler is missing."""
-        import shutil
-
-        from scripts.install_hcl_parser import install_parser
-
-        dest = Path.home() / ".cache" / f"test_hclblocks_missing_go_{os.getpid()}" / "hclblocks"
-        monkeypatch.setattr(shutil, "which", lambda cmd: None)
-        with pytest.raises(RuntimeError, match="Go compiler"):
-            install_parser(dest)
 
     def test_bare_cr_and_double_bom_fail_closed(self) -> None:
         """SOL61-03: Bare carriage returns and double UTF-8 BOM must fail closed as syntax violations."""

@@ -1,6 +1,8 @@
 module selamy-labs/agent-skills/tools/hclblocks
 
-go 1.26.10
+go 1.26
+
+toolchain go1.26.10
 
 require github.com/hashicorp/hcl/v2 v2.23.0
 

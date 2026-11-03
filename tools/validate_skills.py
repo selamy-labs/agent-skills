@@ -78,7 +78,10 @@ def strip_github_expressions(text: str) -> str:
 
 
 def _check_working_directory_key(name: str, mapping: dict[str, Any]) -> list[str]:
-    if "working-directory" in mapping or "working_directory" in mapping:
+    wd = mapping.get("working-directory") or mapping.get("working_directory")
+    if wd:
+        if wd == "tools/hclblocks" and mapping.get("run", "").strip() == "go vet ./...":
+            return []
         return [f"{name}: disallowed working-directory override"]
     return []
 
@@ -413,12 +416,10 @@ def _check_script_token(tokens: list[str], gates_found: dict[str, bool]) -> None
     ):
         gates_found["tf_module_layout"] = True
     elif tok_tuple in (
-        ("python", "scripts/install_hcl_parser.py"),
-        ("python3", "scripts/install_hcl_parser.py"),
-        ("python", "-B", "scripts/install_hcl_parser.py"),
-        ("python3", "-B", "scripts/install_hcl_parser.py"),
+        ("go", "vet", "./..."),
+        ("go", "vet", "./tools/hclblocks/..."),
     ):
-        gates_found["install_hcl_parser"] = True
+        gates_found["go_vet"] = True
     elif tok_tuple in (
         ("python", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"),
         ("python3", "-m", "unittest", "discover", "-s", "skills/portfolio-delivery-control/tests", "-v"),
@@ -586,7 +587,22 @@ def _inspect_job_step(
     _check_step_coverage_command_order(run_cmd, step_name, job_name, errors)
 
 
-ALLOWED_USES_ACTIONS: frozenset[str] = frozenset({"actions/checkout@v7.0.0", "actions/setup-python@v6.3.0"})
+def _is_pinned_action(uses_val: Any, action_name: str) -> bool:
+    if not isinstance(uses_val, str):
+        return False
+    val = uses_val.strip()
+    return bool(re.fullmatch(rf"{re.escape(action_name)}@([0-9a-fA-F]{{40}})", val))
+
+
+QUALITY_JOB_ALLOWED_ACTIONS: frozenset[str] = frozenset({"actions/checkout@v7.0.0", "actions/setup-python@v6.3.0"})
+
+ALLOWED_USES_ACTIONS: frozenset[str] = frozenset(
+    {
+        "actions/checkout@v7.0.0",
+        "actions/setup-python@v6.3.0",
+        "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+    }
+)
 
 CANONICAL_QUALITY_RUN_ARGVS: frozenset[tuple[str, ...]] = frozenset(
     {
@@ -612,7 +628,7 @@ CANONICAL_TESTS_RUN_SEQUENCE: tuple[tuple[str, ...], ...] = (
         "ruff==0.15.21",
         "pyyaml==6.0.1",
     ),
-    ("python", "scripts/install_hcl_parser.py"),
+    ("go", "vet", "./..."),
     ("python", "-m", "ruff", "check", "."),
     ("python", "-m", "ruff", "format", "--check", "--diff", "."),
     ("python", "tools/validate_skills.py"),
@@ -731,6 +747,18 @@ def _check_step_coverage_command_order(run_cmd: str, step_name: str, job_name: s
         errors.append(f"step {step_name!r} in '{job_name}': coverage threshold check must immediately follow pytest")
 
 
+def _validate_setup_go_inputs(step_with: Any, uses: str, step_name: str, job_name: str, errors: list[str]) -> None:
+    if not _is_pinned_action(uses, "actions/setup-go"):
+        errors.append(
+            f"step {step_name!r} in '{job_name}' actions/setup-go must be pinned by commit SHA, got: {uses!r}"
+        )
+    if step_with != {"go-version-file": "tools/hclblocks/go.mod"}:
+        errors.append(
+            f"step {step_name!r} in '{job_name}' actions/setup-go 'with:' must be exactly "
+            f"{{'go-version-file': 'tools/hclblocks/go.mod'}}, got: {step_with!r}"
+        )
+
+
 def _validate_uses_step_inputs(
     step: dict[str, Any],
     uses: str,
@@ -748,6 +776,8 @@ def _validate_uses_step_inputs(
                 f"step {step_name!r} in '{job_name}' actions/setup-python 'with:' must be exactly "
                 f"{{'python-version': '3.12'}}, got: {step_with!r}"
             )
+    elif uses.startswith("actions/setup-go@") or _is_pinned_action(uses, "actions/setup-go"):
+        _validate_setup_go_inputs(step_with, uses, step_name, job_name, errors)
 
 
 def _check_step_action_or_run(
@@ -766,7 +796,12 @@ def _check_step_action_or_run(
         errors.append(f"step {step_name!r} in '{job_name}' must specify 'uses' or 'run'")
         return False
     if uses is not None:
-        if uses not in ALLOWED_USES_ACTIONS:
+        is_allowed = (
+            uses in ALLOWED_USES_ACTIONS
+            or uses.startswith("actions/setup-go@")
+            or _is_pinned_action(uses, "actions/setup-go")
+        )
+        if not is_allowed:
             errors.append(f"step {step_name!r} in '{job_name}' unrecognized uses action: {uses!r}")
         elif uses in uses_seen:
             errors.append(f"step {step_name!r} in '{job_name}' duplicate uses step: {uses!r}")
@@ -838,6 +873,15 @@ def _inspect_tests_step(
     _check_step_coverage_command_order(run_cmd, step_name, job_name, errors)
 
 
+def _check_missing_uses_actions(uses_seen: set[str], job_name: str, errors: list[str]) -> None:
+    for action in ALLOWED_USES_ACTIONS:
+        if action.startswith("actions/setup-go@"):
+            if not any(_is_pinned_action(u, "actions/setup-go") for u in uses_seen):
+                errors.append(f"job '{job_name}' missing required action: actions/setup-go (pinned by commit SHA)")
+        elif action not in uses_seen:
+            errors.append(f"job '{job_name}' missing required action: {action}")
+
+
 def _validate_tests_job_steps(
     steps: list[Any],
     job_name: str,
@@ -850,9 +894,7 @@ def _validate_tests_job_steps(
     for step in steps:
         _inspect_tests_step(step, job_name, uses_seen, run_argvs_seen, primary_pip_step, gates_found, errors)
 
-    for action in ALLOWED_USES_ACTIONS:
-        if action not in uses_seen:
-            errors.append(f"job '{job_name}' missing required action: {action}")
+    _check_missing_uses_actions(uses_seen, job_name, errors)
     for cmd_tuple in CANONICAL_TESTS_RUN_ARGVS:
         if cmd_tuple not in run_argvs_seen:
             errors.append(f"job '{job_name}' missing required canonical run command: {' '.join(cmd_tuple)}")
@@ -904,7 +946,7 @@ def _init_gates_found(job_name: str) -> dict[str, bool]:
         "pip_ruff_pin": False,
         "pip_pytest_pin": False,
         "pip_pytest_cov_pin": False,
-        "install_hcl_parser": False,
+        "go_vet": False,
         "ruff_check": False,
         "ruff_format": False,
         "pytest": False,
@@ -916,6 +958,20 @@ def _init_gates_found(job_name: str) -> dict[str, bool]:
         gates_found["unittest_discover"] = False
         gates_found["coverage_threshold"] = False
     return gates_found
+
+
+def _check_verify_job_steps(steps: list[Any], errors: list[str]) -> None:
+    setup_go_steps = [s for s in steps if isinstance(s, dict) and _is_pinned_action(s.get("uses"), "actions/setup-go")]
+    if not setup_go_steps:
+        errors.append("job 'verify' must include pinned actions/setup-go")
+    elif setup_go_steps[0].get("with") != {"go-version-file": "tools/hclblocks/go.mod"}:
+        errors.append("job 'verify' actions/setup-go must specify go-version-file: tools/hclblocks/go.mod")
+
+
+def _check_deprecated_install_step(steps: list[Any], job_name: str, errors: list[str]) -> None:
+    for s in steps:
+        if isinstance(s, dict) and "scripts/install_hcl_parser.py" in str(s.get("run", "")):
+            errors.append(f"job '{job_name}' contains deprecated install_hcl_parser step")
 
 
 def _check_verify_job_permissions(job: dict[str, Any], errors: list[str]) -> None:
@@ -937,18 +993,21 @@ def _check_release_job_permissions(job: dict[str, Any], errors: list[str]) -> No
         errors.append("job 'release' must not declare services")
 
 
-def validate_job_gates(job: dict[str, Any], job_name: str) -> list[str]:
-    """Verify that target job contains all gates + pins and no banned prefixes or bypasses."""
-    errors: list[str] = list(validate_shell_configuration(f"job '{job_name}'", job))
-    errors.extend(validate_env_configuration(f"job '{job_name}'", job, allowed_keys=frozenset()))
+def _validate_job_header_and_permissions(job: dict[str, Any], job_name: str, errors: list[str]) -> None:
     if job_name in ("tests", "test"):
         errors.extend(validate_job_level_keys(job, job_name))
     elif job_name == "verify":
         _check_verify_job_permissions(job, errors)
     elif job_name == "release":
         _check_release_job_permissions(job, errors)
-
     _check_job_coe(job, job_name, errors)
+
+
+def validate_job_gates(job: dict[str, Any], job_name: str) -> list[str]:
+    """Verify that target job contains all gates + pins and no banned prefixes or bypasses."""
+    errors: list[str] = list(validate_shell_configuration(f"job '{job_name}'", job))
+    errors.extend(validate_env_configuration(f"job '{job_name}'", job, allowed_keys=frozenset()))
+    _validate_job_header_and_permissions(job, job_name, errors)
 
     steps = job.get("steps", [])
     if not isinstance(steps, list):
@@ -967,6 +1026,10 @@ def validate_job_gates(job: dict[str, Any], job_name: str) -> list[str]:
         for step in steps:
             _inspect_job_step(step, job_name, primary_pip_step, gates_found, errors)
 
+    if job_name == "verify":
+        _check_verify_job_steps(steps, errors)
+
+    _check_deprecated_install_step(steps, job_name, errors)
     _check_missing_gates(gates_found, job_name, errors)
     return errors
 
@@ -1134,7 +1197,7 @@ def _check_quality_job_completeness(
     job_name: str,
     errors: list[str],
 ) -> None:
-    for action in ALLOWED_USES_ACTIONS:
+    for action in QUALITY_JOB_ALLOWED_ACTIONS:
         if action not in uses_seen:
             errors.append(f"job '{job_name}' missing required action: {action}")
 

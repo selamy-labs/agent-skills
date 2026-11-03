@@ -58,6 +58,8 @@ def _build_helper_process(hclblocks_dir: Path, dest: Path) -> None:
     env = os.environ.copy()
     env["CGO_ENABLED"] = "0"
     env["GOFLAGS"] = "-mod=readonly"
+    env["GOTOOLCHAIN"] = "local"
+    env["GOWORK"] = "off"
     env.pop("GONOSUMDB", None)
     cmd = ["go", "build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", str(dest), "."]
     res = subprocess.run(cmd, cwd=str(hclblocks_dir), env=env, capture_output=True, text=True, check=False)
