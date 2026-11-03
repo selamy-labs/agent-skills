@@ -34,8 +34,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         except OSError:
             pass
     marker = REPO_ROOT / ".coverage_session_start"
-    session_id = getattr(session, "session_id", None) or (
-        f"pytest-{os.getpid()}-{int(time.time() * 1000)}-{os.urandom(8).hex()}"
+    session_id = (
+        os.environ.get("COVERAGE_SESSION_ID")
+        or getattr(session, "session_id", None)
+        or (f"pytest-{os.getpid()}-{int(time.time() * 1000)}-{os.urandom(8).hex()}")
     )
     setattr(session, "session_id", session_id)
     marker_data = {

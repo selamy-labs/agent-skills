@@ -47,6 +47,8 @@ jobs:
       - name: Install HCL parser
         run: python scripts/install_hcl_parser.py
       - name: Full test suite verification on exact commit
+        env:
+          COVERAGE_SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           python3 -B scripts/lint_skills.py
           python -m ruff check .

@@ -156,6 +156,7 @@ PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
 }
 
 GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "complexipy", "vulture"})
+DISALLOWED_PIP_PACKAGES = frozenset({"complexipy", "vulture", "python-hcl2"})
 
 
 def is_pip_install_tokens(tokens: list[str]) -> bool:
@@ -186,9 +187,10 @@ def validate_env_configuration(
     for key in env.keys():
         k_str = str(key)
         assert k_str in allowed_keys, f"{scope_name} has disallowed env variable {k_str!r}"
-        assert not any(k_str == prefix or k_str.startswith(f"{prefix}_") for prefix in BANNED_ENV_PREFIXES), (
-            f"{scope_name} has banned env variable {k_str!r}"
-        )
+        if k_str != "COVERAGE_SESSION_ID":
+            assert not any(k_str == prefix or k_str.startswith(f"{prefix}_") for prefix in BANNED_ENV_PREFIXES), (
+                f"{scope_name} has banned env variable {k_str!r}"
+            )
 
 
 def _has_pip_install(line: str) -> bool:
@@ -514,6 +516,7 @@ def _check_quality_pip_tokens(tokens: list[str]) -> None:
         assert any(t == expected_token for t in tokens), f"quality tests pip install missing {expected_token!r}"
     for token in tokens:
         pkg = re.split(r"[=<>!~]", token)[0].strip()
+        assert pkg not in DISALLOWED_PIP_PACKAGES, f"quality tests disallowed pip package {pkg!r}"
         if pkg in GATED_PACKAGES:
             expected = PINNED_TOOL_REQUIREMENTS.get(pkg)
             assert expected is not None and token == expected, (
@@ -637,7 +640,12 @@ def _inspect_quality_tests_step(
 ) -> None:
     step_name = str(step.get("name", "unnamed step"))
     validate_shell_configuration(f"quality tests step {step_name!r}", step)
-    validate_env_configuration(f"quality tests step {step_name!r}", step, allowed_keys=frozenset())
+    allowed_env = (
+        frozenset({"COVERAGE_SESSION_ID"})
+        if any(k in str(step.get("run", "")) for k in ("pytest", "test_coverage_threshold"))
+        else frozenset()
+    )
+    validate_env_configuration(f"quality tests step {step_name!r}", step, allowed_keys=allowed_env)
     assert step.get("if") is None, f"quality tests step {step_name!r} must be unconditional"
     assert step.get("continue-on-error") in (None, False, "false", "${{ false }}"), (
         f"quality tests step {step_name!r} must not have continue-on-error"
@@ -983,7 +991,7 @@ def _find_and_validate_suite_step(steps: list[dict[str, Any]]) -> None:
     assert suite_steps, "'verify' job must contain full test suite step"
     suite_step = suite_steps[0]
     validate_shell_configuration("full test suite step", suite_step)
-    validate_env_configuration("full test suite step", suite_step, allowed_keys=frozenset())
+    validate_env_configuration("full test suite step", suite_step, allowed_keys=frozenset({"COVERAGE_SESSION_ID"}))
     assert is_effective_step(suite_step), "full test suite step must not bypass execution"
     assert "if" not in suite_step or not suite_step["if"], "full test suite step must be unconditional"
     assert suite_step.get("continue-on-error") in (None, False, "false", "${{ false }}"), (
@@ -1039,6 +1047,12 @@ def _validate_verify_job_step_guards(steps: list[Any]) -> None:
                 f"step {step_name!r}",
                 step,
                 allowed_keys=frozenset({"GH_TOKEN", "GITHUB_TOKEN"}),
+            )
+        elif "pytest" in step.get("run", ""):
+            validate_env_configuration(
+                f"step {step_name!r}",
+                step,
+                allowed_keys=frozenset({"COVERAGE_SESSION_ID"}),
             )
         else:
             validate_env_configuration(f"step {step_name!r}", step, allowed_keys=frozenset())

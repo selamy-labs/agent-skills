@@ -76,6 +76,10 @@ jobs:
       - name: Test portfolio delivery control
         run: python -m unittest discover -s skills/portfolio-delivery-control/tests -v
       - name: Run tests with coverage
+        env:
+          COVERAGE_SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
       - name: Verify coverage threshold
+        env:
+          COVERAGE_SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: python -m tests.test_coverage_threshold coverage.json

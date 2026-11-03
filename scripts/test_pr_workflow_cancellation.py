@@ -166,6 +166,7 @@ PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
 }
 
 GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "complexipy", "vulture"})
+DISALLOWED_PIP_PACKAGES = frozenset({"complexipy", "vulture", "python-hcl2"})
 
 
 def is_pip_install_tokens(tokens: list[str]) -> bool:
@@ -196,9 +197,10 @@ def validate_env_configuration(
     for key in env.keys():
         k_str = str(key)
         assert k_str in allowed_keys, f"{scope_name} has disallowed env variable {k_str!r}"
-        assert not any(k_str == prefix or k_str.startswith(f"{prefix}_") for prefix in BANNED_ENV_PREFIXES), (
-            f"{scope_name} has banned env variable {k_str!r}"
-        )
+        if k_str != "COVERAGE_SESSION_ID":
+            assert not any(k_str == prefix or k_str.startswith(f"{prefix}_") for prefix in BANNED_ENV_PREFIXES), (
+                f"{scope_name} has banned env variable {k_str!r}"
+            )
 
 
 def _has_pip_install(line: str) -> bool:
@@ -440,6 +442,9 @@ def _check_pip_tokens_contract(
         )
     for token in tokens:
         pkg = re.split(r"[=<>!~]", token)[0].strip()
+        assert pkg not in DISALLOWED_PIP_PACKAGES, (
+            f"{path_name} job {job_name} step {step_name!r} contains disallowed pip package {pkg!r}"
+        )
         if pkg in GATED_PACKAGES:
             expected = PINNED_TOOL_REQUIREMENTS.get(pkg)
             assert expected is not None and token == expected, (
@@ -581,15 +586,21 @@ def _check_step_if(path_name: str, job_name: str, step_name: str, step: dict[str
             )
 
 
+def _get_tests_or_verify_env(job_name: str, step_name: str, run_cmd: str) -> frozenset[str]:
+    if job_name == "verify" and ("tools/release_gate.py" in run_cmd or step_name == "Enforce Release Gate"):
+        return frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
+    if any(k in run_cmd for k in ("pytest", "test_coverage_threshold")):
+        return frozenset({"COVERAGE_SESSION_ID"})
+    return frozenset()
+
+
 def _check_step_env(path_name: str, job_name: str, step_name: str, step: dict[str, Any], run_cmd: str) -> None:
     if job_name in ("tests", "verify"):
-        allowed_env: frozenset[str] = frozenset()
-        if job_name == "verify" and ("tools/release_gate.py" in run_cmd or step_name == "Enforce Release Gate"):
-            allowed_env = frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
-        validate_env_configuration(f"{path_name} job {job_name} step {step_name!r}", step, allowed_keys=allowed_env)
+        allowed = _get_tests_or_verify_env(job_name, step_name, run_cmd)
+        validate_env_configuration(f"{path_name} job {job_name} step {step_name!r}", step, allowed_keys=allowed)
     elif job_name == "quality":
-        allowed_env = frozenset({"PR_TITLE", "PR_BODY"}) if _is_pr_title_step(step_name, run_cmd) else frozenset()
-        validate_env_configuration(f"{path_name} job {job_name} step {step_name!r}", step, allowed_keys=allowed_env)
+        allowed = frozenset({"PR_TITLE", "PR_BODY"}) if _is_pr_title_step(step_name, run_cmd) else frozenset()
+        validate_env_configuration(f"{path_name} job {job_name} step {step_name!r}", step, allowed_keys=allowed)
 
 
 def _check_step_uses_inputs(

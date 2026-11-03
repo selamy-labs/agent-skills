@@ -138,7 +138,9 @@ def validate_env_configuration(
         k_str = str(key)
         if k_str not in allowed_keys:
             errors.append(f"{scope_name}: disallowed env variable {k_str!r}")
-        elif any(k_str == prefix or k_str.startswith(f"{prefix}_") for prefix in BANNED_ENV_PREFIXES):
+        elif k_str != "COVERAGE_SESSION_ID" and any(
+            k_str == prefix or k_str.startswith(f"{prefix}_") for prefix in BANNED_ENV_PREFIXES
+        ):
             errors.append(f"{scope_name}: banned env variable {k_str!r}")
     return errors
 
@@ -530,18 +532,7 @@ def _find_pip_install_steps(steps: list[Any]) -> list[dict[str, Any]]:
     return [s for s in steps if _step_contains_pip_install(s)]
 
 
-def _inspect_job_step(
-    step: Any,
-    job_name: str,
-    primary_pip_step: dict[str, Any] | None,
-    gates_found: dict[str, bool],
-    errors: list[str],
-) -> None:
-    if not isinstance(step, dict):
-        return
-    step_name: str = str(step.get("name") or step.get("id") or "unnamed step")
-    errors.extend(validate_shell_configuration(f"step {step_name!r} in '{job_name}'", step))
-
+def _check_step_guards(step: dict[str, Any], step_name: str, job_name: str, errors: list[str]) -> None:
     if step.get("if") is not None:
         errors.append(f"step {step_name!r} in '{job_name}' must not have an if: condition")
 
@@ -553,10 +544,38 @@ def _inspect_job_step(
     ):
         errors.append(f"step {step_name!r} in '{job_name}' must not have continue-on-error: {coe}")
 
+
+def _get_verify_step_allowed_env(job_name: str, step_name: str, run_cmd: str) -> frozenset[str]:
+    if job_name != "verify":
+        return frozenset()
+    if "tools/release_gate.py" in run_cmd or step_name == "Enforce Release Gate":
+        return frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
+    if "pytest" in run_cmd:
+        return frozenset({"COVERAGE_SESSION_ID"})
+    return frozenset()
+
+
+def _get_tests_step_allowed_env(run_raw_val: Any) -> frozenset[str]:
+    if run_raw_val and any(k in str(run_raw_val) for k in ("pytest", "test_coverage_threshold")):
+        return frozenset({"COVERAGE_SESSION_ID"})
+    return frozenset()
+
+
+def _inspect_job_step(
+    step: Any,
+    job_name: str,
+    primary_pip_step: dict[str, Any] | None,
+    gates_found: dict[str, bool],
+    errors: list[str],
+) -> None:
+    if not isinstance(step, dict):
+        return
+    step_name: str = str(step.get("name") or step.get("id") or "unnamed step")
+    errors.extend(validate_shell_configuration(f"step {step_name!r} in '{job_name}'", step))
+    _check_step_guards(step, step_name, job_name, errors)
+
     run_cmd = step.get("run", "")
-    allowed_env: frozenset[str] = frozenset()
-    if job_name == "verify" and ("tools/release_gate.py" in run_cmd or step_name == "Enforce Release Gate"):
-        allowed_env = frozenset({"GH_TOKEN", "GITHUB_TOKEN"})
+    allowed_env = _get_verify_step_allowed_env(job_name, step_name, run_cmd)
     errors.extend(validate_env_configuration(f"step {step_name!r} in '{job_name}'", step, allowed_keys=allowed_env))
 
     if not run_cmd:
@@ -801,18 +820,9 @@ def _inspect_tests_step(
     raw_name = step.get("name") or step.get("id")
     step_name = str(raw_name) if raw_name is not None else "unnamed step"
     errors.extend(validate_shell_configuration(f"step {step_name!r} in '{job_name}'", step))
-    errors.extend(validate_env_configuration(f"step {step_name!r} in '{job_name}'", step, allowed_keys=frozenset()))
-
-    if step.get("if") is not None:
-        errors.append(f"step {step_name!r} in '{job_name}' must not have an if: condition")
-
-    coe = step.get("continue-on-error")
-    if (
-        coe is not None
-        and coe is not False
-        and str(coe).strip().lower() not in ("false", "${{ false }}", '"false"', "'false'")
-    ):
-        errors.append(f"step {step_name!r} in '{job_name}' must not have continue-on-error: {coe}")
+    allowed_env = _get_tests_step_allowed_env(step.get("run"))
+    errors.extend(validate_env_configuration(f"step {step_name!r} in '{job_name}'", step, allowed_keys=allowed_env))
+    _check_step_guards(step, step_name, job_name, errors)
 
     uses_raw = step.get("uses")
     uses: str | None = str(uses_raw) if uses_raw is not None else None

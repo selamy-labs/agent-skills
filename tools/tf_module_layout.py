@@ -33,13 +33,14 @@ authoritative structure-preserving hclblocks parser helper.
 from __future__ import annotations
 
 import argparse
-import hashlib
+import atexit
 import json
 import os
-import platform
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -50,149 +51,49 @@ ALLOWED_NON_TF_FILES = {"README.md", "LICENSE", ".terraform.lock.hcl"}
 
 TF_FILENAME_RE = re.compile(r"^[a-z0-9_]+\.tf$")
 
-HCL_PARSER_VERSION = "1.0.0"
-HCL_PARSER_SHA256: dict[str, str] = {
-    "linux_amd64": "11ffdceeb328274f843f3670475db3b13b533e99433b2e561263c300be0fa945",
-    "linux_arm64": "3bca0680bc3d8e6d7f2810079f85e7c23a9a4a9f3530b1a44047030aafd34cbc",
-    "darwin_amd64": "f4e56769fa6399e7db3f8006e455158510e394d4c8074fc435e55afb7c89467f",
-    "darwin_arm64": "85dc4d8f9af5cc9290e57628459b0a918404013457fc5b37166b1ecbdee1b462",
-}
-
-# Compatibility aliases
-HCL2JSON_VERSION = HCL_PARSER_VERSION
-HCL2JSON_SHA256 = HCL_PARSER_SHA256
+_COMPILED_HELPER_PATH: Path | None = None
 
 
-def _get_platform_key() -> str | None:
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-    arch_map = {
-        "x86_64": "amd64",
-        "amd64": "amd64",
-        "aarch64": "arm64",
-        "arm64": "arm64",
-    }
-    arch = arch_map.get(machine)
-    if system in ("linux", "darwin") and arch in ("amd64", "arm64"):
-        return f"{system}_{arch}"
-    return None
+def _build_helper_process(hclblocks_dir: Path, dest: Path) -> None:
+    env = os.environ.copy()
+    env["CGO_ENABLED"] = "0"
+    env["GOFLAGS"] = "-mod=readonly"
+    env.pop("GONOSUMDB", None)
+    cmd = ["go", "build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", str(dest), "."]
+    res = subprocess.run(cmd, cwd=str(hclblocks_dir), env=env, capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        raise RuntimeError(f"Failed to build hclblocks from source:\n{res.stderr}")
 
 
-def get_hcl_parser_binary_path() -> Path:
-    custom = os.environ.get("HCL_PARSER_PATH") or os.environ.get("HCLBLOCKS_PATH") or os.environ.get("HCL2JSON_PATH")
-    if custom:
-        return Path(custom)
-    return Path.home() / ".local" / "bin" / "hclblocks"
+def _get_or_build_hcl_helper() -> Path:
+    """Compile in-repo hclblocks helper into a private 0700 directory once per process."""
+    global _COMPILED_HELPER_PATH
+    if _COMPILED_HELPER_PATH is not None and _COMPILED_HELPER_PATH.is_file():
+        return _COMPILED_HELPER_PATH
 
+    go_bin = shutil.which("go")
+    if not go_bin:
+        raise RuntimeError("Go toolchain ('go') not found on PATH; required to run hclblocks helper")
 
-get_hcl2json_binary_path = get_hcl_parser_binary_path
+    repo_root = Path(__file__).resolve().parents[1]
+    hclblocks_dir = repo_root / "tools" / "hclblocks"
+    if not (hclblocks_dir / "main.go").is_file():
+        raise RuntimeError(f"hclblocks source not found at {hclblocks_dir}")
 
+    tmp_dir = tempfile.mkdtemp(prefix="agent-skills-hclblocks-")
+    os.chmod(tmp_dir, 0o700)
+    dest = Path(tmp_dir) / "hclblocks"
 
-def _is_temp_descendant(p: Path) -> bool:
     try:
-        resolved = p.resolve()
-        for parent in [resolved] + list(resolved.parents):
-            if parent in (Path("/tmp"), Path("/var/tmp")):
-                return True
-    except OSError:
-        return True
-    return False
-
-
-def _has_unsafe_parent(p: Path) -> bool:
-    try:
-        resolved = p.resolve()
-        for directory in [resolved.parent] + list(resolved.parent.parents):
-            st = directory.stat()
-            if (st.st_mode & 0o002) and not (st.st_mode & 0o1000):
-                return True
-            if st.st_mode & 0o020:
-                return True
-    except OSError:
-        return True
-    return False
-
-
-def _check_binary_path_safety(bin_path: Path) -> Path:
-    resolved = bin_path.resolve()
-    if not resolved.is_file():
-        raise RuntimeError(f"HCL parser binary not found at {resolved}. Run scripts/install_hcl_parser.py")
-    if _is_temp_descendant(resolved):
-        raise RuntimeError(f"Refusing to execute temporary-directory descendant binary: {resolved}")
-    try:
-        st = resolved.stat()
-        if st.st_mode & 0o002:
-            raise RuntimeError(f"Refusing to execute world-writable binary: {resolved}")
-        if st.st_mode & 0o020:
-            raise RuntimeError(f"Refusing to execute group-writable binary: {resolved}")
-        if _has_unsafe_parent(resolved):
-            raise RuntimeError(f"Refusing to execute binary in group- or world-writable directory: {resolved}")
-    except OSError as exc:
-        raise RuntimeError(f"Cannot stat binary {resolved}: {exc}")
-    return resolved
-
-
-def _read_and_hash_fd(fd: int) -> str:
-    hasher = hashlib.sha256()
-    while True:
-        chunk = os.read(fd, 65536)
-        if not chunk:
-            break
-        hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def _read_sidecar_sha256(resolved: Path) -> str | None:
-    sha_file = resolved.with_suffix(resolved.suffix + ".sha256")
-    if not sha_file.is_file():
-        return None
-    try:
-        return sha_file.read_text(encoding="utf-8").strip().split()[0]
-    except OSError:
-        return None
-
-
-def _verify_and_open_hcl_parser() -> tuple[int, str]:
-    """Open parser binary, verify hash against pinned table/sidecar, and return (fd, exec_path).
-
-    Executes via /proc/self/fd/{fd} on Linux to execute the exact verified descriptor (preventing TOCTOU).
-    """
-    platform_key = _get_platform_key()
-    if not platform_key or platform_key not in HCL_PARSER_SHA256:
-        raise RuntimeError(
-            f"Unsupported platform for HCL parser: system={platform.system()}, machine={platform.machine()}"
-        )
-    expected_sha256 = HCL_PARSER_SHA256[platform_key]
-
-    bin_path = get_hcl_parser_binary_path()
-    resolved = _check_binary_path_safety(bin_path)
-
-    fd = os.open(str(resolved), os.O_RDONLY | os.O_CLOEXEC)
-    try:
-        actual_sha256 = _read_and_hash_fd(fd)
-        file_sha256 = _read_sidecar_sha256(resolved)
-
-        if actual_sha256 != expected_sha256 and actual_sha256 != file_sha256:
-            raise RuntimeError(
-                f"HCL parser SHA-256 mismatch for {resolved}: got {actual_sha256}, "
-                f"expected {expected_sha256} (pinned) or {file_sha256} (.sha256 file)"
-            )
-
-        fd_path = f"/proc/self/fd/{fd}"
-        exec_path = fd_path if Path(fd_path).exists() else str(resolved)
-        return fd, exec_path
+        _build_helper_process(hclblocks_dir, dest)
+        dest.chmod(0o700)
     except Exception:
-        os.close(fd)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
 
-
-def _verify_and_get_hcl_parser_binary() -> str:
-    fd, _ = _verify_and_open_hcl_parser()
-    os.close(fd)
-    return str(get_hcl_parser_binary_path().resolve())
-
-
-_verify_and_get_hcl2json_binary = _verify_and_get_hcl_parser_binary
+    atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
+    _COMPILED_HELPER_PATH = dest
+    return dest
 
 
 def _inspect_terraform_children(nested: list[Any]) -> bool:
@@ -238,25 +139,21 @@ def _inspect_parsed_blocks(blocks: list[dict[str, Any]]) -> tuple[bool, bool, bo
 
 
 def _parse_hcl_content(content: str | bytes) -> tuple[bool, bool, bool]:
-    """Parse raw HCL content using authoritative structure-preserving hclblocks parser.
+    """Parse raw HCL content using in-repo hclblocks helper compiled from source.
 
     Returns (has_syntax_violation, has_provider, has_backend).
     Any unparseable content, safety error, or invalid block fails closed as a violation.
     """
     raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8")
     try:
-        fd, exec_path = _verify_and_open_hcl_parser()
-        try:
-            proc = subprocess.run(
-                [exec_path],
-                input=raw_bytes,
-                capture_output=True,
-                check=False,
-                timeout=30,
-                close_fds=False,
-            )
-        finally:
-            os.close(fd)
+        helper_bin = _get_or_build_hcl_helper()
+        proc = subprocess.run(
+            [str(helper_bin)],
+            input=raw_bytes,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
         if proc.returncode != 0:
             return True, False, False
         data = json.loads(proc.stdout.decode("utf-8"))

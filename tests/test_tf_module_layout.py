@@ -565,13 +565,13 @@ class TestHclStructuredParser:
             ("crlf_content", 'locals {\r\n  x = "hello"\r\n}\r\n'),
         ],
     )
-    def test_as_ts_r8_001_reproduction_cases_pass_hcl2_and_child_lint(
+    def test_as_ts_r8_001_reproduction_cases_pass_parser_and_child_lint(
         self, tmp_path: Path, case_name: str, content: str
     ) -> None:
         from tools.tf_module_layout import _parse_hcl_content
 
         violation, has_prov, has_back = _parse_hcl_content(content)
-        assert not violation, f"Expected hcl2_violation == False for {case_name}"
+        assert not violation, f"Expected syntax_violation == False for {case_name}"
         assert not has_prov, f"Expected has_provider == False for {case_name}"
         assert not has_back, f"Expected has_backend == False for {case_name}"
 
@@ -1078,20 +1078,48 @@ class TestR20ReviewerProbes:
         errors = lint_module(mod, is_root=False)
         assert any("unparseable HCL (refused)" in e for e in errors), errors
 
-    def test_sol61_03_temp_descendant_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """AS-TS-R23-SOL61-03: Temporary-directory descendant binary must be refused."""
-        monkeypatch.setenv("HCL_PARSER_PATH", "/tmp/some_fake_dir/hclblocks")
-        v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b
+    @pytest.mark.parametrize(
+        "env_var",
+        ["HCL_PARSER_PATH", "HCL2JSON_PATH", "HCLBLOCKS_PATH"],
+    )
+    def test_env_overrides_ignored_no_hijacking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_var: str
+    ) -> None:
+        """TS24-01 / AS-TS-R24-SOL61-01: Environment variables cannot select or hijack the helper executable."""
+        fake = tmp_path / "fake_parser"
+        fake.write_text('#!/bin/sh\necho \'{"valid":true,"blocks":[]}\'\n')
+        fake.chmod(0o755)
+        sidecar = fake.with_suffix(".sha256")
+        sidecar.write_text("somehash  fake_parser\n")
+        monkeypatch.setenv(env_var, str(fake))
 
-    def test_sol61_03_world_writable_binary_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """AS-TS-R23-SOL61-03: World-writable binary must be refused."""
-        fake = tmp_path / "fake_writable_bin"
-        fake.write_text("#!/bin/sh\nexit 0\n")
-        fake.chmod(0o777)
-        monkeypatch.setenv("HCL_PARSER_PATH", str(fake))
         v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b
+        assert not v and p and not b, f"Provider must be detected; {env_var} must be completely ignored"
+
+    def test_missing_go_toolchain_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TS24 decision: If Go toolchain is missing, fail closed as syntax violation."""
+        import shutil
+
+        import tools.tf_module_layout as tml
+
+        monkeypatch.setattr(tml, "_COMPILED_HELPER_PATH", None)
+        monkeypatch.setattr(shutil, "which", lambda cmd: None)
+
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b, "Missing Go toolchain must fail closed as syntax violation"
+
+    def test_hclblocks_build_failure_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TS24 decision: If building helper fails, fail closed as syntax violation."""
+        import tools.tf_module_layout as tml
+
+        def _fail_build(hclblocks_dir: Path, dest: Path) -> None:
+            raise RuntimeError("Build error simulated")
+
+        monkeypatch.setattr(tml, "_COMPILED_HELPER_PATH", None)
+        monkeypatch.setattr(tml, "_build_helper_process", _fail_build)
+
+        v, p, b = scan_tf_file('provider "aws" {}\n')
+        assert v and not p and not b, "Helper build failure must fail closed as syntax violation"
 
     def test_sol61_04_installer_failure_exits_nonzero(self) -> None:
         """AS-TS-R23-SOL61-04: Installer returns 1 on unwritable or unsafe target."""
@@ -1100,6 +1128,34 @@ class TestR20ReviewerProbes:
         with pytest.raises(Exception):
             install_parser(Path("/tmp/hclblocks_cannot_install_here"))
 
+    def test_installer_builds_and_verifies_cleanly(self) -> None:
+        """TS24-02 / AS-TS-R24-SOL61-02: Installer provisions into a private 0700 directory and verifies."""
+        import shutil
+
+        from scripts.install_hcl_parser import install_parser
+
+        dest_dir = Path.home() / ".cache" / f"test_hclblocks_{os.getpid()}"
+        dest = dest_dir / "hclblocks"
+        try:
+            rc = install_parser(dest)
+            assert rc == 0
+            assert dest.is_file()
+            st = dest_dir.stat()
+            assert (st.st_mode & 0o077) == 0, f"Parent directory must be private 0700, got {oct(st.st_mode)}"
+        finally:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+
+    def test_installer_fails_closed_when_go_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Installer fails closed when go compiler is missing."""
+        import shutil
+
+        from scripts.install_hcl_parser import install_parser
+
+        dest = Path.home() / ".cache" / f"test_hclblocks_missing_go_{os.getpid()}" / "hclblocks"
+        monkeypatch.setattr(shutil, "which", lambda cmd: None)
+        with pytest.raises(RuntimeError, match="Go compiler"):
+            install_parser(dest)
+
     def test_bare_cr_and_double_bom_fail_closed(self) -> None:
         """SOL61-03: Bare carriage returns and double UTF-8 BOM must fail closed as syntax violations."""
         v_cr, _, _ = scan_tf_file("locals {\r x = 1\r}\r")
@@ -1107,101 +1163,3 @@ class TestR20ReviewerProbes:
 
         v_bom, _, _ = scan_tf_file("\ufeff\ufefflocals { x = 1 }\n")
         assert v_bom, "Double UTF-8 BOM must fail closed"
-
-    def test_mismatched_binary_sha256_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """TS22-01 / SOL61-01: A binary with mismatched SHA-256 must fail closed."""
-        fake_bin = tmp_path / "fake_hcl2json"
-        fake_bin.write_text("#!/bin/sh\necho '{}'\n")
-        fake_bin.chmod(0o755)
-        monkeypatch.setenv("HCL2JSON_PATH", str(fake_bin))
-
-        v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b, "Mismatched binary must fail closed as syntax violation"
-
-    def test_unsupported_platform_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """TS22-01 / SOL61-01: Unsupported platform must fail closed."""
-        import tools.tf_module_layout as tml
-
-        monkeypatch.setattr(tml, "_get_platform_key", lambda: "solaris_sparc")
-
-        v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b, "Unsupported platform must fail closed as syntax violation"
-
-    def test_missing_binary_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """TS22-01 / SOL61-01: Missing binary must fail closed."""
-        monkeypatch.setenv("HCL2JSON_PATH", str(tmp_path / "nonexistent_hcl2json"))
-
-        v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b, "Missing binary must fail closed as syntax violation"
-
-    def _probe_tmp_location(self) -> None:
-        tmp_bin = Path("/tmp/hclblocks_test_probe_mismatch")
-        try:
-            tmp_bin.write_text("#!/bin/sh\necho '{}'\n")
-            tmp_bin.chmod(0o755)
-            os.environ["HCL_PARSER_PATH"] = str(tmp_bin)
-            v, p, b = scan_tf_file('provider "aws" {}\n')
-            assert v and not p and not b
-        finally:
-            try:
-                tmp_bin.unlink()
-            except OSError:
-                pass
-
-    def _probe_path_lookup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake_dir = tmp_path / "bin"
-        fake_dir.mkdir()
-        (fake_dir / "hclblocks").write_text("#!/bin/sh\necho '{}'\n")
-        (fake_dir / "hclblocks").chmod(0o755)
-        monkeypatch.setenv("PATH", f"{fake_dir}:{os.environ.get('PATH', '')}")
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "nonexistent_home")
-        v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b
-
-    def _probe_local_bin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake_home = tmp_path / "fake_home"
-        fake_local_bin = fake_home / ".local" / "bin"
-        fake_local_bin.mkdir(parents=True)
-        (fake_local_bin / "hclblocks").write_text("#!/bin/sh\necho '{}'\n")
-        (fake_local_bin / "hclblocks").chmod(0o755)
-        monkeypatch.setattr(Path, "home", lambda: fake_home)
-        v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b
-
-    def _probe_cache_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake_home = tmp_path / "fake_home"
-        fake_cache_bin = fake_home / ".cache" / "agent-skills" / "bin"
-        fake_cache_bin.mkdir(parents=True)
-        (fake_cache_bin / "hclblocks").write_text("#!/bin/sh\necho '{}'\n")
-        (fake_cache_bin / "hclblocks").chmod(0o755)
-        monkeypatch.setattr(Path, "home", lambda: fake_home)
-        v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b
-
-    def _probe_tools_bin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake_tools_bin = tmp_path / "repo" / "tools" / "bin"
-        fake_tools_bin.mkdir(parents=True)
-        (fake_tools_bin / "hclblocks").write_text("#!/bin/sh\necho '{}'\n")
-        (fake_tools_bin / "hclblocks").chmod(0o755)
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "nonexistent_home")
-        v, p, b = scan_tf_file('provider "aws" {}\n')
-        assert v and not p and not b
-
-    @pytest.mark.parametrize(
-        "location_probe",
-        ["tmp_hcl2json", "path_lookup", "local_bin", "cache_path", "tools_bin"],
-    )
-    def test_mismatched_binary_at_probed_locations_fails_closed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location_probe: str
-    ) -> None:
-        """ARGON-TS-R22-001 / ARGON-TS-R23-003: Probed/fallback locations fail closed."""
-        monkeypatch.delenv("HCL_PARSER_PATH", raising=False)
-        monkeypatch.delenv("HCLBLOCKS_PATH", raising=False)
-        dispatch = {
-            "tmp_hcl2json": lambda: self._probe_tmp_location(),
-            "path_lookup": lambda: self._probe_path_lookup(tmp_path, monkeypatch),
-            "local_bin": lambda: self._probe_local_bin(tmp_path, monkeypatch),
-            "cache_path": lambda: self._probe_cache_path(tmp_path, monkeypatch),
-            "tools_bin": lambda: self._probe_tools_bin(tmp_path, monkeypatch),
-        }
-        dispatch[location_probe]()

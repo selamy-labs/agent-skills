@@ -302,15 +302,18 @@ def verify_coverage_json_thresholds(
     return percent_covered, branch_pct, covered_branches, num_branches
 
 
-def test_coverage_threshold_and_raw_branch_metric() -> None:
+def test_coverage_threshold_and_raw_branch_metric(request: pytest.FixtureRequest | None = None) -> None:
     """Test assertion verifying raw branch coverage and combined coverage."""
+    expected_session_id = (
+        getattr(request.session, "session_id", None) if request is not None else None
+    ) or os.environ.get("COVERAGE_SESSION_ID")
     if "COVERAGE_JSON_PATH" in os.environ:
-        verify_coverage_report(os.environ["COVERAGE_JSON_PATH"])
+        verify_coverage_report(os.environ["COVERAGE_JSON_PATH"], expected_session_id=expected_session_id)
         return
 
     candidate = Path("coverage.json")
     if candidate.is_file():
-        percent_covered, branch_pct = verify_coverage_report(candidate)
+        percent_covered, branch_pct = verify_coverage_report(candidate, expected_session_id=expected_session_id)
         assert percent_covered >= 90.0
         assert branch_pct >= 90.0
 
@@ -339,12 +342,23 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     report_path = args[0] if args else os.environ.get("COVERAGE_JSON_PATH", "coverage.json")
     expected_session_id = os.environ.get("COVERAGE_SESSION_ID")
+    if os.environ.get("GITHUB_ACTIONS") and not expected_session_id:
+        print(
+            "Coverage threshold check failed: In GitHub Actions CI, "
+            "COVERAGE_SESSION_ID environment variable is required",
+            file=sys.stderr,
+        )
+        return 1
     min_mtime: float | None = None
     if "COVERAGE_RUN_START" in os.environ:
         try:
             min_mtime = float(os.environ["COVERAGE_RUN_START"])
         except ValueError:
-            pass
+            print(
+                "Coverage threshold check failed: Malformed COVERAGE_RUN_START environment variable",
+                file=sys.stderr,
+            )
+            return 1
     try:
         percent_covered, raw_branch_pct = verify_coverage_report(
             report_path,
@@ -1093,6 +1107,116 @@ def test_sol61_05_independently_supplied_run_bound_refuses_older_marker(tmp_path
     )
     with pytest.raises(AssertionError, match="older than required run start time"):
         verify_coverage_report(report, min_mtime=run_bound)
+
+
+def test_sol61_04_ci_workflows_pass_coverage_session_id() -> None:
+    """AS-TS-R24-SOL61-04: CI workflows pass COVERAGE_SESSION_ID to coverage commands."""
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[1]
+    quality_path = repo_root / ".github" / "workflows" / "quality.yaml"
+    release_path = repo_root / ".github" / "workflows" / "release.yaml"
+
+    q_doc = yaml.safe_load(quality_path.read_text(encoding="utf-8"))
+    tests_steps = q_doc["jobs"]["tests"]["steps"]
+    pytest_step = next(s for s in tests_steps if s.get("run", "").strip().startswith("pytest"))
+    verify_step = next(s for s in tests_steps if "test_coverage_threshold" in s.get("run", ""))
+
+    assert pytest_step.get("env", {}).get("COVERAGE_SESSION_ID") == "${{ github.run_id }}-${{ github.run_attempt }}"
+    assert verify_step.get("env", {}).get("COVERAGE_SESSION_ID") == "${{ github.run_id }}-${{ github.run_attempt }}"
+
+    r_doc = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    verify_steps = r_doc["jobs"]["verify"]["steps"]
+    suite_step = next(s for s in verify_steps if "Full test suite" in s.get("name", ""))
+    assert suite_step.get("env", {}).get("COVERAGE_SESSION_ID") == "${{ github.run_id }}-${{ github.run_attempt }}"
+
+
+def test_sol61_04_recent_matching_pair_rejected_on_session_id_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AS-TS-R24-SOL61-04: Recent matching report/marker pair rejected if session ID does not match expected."""
+    import hashlib
+    import time
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "forged-session-123",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    os.utime(report, (now - 25.0, now - 25.0))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "forged-session-123",
+                "timestamp": now - 30.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("COVERAGE_SESSION_ID", "actual-ci-session-456")
+    ret = main([str(report)])
+    assert ret == 1, "Mismatched session ID must be rejected by main"
+
+
+def test_sol61_04_github_actions_requires_coverage_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AS-TS-R24-SOL61-04: In GitHub Actions CI, COVERAGE_SESSION_ID is required."""
+    report = tmp_path / "coverage.json"
+    report.write_text(json.dumps({"totals": {}}), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.delenv("COVERAGE_SESSION_ID", raising=False)
+    ret = main([str(report)])
+    assert ret == 1, "main() in GITHUB_ACTIONS must fail if COVERAGE_SESSION_ID is unset"
+
+
+def test_argon_ts_r24_003_recent_forged_marker_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARGON-TS-R24-003: A recent forged matching pair (now - 300s) from a previous session must be refused."""
+    import hashlib
+    import time
+
+    now = time.time()
+    report = tmp_path / "coverage.json"
+    content = json.dumps(
+        {
+            "session_id": "previous-pytest-session",
+            "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+        }
+    )
+    report.write_text(content, encoding="utf-8")
+    os.utime(report, (now - 299.0, now - 299.0))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "previous-pytest-session",
+                "timestamp": now - 300.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="does not match independently supplied expected_session_id"):
+        verify_coverage_report(report, expected_session_id="current-session-id")
+
+    monkeypatch.setenv("COVERAGE_SESSION_ID", "current-run-session")
+    assert main([str(report)]) == 1
+
+
+def test_argon_ts_r24_003_malformed_run_start_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARGON-TS-R24-003: Malformed COVERAGE_RUN_START fails closed."""
+    monkeypatch.setenv("COVERAGE_RUN_START", "not-a-number")
+    assert main(["coverage.json"]) == 1
 
 
 if __name__ == "__main__":
