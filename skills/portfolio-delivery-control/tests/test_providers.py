@@ -24,10 +24,9 @@ from providers import (  # noqa: E402
     _evaluate_additive_policy_checks,
     _evaluate_provider_required_checks,
     _extract_repo_required_checks,
-    _find_exact_repo_match,
     _handle_runner_result,
     _is_provider_bot_login_allowed,
-    _match_repo_in_authoritative,
+    _lookup_repo_key,
     _normalize_req_check,
     _parse_pr_checks_payload,
     _parse_pr_view_payload,
@@ -35,6 +34,7 @@ from providers import (  # noqa: E402
     _read_policy_dict,
     _run_cmd,
     _split_owner_repo,
+    _validate_pr_base,
     _verify_created_pr,
     _verify_policy_checks_passed,
     _verify_pr_view_head_and_state,
@@ -48,7 +48,6 @@ from providers import (  # noqa: E402
     is_approved_identity,
     is_hex_40,
     is_hex_64,
-    is_policy_authoritative,
     iso_timestamp,
     load_policy_required_checks,
     reconcile_and_complete_spec_task,
@@ -152,7 +151,7 @@ def _resolve_post_view_failure(
     if bad_json:
         return 0, "not json"
     if mismatch_head:
-        return 0, json.dumps({"state": "OPEN", "headRefOid": "9" * 40})
+        return 0, json.dumps({"state": "OPEN", "headRefOid": "9" * 40, "baseRefName": "main"})
     return 0, ""
 
 
@@ -166,20 +165,20 @@ def _post_check_runner_dispatch(
     bad_json: bool = False,
 ) -> tuple[int, str]:
     if "pr checks" in cmd_str:
-        return 0, json.dumps([{"name": "test", "bucket": "pass"}])
+        return 0, json.dumps([{"name": "test", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}])
     if "pr view" not in cmd_str:
         return 0, ""
     view_calls[0] += 1
     if view_calls[0] >= 2:
         return _resolve_post_view_failure(fail_view, bad_json, mismatch_head)
-    return 0, json.dumps({"state": "OPEN", "headRefOid": c_sha})
+    return 0, json.dumps({"state": "OPEN", "headRefOid": c_sha, "baseRefName": "main"})
 
 
 def _fwd_runner_dispatch(cmd_str: str, c_sha: str, merged_state: list[bool]) -> tuple[int, str]:
     if "api user" in cmd_str:
         return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
     if "pr checks" in cmd_str:
-        return 0, json.dumps([{"name": "PolicyCheck", "state": "COMPLETED", "bucket": "pass"}])
+        return 0, json.dumps([{"name": "PolicyCheck", "state": "COMPLETED", "bucket": "pass", "workflow": "CI"}])
     if "pr merge" in cmd_str:
         merged_state[0] = True
         return 0, "Merged PR #152"
@@ -718,23 +717,37 @@ class TestProviders(unittest.TestCase):
         self.assertEqual(_clean_string_list(["a", " ", "", 123]), ["a", "123"])
         self.assertEqual(_split_owner_repo("org/repo"), ("org", "repo"))
         self.assertEqual(_split_owner_repo("repo"), ("", "repo"))
-        self.assertEqual(_find_exact_repo_match({"repo": ["c1"]}, "org/repo"), ["c1"])
-        self.assertIsNone(_find_exact_repo_match({"other": ["c1"]}, "org/repo"))
+        self.assertEqual(_lookup_repo_key({"repo": ["c1"]}, "org/repo"), (True, ["c1"]))
+        self.assertEqual(_lookup_repo_key({"other": ["c1"]}, "org/repo"), (False, None))
         self.assertEqual(_normalize_req_check({"name": "lint"}), {"context": "lint", "app_id": None})
         self.assertEqual(_normalize_req_check("build"), {"context": "build", "app_id": None})
 
     def test_policy_required_checks_extract_and_read(self) -> None:
-        self.assertEqual(_extract_repo_required_checks(["check1", " "], "org/repo"), ["check1"])
+        self.assertEqual(
+            _extract_repo_required_checks(["check1"], "org/repo"),
+            [{"context": "check1", "app_id": None}],
+        )
         d = {
             "selamy-labs/agent-skills": ["check-exact"],
             "my-repo": ["check-base"],
             "repo_dash": ["check-dash"],
         }
-        self.assertEqual(_extract_repo_required_checks(d, "selamy-labs/agent-skills"), ["check-exact"])
-        self.assertEqual(_extract_repo_required_checks(d, "org/my-repo"), ["check-base"])
-        self.assertEqual(_extract_repo_required_checks(d, "org/repo-dash"), ["check-dash"])
-        self.assertIsNone(_extract_repo_required_checks(d, "unknown/repo"))
+        self.assertEqual(
+            _extract_repo_required_checks(d, "selamy-labs/agent-skills"),
+            [{"context": "check-exact", "app_id": None}],
+        )
+        self.assertEqual(
+            _extract_repo_required_checks(d, "org/my-repo"),
+            [{"context": "check-base", "app_id": None}],
+        )
+        self.assertEqual(
+            _extract_repo_required_checks(d, "org/repo-dash"),
+            [{"context": "check-dash", "app_id": None}],
+        )
+        self.assertEqual(_extract_repo_required_checks(d, "unknown/repo"), [])
         self.assertIsNone(_extract_repo_required_checks(12345, "org/repo"))
+        self.assertIsNone(_extract_repo_required_checks({"agent-skills": "not-a-list"}, "agent-skills"))
+        self.assertIsNone(_extract_repo_required_checks({"agent-skills": [""]}, "agent-skills"))
 
         nonexistent = self.worktree / "does-not-exist.json"
         self.assertIsNone(_read_policy_dict(nonexistent))
@@ -751,34 +764,16 @@ class TestProviders(unittest.TestCase):
         valid_file.write_text(json.dumps({"required_checks": ["gate1"]}), encoding="utf-8")
         self.assertEqual(_read_policy_dict(valid_file), {"required_checks": ["gate1"]})
 
-        self.assertIsNone(load_policy_required_checks("selamy-labs/agent-skills", control_dir=None))
+        self.assertEqual(load_policy_required_checks("selamy-labs/agent-skills", control_dir=None), [])
         ctrl = self.worktree / "ctrl"
         ctrl.mkdir(parents=True, exist_ok=True)
-        self.assertIsNone(load_policy_required_checks("selamy-labs/agent-skills", control_dir=ctrl))
+        self.assertEqual(load_policy_required_checks("selamy-labs/agent-skills", control_dir=ctrl), [])
         (ctrl / "delivery-policy.json").write_text(
             json.dumps({"required_checks": {"agent-skills": ["custom-gate"]}}), encoding="utf-8"
         )
         loaded = load_policy_required_checks("selamy-labs/agent-skills", control_dir=ctrl)
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded[0]["context"], "custom-gate")  # type: ignore[index]
-
-    def test_is_policy_authoritative(self) -> None:
-        p_dir = Path(self.temp_dir.name) / "policy_test"
-        p_dir.mkdir(parents=True, exist_ok=True)
-        self.assertFalse(is_policy_authoritative("selamy-labs/agent-skills", None))
-        self.assertFalse(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
-
-        p_file = p_dir / "delivery-policy.json"
-        p_file.write_text(json.dumps({"authoritative": True}), encoding="utf-8")
-        self.assertTrue(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
-
-        p_file.write_text(json.dumps({"authoritative_policy": True}), encoding="utf-8")
-        self.assertTrue(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
-
-        p_file.write_text(json.dumps({"authoritative_repositories": ["agent-skills"]}), encoding="utf-8")
-        self.assertTrue(is_policy_authoritative("selamy-labs/agent-skills", p_dir))
-        self.assertFalse(is_policy_authoritative("other-org/other-repo", p_dir))
-        self.assertFalse(_match_repo_in_authoritative("", ["repo"]))
 
     # --------------------------------------------------------------------------
     # Provider PR CI Evaluation (Adopt-and-Delete: gh pr checks --required)
@@ -792,7 +787,43 @@ class TestProviders(unittest.TestCase):
         self.assertIsNone(_parse_pr_checks_payload("not-json"))
         self.assertIsNone(_parse_pr_checks_payload('{"key": "val"}'))
         self.assertIsNone(_parse_pr_checks_payload('[1, "not-dict"]'))
-        self.assertEqual(_parse_pr_checks_payload('[{"name": "CI"}]'), [{"name": "CI"}])
+        self.assertIsNone(_parse_pr_checks_payload('[{"name": "CI"}]'))
+        self.assertEqual(
+            _parse_pr_checks_payload('[{"name": "CI", "bucket": "pass"}]'),
+            [{"name": "CI", "bucket": "pass"}],
+        )
+
+    def test_parse_pr_checks_payload_strict_rows(self) -> None:
+        # Missing state/workflow when required
+        mal_no_state = '[{"name": "CI", "bucket": "pass"}]'
+        self.assertIsNone(_parse_pr_checks_payload(mal_no_state, require_state_workflow=True))
+
+        # Empty name
+        mal_empty_name = '[{"name": " ", "bucket": "pass", "state": "SUCCESS", "workflow": "CI"}]'
+        self.assertIsNone(_parse_pr_checks_payload(mal_empty_name, require_state_workflow=True))
+
+        # Uppercase non-canonical bucket
+        mal_upper_bucket = '[{"name": "CI", "bucket": "PASS", "state": "SUCCESS", "workflow": "CI"}]'
+        self.assertIsNone(_parse_pr_checks_payload(mal_upper_bucket, require_state_workflow=True))
+
+        # Unknown bucket
+        mal_unk_bucket = '[{"name": "CI", "bucket": "unknown", "state": "SUCCESS", "workflow": "CI"}]'
+        self.assertIsNone(_parse_pr_checks_payload(mal_unk_bucket, require_state_workflow=True))
+
+        # Non-string workflow
+        mal_num_wf = '[{"name": "CI", "bucket": "pass", "state": "SUCCESS", "workflow": 123}]'
+        self.assertIsNone(_parse_pr_checks_payload(mal_num_wf, require_state_workflow=True))
+
+        # Empty string workflow is allowed (e.g. non-Actions status checks)
+        valid_empty_wf = '[{"name": "CI", "bucket": "pass", "state": "SUCCESS", "workflow": ""}]'
+        self.assertIsNotNone(_parse_pr_checks_payload(valid_empty_wf, require_state_workflow=True))
+
+    def test_validate_pr_base(self) -> None:
+        self.assertEqual(_validate_pr_base("main", "main"), (True, ""))
+        self.assertEqual(_validate_pr_base("main", ""), (True, ""))
+        self.assertEqual(_validate_pr_base("", "main"), (False, "BASE_BRANCH_MISMATCH"))
+        self.assertEqual(_validate_pr_base("", ""), (False, "BASE_BRANCH_MISMATCH"))
+        self.assertEqual(_validate_pr_base("main", "release"), (False, "BASE_BRANCH_MISMATCH"))
 
     def test_verify_pr_view_head_and_state(self) -> None:
         info_open = {"state": "OPEN", "headRefOid": self.c_sha, "baseRefName": "main"}
@@ -805,16 +836,19 @@ class TestProviders(unittest.TestCase):
             (False, "PR_NOT_OPEN"),
         )
 
-        info_closed = {"state": "CLOSED", "headRefOid": self.c_sha}
+        info_closed = {"state": "CLOSED", "headRefOid": self.c_sha, "baseRefName": "main"}
         self.assertEqual(_verify_pr_view_head_and_state(info_closed, self.c_sha), (False, "PR_NOT_OPEN"))
 
-        info_head_mis = {"state": "OPEN", "headRefOid": "0" * 40}
+        info_head_mis = {"state": "OPEN", "headRefOid": "0" * 40, "baseRefName": "main"}
         self.assertEqual(_verify_pr_view_head_and_state(info_head_mis, self.c_sha), (False, "PR_HEAD_MISMATCH"))
 
         info_base_mis = {"state": "OPEN", "headRefOid": self.c_sha, "baseRefName": "other"}
         self.assertEqual(
             _verify_pr_view_head_and_state(info_base_mis, self.c_sha, "main"), (False, "BASE_BRANCH_MISMATCH")
         )
+
+        info_no_base = {"state": "OPEN", "headRefOid": self.c_sha}
+        self.assertEqual(_verify_pr_view_head_and_state(info_no_base, self.c_sha), (False, "BASE_BRANCH_MISMATCH"))
 
     def test_evaluate_provider_required_checks(self) -> None:
         def fail_cmd(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
@@ -832,14 +866,14 @@ class TestProviders(unittest.TestCase):
         self.assertEqual(err2, "CI_CHECK_MISSING")
 
         def failing_check(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            return 0, json.dumps([{"name": "test", "bucket": "fail"}])
+            return 0, json.dumps([{"name": "test", "state": "FAILURE", "bucket": "fail", "workflow": "CI"}])
 
         ok3, err3, _ = _evaluate_provider_required_checks(self.worktree, "152", failing_check)
         self.assertFalse(ok3)
         self.assertEqual(err3, "CI_CHECK_FAILED")
 
         def passing_checks(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            return 0, json.dumps([{"name": "test", "bucket": "pass"}])
+            return 0, json.dumps([{"name": "test", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}])
 
         ok4, err4, data4 = _evaluate_provider_required_checks(self.worktree, "152", passing_checks, repo="org/repo")
         self.assertTrue(ok4)
@@ -916,7 +950,7 @@ class TestProviders(unittest.TestCase):
         self.assertEqual(err2, "PR_VIEW_FAILED")
 
         def closed_view(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            return 0, json.dumps({"state": "CLOSED", "headRefOid": self.c_sha})
+            return 0, json.dumps({"state": "CLOSED", "headRefOid": self.c_sha, "baseRefName": "main"})
 
         ok3, err3, _ = evaluate_pr_ci(self.worktree, "152", self.c_sha, runner=closed_view)
         self.assertFalse(ok3)
@@ -925,8 +959,8 @@ class TestProviders(unittest.TestCase):
     def test_evaluate_pr_ci_provider_checks_failures(self) -> None:
         def checks_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             if "pr checks" in " ".join(cmd):
-                return 0, json.dumps([{"name": "test", "bucket": "fail"}])
-            return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha})
+                return 0, json.dumps([{"name": "test", "state": "FAILURE", "bucket": "fail", "workflow": "CI"}])
+            return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha, "baseRefName": "main"})
 
         ok4, err4, _ = evaluate_pr_ci(self.worktree, "152", self.c_sha, runner=checks_fail_runner)
         self.assertFalse(ok4)
@@ -962,11 +996,96 @@ class TestProviders(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(err, "PR_VIEW_FAILED")
 
+    def test_evaluate_pr_ci_post_base_retarget(self) -> None:
+        view_calls = [0]
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "pr checks" in cmd_str:
+                return 0, json.dumps([{"name": "test", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}])
+            if "pr view" in cmd_str:
+                view_calls[0] += 1
+                base = "release" if view_calls[0] >= 2 else "main"
+                return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha, "baseRefName": base})
+            return 0, ""
+
+        ok, err, _ = evaluate_pr_ci(self.worktree, "152", self.c_sha, runner=runner)
+        self.assertFalse(ok)
+        self.assertEqual(err, "BASE_BRANCH_MISMATCH")
+
+    def test_evaluate_pr_ci_post_base_missing(self) -> None:
+        view_calls = [0]
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "pr checks" in cmd_str:
+                return 0, json.dumps([{"name": "test", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}])
+            if "pr view" in cmd_str:
+                view_calls[0] += 1
+                base = "" if view_calls[0] >= 2 else "main"
+                return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha, "baseRefName": base})
+            return 0, ""
+
+        ok, err, _ = evaluate_pr_ci(self.worktree, "152", self.c_sha, runner=runner)
+        self.assertFalse(ok)
+        self.assertEqual(err, "BASE_BRANCH_MISMATCH")
+
+    def test_evaluate_pr_ci_post_state_closed(self) -> None:
+        view_calls = [0]
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "pr checks" in cmd_str:
+                return 0, json.dumps([{"name": "test", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}])
+            if "pr view" in cmd_str:
+                view_calls[0] += 1
+                state = "CLOSED" if view_calls[0] >= 2 else "OPEN"
+                return 0, json.dumps({"state": state, "headRefOid": self.c_sha, "baseRefName": "main"})
+            return 0, ""
+
+        ok, err, _ = evaluate_pr_ci(self.worktree, "152", self.c_sha, runner=runner)
+        self.assertFalse(ok)
+        self.assertEqual(err, "PR_NOT_OPEN")
+
+    def test_evaluate_pr_ci_policy_malformed_fails_closed(self) -> None:
+        ctrl = self.worktree / "ctrl_malformed"
+        ctrl.mkdir(parents=True, exist_ok=True)
+        pol_file = ctrl / "delivery-policy.json"
+
+        def all_pass_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "pr checks" in cmd_str:
+                return 0, json.dumps([{"name": "test", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}])
+            if "pr view" in cmd_str:
+                return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha, "baseRefName": "main"})
+            return 0, ""
+
+        bad_payloads = [
+            "invalid json",
+            "null",
+            json.dumps({"required_checks": "string"}),
+            json.dumps({"required_checks": {"agent-skills": "string"}}),
+            json.dumps({"required_checks": {"agent-skills": [""]}}),
+            json.dumps({"required_checks": {"agent-skills": [123]}}),
+        ]
+        for bad_p in bad_payloads:
+            pol_file.write_text(bad_p, encoding="utf-8")
+            ok, err, _ = evaluate_pr_ci(
+                self.worktree,
+                "152",
+                self.c_sha,
+                runner=all_pass_runner,
+                control_dir=ctrl,
+                repo="selamy-labs/agent-skills",
+            )
+            self.assertFalse(ok)
+            self.assertEqual(err, "CI_CHECK_MISSING")
+
     def test_evaluate_pr_ci_success(self) -> None:
         def all_pass_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
             if "pr checks" in cmd_str:
-                return 0, json.dumps([{"name": "test", "bucket": "pass"}])
+                return 0, json.dumps([{"name": "test", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}])
             if "pr view" in cmd_str:
                 return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha, "baseRefName": "main"})
             return 0, ""
@@ -1066,6 +1185,7 @@ class TestProviders(unittest.TestCase):
             "mergedAt": "2026-11-03T10:00:00Z",
             "mergeCommit": "c" * 40,
             "headRefOid": "9" * 40,
+            "baseRefName": "main",
         }
         ok2, res2 = _check_merge_already_merged(info_merged_head_mis, self.c_sha)
         self.assertFalse(ok2)
@@ -1111,6 +1231,8 @@ class TestProviders(unittest.TestCase):
             cmd_str = " ".join(cmd)
             if "api user" in cmd_str:
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr checks" in cmd_str:
+                return 0, json.dumps([{"name": "CI", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}])
             if "pr view" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -1127,6 +1249,65 @@ class TestProviders(unittest.TestCase):
         self.assertTrue(ok4)
         self.assertTrue(res4.get("reconciled_existing_effect"))
         self.assertEqual(res4.get("merge_commit_sha"), "d" * 40)
+
+    def test_reconcile_and_merge_pr_missing_base_refuses(self) -> None:
+        def no_base_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "api user" in cmd_str:
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr view" in cmd_str:
+                return 0, json.dumps({"state": "OPEN", "headRefOid": self.c_sha})
+            return 0, ""
+
+        ok, res = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=no_base_runner)
+        self.assertFalse(ok)
+        self.assertEqual(res.get("reason_code"), "BASE_BRANCH_MISMATCH")
+
+    def test_reconcile_and_merge_pr_already_merged_ci_fails(self) -> None:
+        def ci_fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "api user" in cmd_str:
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr checks" in cmd_str:
+                return 0, json.dumps([{"name": "CI", "state": "FAILURE", "bucket": "fail", "workflow": "CI"}])
+            if "pr view" in cmd_str:
+                return 0, json.dumps(
+                    {
+                        "state": "MERGED",
+                        "headRefOid": self.c_sha,
+                        "baseRefName": "main",
+                        "mergedAt": "2026-11-03T10:00:00Z",
+                        "mergeCommit": {"oid": "d" * 40},
+                    }
+                )
+            return 0, ""
+
+        ok, res = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=ci_fail_runner)
+        self.assertFalse(ok)
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_FAILED")
+
+    def test_reconcile_and_merge_pr_already_merged_ci_missing(self) -> None:
+        def ci_missing_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "api user" in cmd_str:
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr checks" in cmd_str:
+                return 0, "[]"
+            if "pr view" in cmd_str:
+                return 0, json.dumps(
+                    {
+                        "state": "MERGED",
+                        "headRefOid": self.c_sha,
+                        "baseRefName": "main",
+                        "mergedAt": "2026-11-03T10:00:00Z",
+                        "mergeCommit": {"oid": "d" * 40},
+                    }
+                )
+            return 0, ""
+
+        ok, res = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=ci_missing_runner)
+        self.assertFalse(ok)
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
 
     def test_reconcile_and_merge_pr_ci_failed(self) -> None:
         merged_state = [False]
