@@ -1082,32 +1082,61 @@ def _validate_verify_job(verify: dict[str, Any]) -> None:
     _validate_release_gate_step(gate_steps[0])
 
 
+def _is_pinned_action(uses_val: Any, action_name: str, pinned_tag: str) -> bool:
+    if not isinstance(uses_val, str):
+        return False
+    if uses_val == f"{action_name}@{pinned_tag}":
+        return True
+    if uses_val.startswith(f"{action_name}@"):
+        ref = uses_val.split("@", 1)[1]
+        if len(ref) == 40 and bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref)):
+            return True
+    return False
+
+
 def _validate_release_publish_step_0(s0: Any) -> None:
-    assert isinstance(s0, dict) and str(s0.get("uses", "")).startswith("actions/checkout@"), (
-        "release job step 0 must use actions/checkout"
+    assert isinstance(s0, dict) and _is_pinned_action(s0.get("uses"), "actions/checkout", "v7.0.0"), (
+        "release job step 0 must use pinned actions/checkout"
     )
-    _validate_checkout_step("release", s0)
+    expected_with = {
+        "ref": "${{ github.event.workflow_run.head_sha || github.sha }}",
+        "fetch-depth": 0,
+    }
+    assert s0.get("with") == expected_with, (
+        "release job checkout must specify exact fetch-depth and ref (exact ref expression)"
+    )
+    assert "env" not in s0, "release job step 0 must not declare env"
 
 
 def _validate_release_publish_step_1(s1: Any) -> None:
-    assert isinstance(s1, dict) and str(s1.get("uses", "")).startswith("actions/setup-python@"), (
-        "release job step 1 must use actions/setup-python"
+    assert isinstance(s1, dict) and _is_pinned_action(s1.get("uses"), "actions/setup-python", "v6.3.0"), (
+        "release job step 1 must use pinned actions/setup-python"
     )
-    assert s1.get("with", {}).get("python-version") == "3.12", "setup-python must use python-version: 3.12"
+    assert s1.get("with") == {"python-version": "3.12"}, "setup-python must use python-version: 3.12"
+    assert "env" not in s1, "release job step 1 must not declare env"
 
 
 def _validate_release_publish_step_2(s2: Any) -> None:
+    expected_cmd = "python scripts/semantic_release.py --notes-file release-notes.md"
     assert isinstance(s2, dict), "release job step 2 must be mapping"
     assert s2.get("name") == "Plan release" and s2.get("id") == "plan", "release job step 2 must be Plan release"
-    assert "scripts/semantic_release.py" in s2.get("run", ""), "release job step 2 must run semantic_release.py"
+    assert str(s2.get("run", "")).strip() == expected_cmd, "release job step 2 must run exact semantic_release.py"
+    assert "env" not in s2, "release job step 2 must not declare env"
 
 
 def _validate_release_publish_step_3(s3: Any) -> None:
+    canonical_lines = [
+        'git config user.name "github-actions[bot]"',
+        'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
+        'git tag -a "${{ steps.plan.outputs.next_tag }}" -F release-notes.md',
+        'git push origin "${{ steps.plan.outputs.next_tag }}"',
+    ]
     assert isinstance(s3, dict), "release job step 3 must be mapping"
     assert s3.get("name") == "Create tag", "release job step 3 must be Create tag"
     assert s3.get("if") == "steps.plan.outputs.release_needed == 'true'", "release job step 3 must check release_needed"
-    run_cmd = s3.get("run", "")
-    assert "git tag -a" in run_cmd and "git push origin" in run_cmd, "release job step 3 must tag and push"
+    lines = [line.strip() for line in str(s3.get("run", "")).strip().splitlines() if line.strip()]
+    assert lines == canonical_lines, "release job step 3 must run exact canonical tag commands"
+    assert "env" not in s3, "release job step 3 must not declare env"
 
 
 def _validate_release_publish_step_4(s4: Any) -> None:
@@ -1115,7 +1144,7 @@ def _validate_release_publish_step_4(s4: Any) -> None:
     assert isinstance(s4, dict), "release job step 4 must be mapping"
     assert s4.get("name") == "Create GitHub release", "release job step 4 must be Create GitHub release"
     assert s4.get("if") == "steps.plan.outputs.release_needed == 'true'", "release job step 4 must check release_needed"
-    assert s4.get("run", "").strip() == expected_cmd, "release job step 4 must run canonical gh release create"
+    assert str(s4.get("run", "")).strip() == expected_cmd, "release job step 4 must run canonical gh release create"
     assert s4.get("env") == {"GH_TOKEN": "${{ github.token }}"}, "release job step 4 env must be exactly GH_TOKEN"
 
 
@@ -1152,6 +1181,10 @@ def _validate_release_job(release: dict[str, Any]) -> None:
     assert perms == {"contents": "write"}, (
         f"'release' job permissions must be exactly {{'contents': 'write'}}, got {perms!r}"
     )
+    assert release.get("runs-on") == "ubuntu-latest", "'release' job runs-on must be 'ubuntu-latest'"
+    assert "container" not in release, "'release' job must not declare container"
+    assert "services" not in release, "'release' job must not declare services"
+    assert "continue-on-error" not in release, "'release' job must not declare continue-on-error"
 
     steps = release.get("steps", [])
     assert isinstance(steps, list), "'release' job steps must be a list"
@@ -1163,6 +1196,14 @@ def validate_release_workflow(doc: dict[str, Any]) -> None:
     assert isinstance(doc, dict), "workflow must parse as a valid YAML mapping"
     validate_shell_configuration("release workflow", doc)
     validate_env_configuration("release workflow", doc, allowed_keys=frozenset())
+    on_triggers = doc.get("on")
+    allowed = {"workflow_run", "workflow_dispatch"}
+    if isinstance(on_triggers, dict):
+        extra = set(on_triggers.keys()) - allowed
+        assert not extra, f"release workflow triggers must only be {sorted(allowed)}, got: {sorted(extra)}"
+    elif isinstance(on_triggers, list):
+        extra = set(on_triggers) - allowed
+        assert not extra, f"release workflow triggers must only be {sorted(allowed)}, got: {sorted(extra)}"
     wf_perms = doc.get("permissions")
     assert wf_perms == {"contents": "read"}, (
         f"release workflow permissions must be exactly {{'contents': 'read'}}, got {wf_perms!r}"
@@ -1181,6 +1222,8 @@ def validate_release_workflow(doc: dict[str, Any]) -> None:
     assert "push" not in triggers and "pull_request" not in triggers, (
         "release workflow must not trigger on push or pull_request"
     )
+    extra_triggers = set(triggers.keys()) - {"workflow_run", "workflow_dispatch"}
+    assert not extra_triggers, f"release workflow triggers must only be allowed triggers, got: {sorted(extra_triggers)}"
 
     jobs = doc.get("jobs", {})
     assert isinstance(jobs, dict), "jobs must be a mapping"
@@ -2307,6 +2350,82 @@ class TestReleaseWorkflowNegativeMutants:
             with pytest.raises(AssertionError, match="release workflow permissions"):
                 validate_release_workflow(doc)
             assert any("permissions" in e for e in cli_validate(doc))
+
+    def test_release_publish_unpinned_actions_fail(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        doc1 = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc1["jobs"]["release"]["steps"][0]["uses"] = "actions/checkout@main"
+        with pytest.raises(AssertionError, match="pinned actions/checkout"):
+            validate_release_workflow(doc1)
+        assert any("pinned actions/checkout" in e for e in cli_validate(doc1))
+
+        doc2 = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc2["jobs"]["release"]["steps"][1]["uses"] = "actions/setup-python@attacker-branch"
+        with pytest.raises(AssertionError, match="pinned actions/setup-python"):
+            validate_release_workflow(doc2)
+        assert any("pinned actions/setup-python" in e for e in cli_validate(doc2))
+
+    def test_release_publish_checkout_repo_override_fails(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc["jobs"]["release"]["steps"][0]["with"]["repository"] = "attacker/project"
+        with pytest.raises(AssertionError, match="exact fetch-depth and ref"):
+            validate_release_workflow(doc)
+        assert any("exact fetch-depth and ref" in e for e in cli_validate(doc))
+
+    def test_release_publish_environment_mutants_fail(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        doc_sh = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc_sh["jobs"]["release"]["runs-on"] = "self-hosted"
+        with pytest.raises(AssertionError, match="runs-on"):
+            validate_release_workflow(doc_sh)
+        assert any("runs-on" in e for e in cli_validate(doc_sh))
+
+        doc_ct = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc_ct["jobs"]["release"]["container"] = "attacker/image:latest"
+        with pytest.raises(AssertionError, match="container"):
+            validate_release_workflow(doc_ct)
+        assert any("container" in e for e in cli_validate(doc_ct))
+
+        doc_sv = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc_sv["jobs"]["release"]["services"] = {"redis": {"image": "redis"}}
+        with pytest.raises(AssertionError, match="services"):
+            validate_release_workflow(doc_sv)
+        assert any("services" in e for e in cli_validate(doc_sv))
+
+        doc_env = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc_env["jobs"]["release"]["steps"][2]["env"] = {"GH_TOKEN": "stolen"}
+        with pytest.raises(AssertionError, match="must not declare env"):
+            validate_release_workflow(doc_env)
+        assert any("must not declare env" in e for e in cli_validate(doc_env))
+
+    def test_release_publish_command_mutants_fail(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        doc_plan = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc_plan["jobs"]["release"]["steps"][2]["run"] += "\ngit push origin HEAD:refs/heads/unreviewed"
+        with pytest.raises(AssertionError, match="exact semantic_release.py"):
+            validate_release_workflow(doc_plan)
+        assert any("exact canonical semantic_release.py" in e for e in cli_validate(doc_plan))
+
+        doc_tag = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc_tag["jobs"]["release"]["steps"][3]["run"] += "\ngit push origin HEAD:refs/heads/unreviewed"
+        with pytest.raises(AssertionError, match="exact canonical tag commands"):
+            validate_release_workflow(doc_tag)
+        assert any("exact canonical git tag and push" in e for e in cli_validate(doc_tag))
+
+    def test_release_disallowed_trigger_fails(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        on_key = "on" if "on" in doc else True
+        doc[on_key]["pull_request_target"] = {}
+        with pytest.raises(AssertionError, match="release workflow triggers"):
+            validate_release_workflow(doc)
+        assert any("release workflow triggers" in e for e in cli_validate(doc))
 
     def test_execution_probe_failing_gate_command_exits_nonzero(self) -> None:
         """Execution probe test using bash -eo pipefail confirming failing gate command exits non-zero."""

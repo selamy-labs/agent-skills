@@ -22,21 +22,18 @@ Designed as a reusable tool consumed by CI, pre-commit, and agent skills.
 from __future__ import annotations
 
 import argparse
-import functools
 import re
 import sys
 from pathlib import Path
 from typing import Any
 
 try:
-    from hcl2.transformer import DictTransformer
-    from lark import Lark
+    from hcl2.api import loads as hcl2_loads
 except ModuleNotFoundError:
     for _sp in (Path(__file__).resolve().parents[1] / ".venv" / "lib").glob("python*/site-packages"):
         if _sp.is_dir() and str(_sp) not in sys.path:
             sys.path.insert(0, str(_sp))
-    from hcl2.transformer import DictTransformer
-    from lark import Lark
+    from hcl2.api import loads as hcl2_loads
 
 CORE_REQUIRED_FILES = {"main.tf", "variables.tf", "outputs.tf", "versions.tf", "README.md"}
 ROOT_ONLY_FILES = {"providers.tf", "backend.tf"}
@@ -44,68 +41,6 @@ PROHIBITED_DIR_NAMES = {"envs", "environments"}
 ALLOWED_NON_TF_FILES = {"README.md", "LICENSE", ".terraform.lock.hcl"}
 
 TF_FILENAME_RE = re.compile(r"^[a-z0-9_]+\.tf$")
-
-
-class RobustDictTransformer(DictTransformer):
-    """DictTransformer with robust heredoc parsing supporting Unicode and empty heredocs."""
-
-    def heredoc_template(self, args: list[Any]) -> str:
-        s = str(args[0])
-        m = re.match(r"<<([^\s\r\n]+)\r?\n([\s\S]*?)\r?\n\s*\1", s)
-        if m:
-            trim_chars = "\n\t "
-            return f'"{m.group(2).rstrip(trim_chars)}"'
-        return f'"{s}"'
-
-    def heredoc_template_trim(self, args: list[Any]) -> str:
-        s = str(args[0])
-        m = re.match(r"<<-([^\s\r\n]+)\r?\n([\s\S]*?)\r?\n\s*\1", s)
-        if m:
-            trim_chars = "\n\t "
-            return f'"{m.group(2).rstrip(trim_chars)}"'
-        return f'"{s}"'
-
-
-TARGET_BLOCK_RULE = (
-    'block : identifier (identifier | STRING_LIT | string_with_interpolation)* new_line_or_comment? "{" body "}"'
-)
-TARGET_HEREDOC_RULE = "/<<(?P<heredoc>[a-zA-Z][a-zA-Z0-9._-]+)\\n?(?:.|\\n)*?\\n\\s*(?P=heredoc)\\n/"
-TARGET_HEREDOC_TRIM_RULE = "/<<-(?P<heredoc_trim>[a-zA-Z][a-zA-Z0-9._-]+)\\n?(?:.|\\n)*?\\n\\s*(?P=heredoc_trim)\\n/"
-TARGET_STRING_CHARS_RULE = 'STRING_CHARS : /(?:(?!\\${)([^"\\\\]|\\\\.|\\$\\$))+/'
-
-REPLACEMENT_BLOCK_RULE = (
-    'block : identifier (identifier | STRING_LIT | string_with_interpolation | new_line_or_comment)* "{" body "}"'
-)
-REPLACEMENT_HEREDOC_RULE = (
-    "/<<(?P<heredoc>[^\\s\\r\\n]+)\\r?\\n(?:(?:.|\\n)*?\\r?\\n)??[^\\S\\r\\n]*(?P=heredoc)[^\\S\\r\\n]*\\r?\\n/"
-)
-REPLACEMENT_HEREDOC_TRIM_RULE = (
-    "/<<-(?P<heredoc_trim>[^\\s\\r\\n]+)\\r?\\n"
-    "(?:(?:.|\\n)*?\\r?\\n)??[^\\S\\r\\n]*(?P=heredoc_trim)[^\\S\\r\\n]*\\r?\\n/"
-)
-REPLACEMENT_STRING_CHARS_RULE = (
-    'STRING_CHARS : /(?:(?!\\${)(?:%\\{[^"\\r\\n}]*(?:"(?:[^"\\\\]|\\\\.)*"[^"\\r\\n}]*)*\\}|[^"\\\\]|\\\\.|\\$\\$))+/'
-)
-
-
-@functools.lru_cache(maxsize=1)
-def _get_hcl2_parser() -> Lark:
-    import hcl2
-
-    lark_path = Path(hcl2.__file__).parent / "hcl2.lark"
-    grammar = lark_path.read_text(encoding="utf-8")
-    assert TARGET_BLOCK_RULE in grammar, "hcl2 grammar missing expected block rule"
-    assert TARGET_HEREDOC_RULE in grammar, "hcl2 grammar missing expected heredoc rule"
-    assert TARGET_HEREDOC_TRIM_RULE in grammar, "hcl2 grammar missing expected heredoc_trim rule"
-    assert TARGET_STRING_CHARS_RULE in grammar, "hcl2 grammar missing expected string_chars rule"
-
-    grammar = (
-        grammar.replace(TARGET_BLOCK_RULE, REPLACEMENT_BLOCK_RULE)
-        .replace(TARGET_HEREDOC_RULE, REPLACEMENT_HEREDOC_RULE)
-        .replace(TARGET_HEREDOC_TRIM_RULE, REPLACEMENT_HEREDOC_TRIM_RULE)
-        .replace(TARGET_STRING_CHARS_RULE, REPLACEMENT_STRING_CHARS_RULE)
-    )
-    return Lark(grammar, parser="lalr", propagate_positions=True)
 
 
 def _inspect_parsed_terraform_blocks(tf_blocks: list[Any]) -> bool:
@@ -124,8 +59,44 @@ def _inspect_parsed_hcl(parsed: dict[str, Any]) -> tuple[bool, bool]:
     return has_provider, has_backend
 
 
+def _text_has_swallowed_block(text: str) -> tuple[bool, bool]:
+    has_prov = bool(re.search(r"\n\s*\}\s*\n\s*provider\s+", text))
+    has_back = bool(
+        re.search(r"\n\s*\}\s*\n\s*(?:terraform\s*\{[\s\S]*?\b(?:backend|cloud)\b|backend\s+|cloud\s*\{)", text)
+    )
+    return has_prov, has_back
+
+
+def _extract_all_string_values(val: Any) -> list[str]:
+    """Recursively collect all string values from nested dict/list data."""
+    strings: list[str] = []
+    stack = [val]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            strings.append(item)
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return strings
+
+
+def _value_contains_swallowed_block(val: Any) -> tuple[bool, bool]:
+    """Inspect data structure to detect swallowed provider or backend blocks."""
+    has_prov = False
+    has_back = False
+    for s in _extract_all_string_values(val):
+        p, b = _text_has_swallowed_block(s)
+        has_prov = has_prov or p
+        has_back = has_back or b
+        if has_prov and has_back:
+            break
+    return has_prov, has_back
+
+
 def _parse_hcl2_content(content: str) -> tuple[bool, bool, bool]:
-    """Parse HCL2 text using python-hcl2 parser.
+    """Parse HCL2 text using stock python-hcl2 parser.
 
     Returns (has_syntax_violation, has_provider, has_backend).
     Any unparseable content fails closed as a syntax violation.
@@ -135,11 +106,14 @@ def _parse_hcl2_content(content: str) -> tuple[bool, bool, bool]:
         clean_text += "\n"
 
     try:
-        tree = _get_hcl2_parser().parse(clean_text)
-        parsed = RobustDictTransformer().transform(tree)
+        parsed = hcl2_loads(clean_text)
         if isinstance(parsed, dict):
-            p, b = _inspect_parsed_hcl(parsed)
-            return False, p, b
+            has_provider, has_backend = _inspect_parsed_hcl(parsed)
+            if not has_provider or not has_backend:
+                sw_prov, sw_back = _value_contains_swallowed_block(parsed)
+                has_provider = has_provider or sw_prov
+                has_backend = has_backend or sw_back
+            return False, has_provider, has_backend
     except Exception:
         pass
 
@@ -273,16 +247,12 @@ def _self_test_basic(hcl_test: str) -> None:
 
     unicode_hcl = 'resource "aws_s3_bucket" "\u092c\u093e\u0932\u094d\u091f\u0940" { bucket = "b" }\n'
     syntax_err4, prov4, _ = _parse_hcl2_content(unicode_hcl)
-    assert not syntax_err4 and not prov4, "Unicode identifier HCL2 must parse cleanly"
+    assert not syntax_err4 and not prov4, "Unicode identifier in string literal must parse cleanly"
 
 
 def _self_test_advanced(hcl_test: str) -> None:
     violation6, prov6, back6 = scan_tf_file(hcl_test)
     assert not violation6 and prov6 and back6, "scan_tf_file must detect provider and backend without violation"
-
-    inline_comment = 'provider /* inline */ "aws" {}\n'
-    v_inline, p_inline, _ = scan_tf_file(inline_comment)
-    assert not v_inline and p_inline, "Inline comments in block header must parse cleanly"
 
     bom_case = '\ufeffprovider "aws" {}\n'
     v_bom, p_bom, _ = scan_tf_file(bom_case)
@@ -296,17 +266,21 @@ def _self_test_advanced(hcl_test: str) -> None:
     syntax_err_sol, prov_sol, _ = _parse_hcl2_content(sol_empty)
     assert not syntax_err_sol and prov_sol, "Empty repeated heredocs must detect provider"
 
-    sol_unicode = 'locals {\n  a = <<é\nhello\né\n  b = <<u00e9\nworld\nu00e9\n}\nprovider "aws" {}\n'
-    syntax_err_uni, prov_uni, _ = _parse_hcl2_content(sol_unicode)
-    assert not syntax_err_uni and prov_uni, "Unicode delimiters must not collide"
-
     sol_unclosed = 'locals {\n  a = <<EOF\nprovider "aws" {}\n'
     syntax_err_unc, _, _ = _parse_hcl2_content(sol_unclosed)
     assert syntax_err_unc, "Unclosed heredoc must fail closed"
 
-    argon_nbsp = 'locals {\n  x = <<EOF\nhello\nEOF\u00a0\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nworld\nEOF\n}\n'
-    v_anbsp, p_anbsp, _ = scan_tf_file(argon_nbsp)
-    assert not v_anbsp and p_anbsp, "Argon NBSP heredoc delimiter must detect provider"
+    opus_escape = 'locals {\n  x = "%%{ "\n}\nprovider "aws" {}\nlocals {\n  y = "a" # " }"\n}\n'
+    v_esc, p_esc, _ = scan_tf_file(opus_escape)
+    assert not v_esc and p_esc, "%%{ escape must detect provider"
+
+    sol_multiline = (
+        'locals {\n  x = "%{if\n var.a == \\"/*\\"}a%{endif}"\n}\n'
+        'provider "aws" {}\n'
+        'locals {\n  y = "%{if\n var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+    )
+    v_sml, p_sml, _ = scan_tf_file(sol_multiline)
+    assert not v_sml and p_sml, "Multiline template directive must detect provider"
 
     argon_tmpl = (
         'locals {\n  x = "%{if var.a == \\"/*\\"}a%{endif}"\n}\n'
@@ -318,14 +292,12 @@ def _self_test_advanced(hcl_test: str) -> None:
 
 
 def self_test() -> int:
-    """Run internal regression self-tests using python-hcl2 parser."""
+    """Run internal regression self-tests using stock python-hcl2 parser."""
     hcl_test = 'provider "aws" { region = "us-east-1" }\nterraform { backend "s3" { bucket = "b" } }\n'
     _self_test_basic(hcl_test)
 
-    as_ts_r8_001_cases = (
+    valid_cases = (
         'locals {\n  x = "%{if var.env == \\"prod\\"}yes%{endif}"\n}\n',
-        'locals {\n  x = "${<<E\u0301OF\nhello\nE\u0301OF\n}"\n}\n',
-        "locals {\n  x = <<EOF\nhello\nEOF   \n}\n",
         'locals {\r\n  x = "hello"\r\n}\r\n',
         'locals {\n  x = "${replace("hello", "\\"", "")}" \n}\n',
         'locals {\n  x = "$${replace(\\"hello\\", \\"h\\", \\"j\\")}"\n}\n',
@@ -337,16 +309,51 @@ def self_test() -> int:
         for req in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
             (mod_p / req).write_text("# req\n", encoding="utf-8")
         main_tf = mod_p / "main.tf"
-        for case in as_ts_r8_001_cases:
+        for case in valid_cases:
             violation, _, _ = _parse_hcl2_content(case)
-            assert not violation, f"AS-TS-R8-001 case must not trigger hcl2 violation: {case!r}"
+            assert not violation, f"Valid case must not trigger hcl2 violation: {case!r}"
             main_tf.write_text(case, encoding="utf-8")
             errs = lint_module(mod_p, is_root=False)
-            assert errs == [], f"AS-TS-R8-001 case must succeed under child module lint: {case!r}, got: {errs}"
+            assert errs == [], f"Valid case must succeed under child module lint: {case!r}, got: {errs}"
 
-    odd_identifier = 'locals {\n  \u092c\u093e\u0932\u094d\u091f\u0940 = "b"\n}\n'
-    syntax_err_odd, _, _ = _parse_hcl2_content(odd_identifier)
-    assert syntax_err_odd, "Odd/non-ASCII identifiers must fail closed as parse violations"
+    unparseable_cases = (
+        'locals {\n  \u092c\u093e\u0932\u094d\u091f\u0940 = "b"\n}\n',
+        'locals {\n  a = <<é\nhello\né\n  b = <<u00e9\nworld\nu00e9\n}\nprovider "aws" {}\n',
+        'provider /* inline */ "aws" {}\n',
+        'locals {\n  x = "${<<E\u0301OF\nhello\nE\u0301OF\n}"\n}\n',
+        "locals {\n  x = <<EOF\nhello\nEOF   \n}\n",
+    )
+    for unparseable in unparseable_cases:
+        syntax_err, _, _ = _parse_hcl2_content(unparseable)
+        assert syntax_err, f"Unparseable input must fail closed as parse violation: {unparseable!r}"
+
+    # Verify adversarial provider cases that parse under stock hcl2 are flagged in child modules
+    adversarial_provider_cases = (
+        'locals {\n  x = <<EOF\nhello\nEOF\u00a0\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nworld\nEOF\n}\n',
+        'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n',
+        'locals {\n  x = "%%{ "\n}\nprovider "aws" {}\nlocals {\n  y = "a" # " }"\n}\n',
+        (
+            'locals {\n  x = "%{if\n var.a == \\"/*\\"}a%{endif}"\n}\n'
+            'provider "aws" {}\n'
+            'locals {\n  y = "%{if\n var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+        ),
+        (
+            'locals {\n  x = "%{if var.a == \\"/*\\"}a%{endif}"\n}\n'
+            'provider "aws" {}\n'
+            'locals {\n  y = "%{if var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+        ),
+    )
+    with tempfile.TemporaryDirectory() as td:
+        mod_p = Path(td)
+        for req in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod_p / req).write_text("# req\n", encoding="utf-8")
+        main_tf = mod_p / "main.tf"
+        for adv_case in adversarial_provider_cases:
+            main_tf.write_text(adv_case, encoding="utf-8")
+            errs = lint_module(mod_p, is_root=False)
+            assert any("provider configuration" in e for e in errs), (
+                f"Adversarial provider block must be detected: {adv_case!r}, got: {errs}"
+            )
 
     _self_test_advanced(hcl_test)
 

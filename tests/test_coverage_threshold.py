@@ -52,42 +52,66 @@ def _mock_untracked_for_synthetic_tests(request: pytest.FixtureRequest, monkeypa
     monkeypatch.setattr("tests.test_coverage_threshold.is_tracked_by_git", _safe_is_tracked)
 
 
-def _parse_timestamp_from_text(raw: str, marker: Path) -> float:
+def _parse_session_marker_dict(raw: str, marker: Path) -> dict[str, Any]:
     try:
         data = json.loads(raw)
-        if isinstance(data, dict) and "timestamp" in data:
-            return float(data["timestamp"])
     except Exception:
-        pass
+        raise AssertionError(f"Corrupt session marker in {marker}: not valid JSON")
+    if not isinstance(data, dict):
+        raise AssertionError(f"Corrupt session marker in {marker}: expected JSON object")
+    return data
+
+
+def _validate_session_marker_fields(data: dict[str, Any], marker: Path) -> None:
+    session_id = data.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise AssertionError(f"Session marker in {marker} is missing required 'session_id'")
+    if "timestamp" not in data:
+        raise AssertionError(f"Session marker in {marker} is missing required 'timestamp'")
     try:
-        return float(raw)
-    except ValueError:
-        raise AssertionError(f"Corrupt session marker: {marker}")
-
-
-def _read_session_marker_timestamp(marker: Path) -> float:
-    if is_tracked_by_git(marker):
-        raise AssertionError(f"Refusing session marker tracked in git: {marker}")
-    raw = marker.read_text(encoding="utf-8").strip()
-    session_start = _parse_timestamp_from_text(raw, marker)
+        ts = float(data["timestamp"])
+    except (ValueError, TypeError):
+        raise AssertionError(f"Invalid timestamp in {marker}: {data.get('timestamp')}")
 
     import math
 
-    if not math.isfinite(session_start) or session_start <= 0:
+    if not math.isfinite(ts) or ts <= 0:
+        raise AssertionError(f"Invalid session marker timestamp in {marker}: {ts}")
+    if ts < 1000000000.0:
         raise AssertionError(
-            f"Invalid session marker timestamp in {marker}: {session_start}. "
-            "Markers must have positive finite timestamp."
+            f"Invalid session marker timestamp in {marker}: {ts}. Ancient or forged marker timestamps are refused."
         )
-    if session_start < 1000000000.0:
-        raise AssertionError(
-            f"Invalid session marker timestamp in {marker}: {session_start}. "
-            "Ancient or forged marker timestamps are refused."
-        )
-    return session_start
 
 
-def check_report_freshness(path: Path, min_mtime: float | None = None) -> None:
-    """Verify that coverage report is not older than the current test run."""
+def _read_session_marker(marker: Path) -> dict[str, Any]:
+    if is_tracked_by_git(marker):
+        raise AssertionError(f"Refusing session marker tracked in git: {marker}")
+    raw = marker.read_text(encoding="utf-8").strip()
+    data = _parse_session_marker_dict(raw, marker)
+    _validate_session_marker_fields(data, marker)
+    return data
+
+
+def _verify_report_session_binding(path: Path, expected_session_id: str, report_data: dict[str, Any] | None) -> None:
+    if report_data is None:
+        try:
+            report_data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            raise AssertionError(f"Failed to parse coverage report {path} for session binding")
+    report_session_id = report_data.get("session_id")
+    if not report_session_id or report_session_id != expected_session_id:
+        raise AssertionError(
+            f"Coverage report {path} session_id ({report_session_id!r}) does not match "
+            f"pytest session marker session_id ({expected_session_id!r}). Forged or unbound reports are refused."
+        )
+
+
+def check_report_freshness(
+    path: Path,
+    min_mtime: float | None = None,
+    report_data: dict[str, Any] | None = None,
+) -> None:
+    """Verify that coverage report is not older than the current test run and matches session marker."""
     if min_mtime is not None:
         if path.stat().st_mtime < min_mtime - 0.05:
             raise AssertionError(
@@ -105,13 +129,16 @@ def check_report_freshness(path: Path, min_mtime: float | None = None) -> None:
             )
         return
 
-    session_start = _read_session_marker_timestamp(marker)
+    marker_data = _read_session_marker(marker)
+    session_start = float(marker_data["timestamp"])
     if path.stat().st_mtime < session_start - 0.05:
         raise AssertionError(
             f"Coverage report {path} is older than the current pytest run "
             f"(mtime={path.stat().st_mtime:.2f} < session_start={session_start:.2f}). "
             f"Stale or pre-existing reports are refused."
         )
+
+    _verify_report_session_binding(path, str(marker_data["session_id"]), report_data)
 
 
 def verify_coverage_report(
@@ -130,10 +157,9 @@ def verify_coverage_report(
     if is_tracked_by_git(path):
         raise AssertionError(f"Coverage report {path} is tracked in git; coverage reports must never be committed.")
 
-    if check_run:
-        check_report_freshness(path, min_mtime)
-
     data = json.loads(path.read_text(encoding="utf-8"))
+    if check_run:
+        check_report_freshness(path, min_mtime, report_data=data)
     totals = data.get("totals", {})
     percent_covered = float(totals.get("percent_covered", 0.0))
     num_branches = int(totals.get("num_branches", 0))
@@ -434,17 +460,18 @@ def test_verify_coverage_report_refuses_pre_existing_stale_report(tmp_path: Path
     """AS-TS-R17-01: A pre-existing coverage report created before the test run started must be refused."""
     marker = tmp_path / ".coverage_session_start"
     run_start = 1700000100.0
-    marker.write_text(str(run_start), encoding="utf-8")
+    marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": run_start}), encoding="utf-8")
 
     report = tmp_path / "coverage.json"
     report.write_text(
         json.dumps(
             {
+                "session_id": "test-sess",
                 "totals": {
                     "percent_covered": 99.0,
                     "covered_branches": 99,
                     "num_branches": 100,
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -511,12 +538,17 @@ def test_verify_coverage_report_refuses_zero_or_negative_timestamp_marker(tmp_pa
     """AS-TS-R18-01: A forged session marker containing 0 or negative timestamp must be refused."""
     report = tmp_path / "coverage.json"
     report.write_text(
-        json.dumps({"totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100}}),
+        json.dumps(
+            {
+                "session_id": "test-sess",
+                "totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100},
+            }
+        ),
         encoding="utf-8",
     )
     marker = tmp_path / ".coverage_session_start"
-    for bad_ts in ("0", "0.0", "-100.5"):
-        marker.write_text(bad_ts, encoding="utf-8")
+    for bad_ts in (0, 0.0, -100.5):
+        marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": bad_ts}), encoding="utf-8")
         with pytest.raises(AssertionError, match="Invalid session marker timestamp"):
             verify_coverage_report(report)
 
@@ -525,16 +557,19 @@ def test_verify_coverage_report_refuses_tracked_marker(tmp_path: Path, monkeypat
     """AS-TS-R18-01: A session marker tracked in git must be refused."""
     report = tmp_path / "coverage.json"
     report.write_text(
-        json.dumps({"totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100}}),
+        json.dumps(
+            {
+                "session_id": "test-sess",
+                "totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100},
+            }
+        ),
         encoding="utf-8",
     )
     marker = tmp_path / ".coverage_session_start"
-    marker.write_text("1700000000.0", encoding="utf-8")
+    marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": 1700000000.0}), encoding="utf-8")
 
     def _mock_is_tracked(p: Path | str) -> bool:
-        if str(p).endswith(".coverage_session_start"):
-            return True
-        return False
+        return str(p).endswith(".coverage_session_start")
 
     monkeypatch.setattr("tests.test_coverage_threshold.is_tracked_by_git", _mock_is_tracked)
     with pytest.raises(AssertionError, match="Refusing session marker tracked in git"):
@@ -545,19 +580,107 @@ def test_verify_coverage_report_refuses_nonfinite_and_ancient_markers(tmp_path: 
     """AS-TS-R19-SOL61-02: Non-finite timestamps (nan, inf) and ancient/forged timestamps (1, 1.0) must be refused."""
     report = tmp_path / "coverage.json"
     report.write_text(
-        json.dumps({"totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100}}),
+        json.dumps(
+            {
+                "session_id": "test-sess",
+                "totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100},
+            }
+        ),
         encoding="utf-8",
     )
     marker = tmp_path / ".coverage_session_start"
     for bad_ts in ("nan", "NaN", "inf", "-inf"):
-        marker.write_text(bad_ts, encoding="utf-8")
-        with pytest.raises(AssertionError, match="Invalid session marker timestamp"):
+        marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": bad_ts}), encoding="utf-8")
+        with pytest.raises(AssertionError, match="Invalid (session marker timestamp|timestamp)"):
             verify_coverage_report(report)
 
-    for ancient_ts in ("1", "1.0", "1000", "999999999"):
-        marker.write_text(ancient_ts, encoding="utf-8")
+    for ancient_ts in (1, 1.0, 1000, 999999999):
+        marker.write_text(json.dumps({"session_id": "test-sess", "timestamp": ancient_ts}), encoding="utf-8")
         with pytest.raises(AssertionError, match="Ancient or forged marker timestamps are refused"):
             verify_coverage_report(report)
+
+
+def test_verify_coverage_report_refuses_plain_float_or_non_json_marker(tmp_path: Path) -> None:
+    """AS-TS-R20-02 / SOL61-03: Plain numeric floats and non-JSON marker files are refused."""
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "session_id": "test-sess",
+                "totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    marker = tmp_path / ".coverage_session_start"
+    for bad_content in ("1700000000.0", "1700000100", "not json at all", "[1, 2, 3]"):
+        marker.write_text(bad_content, encoding="utf-8")
+        with pytest.raises(AssertionError, match="Corrupt session marker in"):
+            verify_coverage_report(report)
+
+
+def test_verify_coverage_report_refuses_missing_or_empty_session_id_in_marker(tmp_path: Path) -> None:
+    """AS-TS-R20-02 / SOL61-03: Markers missing required non-empty session_id are refused."""
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "session_id": "test-sess",
+                "totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    marker = tmp_path / ".coverage_session_start"
+    for payload in ({"timestamp": 1700000000.0}, {"session_id": "", "timestamp": 1700000000.0}):
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(AssertionError, match="missing required 'session_id'"):
+            verify_coverage_report(report)
+
+
+def test_verify_coverage_report_refuses_mismatched_session_id(tmp_path: Path) -> None:
+    """AS-TS-R20-02 / SOL61-03: Stale or forged reports with mismatched session_id are refused."""
+    import time
+
+    now = time.time()
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(json.dumps({"session_id": "session-active", "timestamp": now}), encoding="utf-8")
+
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "session_id": "session-stale-or-forged",
+                "totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="does not match pytest session marker session_id"):
+        verify_coverage_report(report)
+
+
+def test_verify_coverage_report_accepts_valid_matching_session(tmp_path: Path) -> None:
+    """AS-TS-R20-02 / SOL61-03: Valid matching session_id and fresh timestamp passes."""
+    import time
+
+    now = time.time()
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(json.dumps({"session_id": "sess-ok", "timestamp": now}), encoding="utf-8")
+
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "session_id": "sess-ok",
+                "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    percent, branch_pct = verify_coverage_report(report)
+    assert percent == 95.0
+    assert branch_pct == 95.0
 
 
 def test_is_tracked_by_git_fatal_error_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:

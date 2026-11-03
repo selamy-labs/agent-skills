@@ -614,8 +614,8 @@ class OrderedArgvSet(list[tuple[str, ...]]):
         self.append(item)
 
 
-def is_tracked_by_git(path: Path | str) -> bool:
-    """Return True if path is tracked by git (fails closed on fatal git errors or process errors)."""
+def is_tracked_by_git_status(path: Path | str) -> tuple[bool, str | None]:
+    """Return (is_tracked, failure_detail). Fails closed (True) on git or process errors."""
     target = Path(path)
     try:
         proc = subprocess.run(
@@ -626,23 +626,31 @@ def is_tracked_by_git(path: Path | str) -> bool:
             cwd=target.parent if target.parent.is_dir() else None,
         )
         if proc.returncode == 0:
-            return True
+            return True, None
         if proc.returncode == 1:
-            return False
-        return True
-    except (FileNotFoundError, OSError):
-        return True
+            return False, None
+        return True, f"cannot determine git tracking (git exit {proc.returncode})"
+    except (FileNotFoundError, OSError) as exc:
+        return True, f"cannot determine git tracking ({exc})"
+
+
+def is_tracked_by_git(path: Path | str) -> bool:
+    """Return True if path is tracked by git (fails closed on fatal git errors or process errors)."""
+    tracked, _ = is_tracked_by_git_status(path)
+    return tracked
 
 
 def check_no_tracked_coverage_json(repo_root: Path) -> list[str]:
     """Ensure coverage.json is not tracked in git."""
-    cov_path = repo_root / "coverage.json"
     errors: list[str] = []
-    if is_tracked_by_git(cov_path):
-        errors.append("coverage.json must not be tracked in git repository")
-    marker_path = repo_root / ".coverage_session_start"
-    if is_tracked_by_git(marker_path):
-        errors.append(".coverage_session_start must not be tracked in git repository")
+    for filename in ("coverage.json", ".coverage_session_start"):
+        target_path = repo_root / filename
+        tracked, detail = is_tracked_by_git_status(target_path)
+        if is_tracked_by_git(target_path) or tracked:
+            if detail:
+                errors.append(f"{filename}: {detail}")
+            else:
+                errors.append(f"{filename} must not be tracked in git repository")
     return errors
 
 
@@ -905,6 +913,13 @@ def _check_release_job_permissions(job: dict[str, Any], errors: list[str]) -> No
     perms = job.get("permissions")
     if perms != {"contents": "write"}:
         errors.append(f"job 'release' permissions must be {{'contents': 'write'}}, got: {perms!r}")
+    runs_on = job.get("runs-on")
+    if runs_on != "ubuntu-latest":
+        errors.append(f"job 'release' runs-on must be 'ubuntu-latest', got: {runs_on!r}")
+    if "container" in job:
+        errors.append("job 'release' must not declare a container")
+    if "services" in job:
+        errors.append("job 'release' must not declare services")
 
 
 def validate_job_gates(job: dict[str, Any], job_name: str) -> list[str]:

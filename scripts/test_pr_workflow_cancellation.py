@@ -949,36 +949,59 @@ def _collect_scanner_commands(verify_steps: list[Any]) -> set[str]:
     return found_scanners
 
 
+def _is_pinned_action(uses_val: Any, action_name: str, pinned_tag: str) -> bool:
+    if not isinstance(uses_val, str):
+        return False
+    if uses_val == f"{action_name}@{pinned_tag}":
+        return True
+    if uses_val.startswith(f"{action_name}@"):
+        ref = uses_val.split("@", 1)[1]
+        if len(ref) == 40 and bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref)):
+            return True
+    return False
+
+
 def _validate_release_publish_step_0(s0: Any) -> None:
-    assert isinstance(s0, dict) and str(s0.get("uses", "")).startswith("actions/checkout@"), (
-        "release job step 0 must use actions/checkout"
+    assert isinstance(s0, dict) and _is_pinned_action(s0.get("uses"), "actions/checkout", "v7.0.0"), (
+        "release job step 0 must use pinned actions/checkout"
     )
-    with_clause = s0.get("with", {})
-    assert with_clause.get("fetch-depth") == 0, "release job checkout must specify fetch-depth: 0"
-    assert with_clause.get("ref") == "${{ github.event.workflow_run.head_sha || github.sha }}", (
-        "release job checkout must use exact ref expression"
-    )
+    expected_with = {
+        "ref": "${{ github.event.workflow_run.head_sha || github.sha }}",
+        "fetch-depth": 0,
+    }
+    assert s0.get("with") == expected_with, "release job checkout must specify exact fetch-depth and ref"
+    assert "env" not in s0, "release job step 0 must not declare env"
 
 
 def _validate_release_publish_step_1(s1: Any) -> None:
-    assert isinstance(s1, dict) and str(s1.get("uses", "")).startswith("actions/setup-python@"), (
-        "release job step 1 must use actions/setup-python"
+    assert isinstance(s1, dict) and _is_pinned_action(s1.get("uses"), "actions/setup-python", "v6.3.0"), (
+        "release job step 1 must use pinned actions/setup-python"
     )
-    assert s1.get("with", {}).get("python-version") == "3.12", "setup-python must use python-version: 3.12"
+    assert s1.get("with") == {"python-version": "3.12"}, "setup-python must use python-version: 3.12"
+    assert "env" not in s1, "release job step 1 must not declare env"
 
 
 def _validate_release_publish_step_2(s2: Any) -> None:
+    expected_cmd = "python scripts/semantic_release.py --notes-file release-notes.md"
     assert isinstance(s2, dict), "release job step 2 must be mapping"
     assert s2.get("name") == "Plan release" and s2.get("id") == "plan", "release job step 2 must be Plan release"
-    assert "scripts/semantic_release.py" in s2.get("run", ""), "release job step 2 must run semantic_release.py"
+    assert str(s2.get("run", "")).strip() == expected_cmd, "release job step 2 must run exact semantic_release.py"
+    assert "env" not in s2, "release job step 2 must not declare env"
 
 
 def _validate_release_publish_step_3(s3: Any) -> None:
+    canonical_lines = [
+        'git config user.name "github-actions[bot]"',
+        'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
+        'git tag -a "${{ steps.plan.outputs.next_tag }}" -F release-notes.md',
+        'git push origin "${{ steps.plan.outputs.next_tag }}"',
+    ]
     assert isinstance(s3, dict), "release job step 3 must be mapping"
     assert s3.get("name") == "Create tag", "release job step 3 must be Create tag"
     assert s3.get("if") == "steps.plan.outputs.release_needed == 'true'", "release job step 3 must check release_needed"
-    run_cmd = s3.get("run", "")
-    assert "git tag -a" in run_cmd and "git push origin" in run_cmd, "release job step 3 must tag and push"
+    lines = [line.strip() for line in str(s3.get("run", "")).strip().splitlines() if line.strip()]
+    assert lines == canonical_lines, "release job step 3 must run exact canonical tag commands"
+    assert "env" not in s3, "release job step 3 must not declare env"
 
 
 def _validate_release_publish_step_4(s4: Any) -> None:
@@ -986,7 +1009,7 @@ def _validate_release_publish_step_4(s4: Any) -> None:
     assert isinstance(s4, dict), "release job step 4 must be mapping"
     assert s4.get("name") == "Create GitHub release", "release job step 4 must be Create GitHub release"
     assert s4.get("if") == "steps.plan.outputs.release_needed == 'true'", "release job step 4 must check release_needed"
-    assert s4.get("run", "").strip() == expected_cmd, "release job step 4 must run canonical gh release create"
+    assert str(s4.get("run", "")).strip() == expected_cmd, "release job step 4 must run canonical gh release create"
     assert s4.get("env") == {"GH_TOKEN": "${{ github.token }}"}, "release job step 4 env must be exactly GH_TOKEN"
 
 
@@ -1016,6 +1039,10 @@ def _validate_release_publish_job(release: dict[str, Any]) -> None:
     assert release_perms == {"contents": "write"}, (
         f"release job permissions must be exactly {{'contents': 'write'}}, got {release_perms!r}"
     )
+    assert release.get("runs-on") == "ubuntu-latest", "release job runs-on must be ubuntu-latest"
+    assert "container" not in release, "release job must not declare container"
+    assert "services" not in release, "release job must not declare services"
+    assert "continue-on-error" not in release, "release job must not declare continue-on-error"
 
     release_steps = release.get("steps", [])
     _validate_release_publish_steps(release_steps)
@@ -1235,29 +1262,76 @@ def _test_mutants_release_workflow_permissions(release_path: Path) -> None:
         assert fg_failed, f"tests.test_format_gate accepted bad release wf perms {bad_perm}"
 
 
-def _test_mutants_release_publish_steps(release_path: Path) -> None:
+def _assert_release_wf_mutant_fails(mutated_doc: dict[str, Any], desc: str) -> None:
     from tests.test_format_gate import validate_release_workflow as fg_rel_val
     from tools.validate_marketplace import validate_release_workflow as vm_rel_val
 
+    vm_errs = vm_rel_val(mutated_doc)
+    assert len(vm_errs) > 0, f"tools.validate_marketplace accepted mutant: {desc}"
+
+    fg_failed = False
+    try:
+        fg_rel_val(mutated_doc)
+    except AssertionError:
+        fg_failed = True
+    assert fg_failed, f"tests.test_format_gate accepted mutant: {desc}"
+
+
+def _test_mutants_release_publish_steps(release_path: Path) -> None:
     doc1 = yaml.safe_load(release_path.read_text(encoding="utf-8"))
     doc1["jobs"]["release"]["steps"].append({"name": "exfil", "run": "curl https://example.com"})
-    assert len(vm_rel_val(doc1)) > 0
-    fg_failed1 = False
-    try:
-        fg_rel_val(doc1)
-    except AssertionError:
-        fg_failed1 = True
-    assert fg_failed1
+    _assert_release_wf_mutant_fails(doc1, "appended step")
 
     doc2 = yaml.safe_load(release_path.read_text(encoding="utf-8"))
     doc2["jobs"]["release"]["steps"][4]["run"] = "gh release create evil"
-    assert len(vm_rel_val(doc2)) > 0
-    fg_failed2 = False
-    try:
-        fg_rel_val(doc2)
-    except AssertionError:
-        fg_failed2 = True
-    assert fg_failed2
+    _assert_release_wf_mutant_fails(doc2, "modified release cmd")
+
+
+def _test_mutants_release_actions_and_inputs(release_path: Path) -> None:
+    doc_unpinned_checkout = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_unpinned_checkout["jobs"]["release"]["steps"][0]["uses"] = "actions/checkout@main"
+    _assert_release_wf_mutant_fails(doc_unpinned_checkout, "checkout@main")
+
+    doc_unpinned_setup = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_unpinned_setup["jobs"]["release"]["steps"][1]["uses"] = "actions/setup-python@attacker-branch"
+    _assert_release_wf_mutant_fails(doc_unpinned_setup, "setup-python@attacker-branch")
+
+    doc_repo_override = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_repo_override["jobs"]["release"]["steps"][0]["with"]["repository"] = "attacker/project"
+    _assert_release_wf_mutant_fails(doc_repo_override, "checkout repository override")
+
+
+def _test_mutants_release_job_environment(release_path: Path) -> None:
+    doc_self_hosted = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_self_hosted["jobs"]["release"]["runs-on"] = "self-hosted"
+    _assert_release_wf_mutant_fails(doc_self_hosted, "runs-on: self-hosted")
+
+    doc_container = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_container["jobs"]["release"]["container"] = "attacker/image:latest"
+    _assert_release_wf_mutant_fails(doc_container, "container declared")
+
+    doc_services = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_services["jobs"]["release"]["services"] = {"redis": {"image": "redis"}}
+    _assert_release_wf_mutant_fails(doc_services, "services declared")
+
+    doc_extra_env = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_extra_env["jobs"]["release"]["steps"][2]["env"] = {"GH_TOKEN": "stolen"}
+    _assert_release_wf_mutant_fails(doc_extra_env, "extra step env")
+
+
+def _test_mutants_release_commands_and_triggers(release_path: Path) -> None:
+    doc_appended_plan = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_appended_plan["jobs"]["release"]["steps"][2]["run"] += "\ngit push origin HEAD:refs/heads/unreviewed"
+    _assert_release_wf_mutant_fails(doc_appended_plan, "appended plan command")
+
+    doc_appended_tag = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    doc_appended_tag["jobs"]["release"]["steps"][3]["run"] += "\ngit push origin HEAD:refs/heads/unreviewed"
+    _assert_release_wf_mutant_fails(doc_appended_tag, "appended tag command")
+
+    doc_pr_target = yaml.safe_load(release_path.read_text(encoding="utf-8"))
+    on_key = "on" if "on" in doc_pr_target else True
+    doc_pr_target[on_key]["pull_request_target"] = {}
+    _assert_release_wf_mutant_fails(doc_pr_target, "pull_request_target trigger")
 
 
 def _test_mutants_release_and_shell_overrides() -> None:
@@ -1283,6 +1357,9 @@ def _test_mutants_release_and_shell_overrides() -> None:
     _test_mutants_release_publish_permissions(release_path)
     _test_mutants_release_workflow_permissions(release_path)
     _test_mutants_release_publish_steps(release_path)
+    _test_mutants_release_actions_and_inputs(release_path)
+    _test_mutants_release_job_environment(release_path)
+    _test_mutants_release_commands_and_triggers(release_path)
 
     _assert_mutant_fails(
         {"jobs": {"test": {"steps": [{"name": "bad", "run": "pytest", "shell": "bash {0}"}]}}},

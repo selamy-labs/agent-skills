@@ -726,12 +726,37 @@ def test_validate_quality_workflow_rejects_reordered_tests_steps() -> None:
 def test_check_no_tracked_coverage_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from tools.validate_skills import check_no_tracked_coverage_json
 
-    monkeypatch.setattr("tools.validate_skills.is_tracked_by_git", lambda _p: False)
+    monkeypatch.setattr("tools.validate_skills.is_tracked_by_git_status", lambda _p: (False, None))
     assert check_no_tracked_coverage_json(tmp_path) == []
 
-    monkeypatch.setattr("tools.validate_skills.is_tracked_by_git", lambda _p: True)
+    monkeypatch.setattr("tools.validate_skills.is_tracked_by_git_status", lambda _p: (True, None))
     errs = check_no_tracked_coverage_json(tmp_path)
     assert any("must not be tracked in git" in e for e in errs)
+
+
+def test_is_tracked_by_git_status_and_detail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    from tools.validate_skills import check_no_tracked_coverage_json, is_tracked_by_git_status
+
+    class MockProc:
+        def __init__(self, code: int):
+            self.returncode = code
+
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: MockProc(128))
+    tracked, detail = is_tracked_by_git_status("any_file")
+    assert tracked is True
+    assert "cannot determine git tracking (git exit 128)" in str(detail)
+    errs = check_no_tracked_coverage_json(tmp_path)
+    assert any("cannot determine git tracking (git exit 128)" in e for e in errs)
+
+    def _mock_raise(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("no git")
+
+    monkeypatch.setattr(subprocess, "run", _mock_raise)
+    tracked_err, detail_err = is_tracked_by_git_status("any_file")
+    assert tracked_err is True
+    assert "cannot determine git tracking (no git)" in str(detail_err)
 
 
 def test_validate_quality_workflow_rejects_tracked_coverage_json(monkeypatch: pytest.MonkeyPatch) -> None:

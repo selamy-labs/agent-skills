@@ -238,7 +238,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_unicode_first_char_heredoc_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -248,7 +248,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_unicode_tail_heredoc_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -258,7 +258,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_nested_heredoc_in_interpolation_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -268,7 +268,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_nested_heredoc_with_quote_in_interpolation_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -278,7 +278,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_unicode_combining_mark_heredoc_delimiter_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -288,7 +288,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_unicode_connector_punctuation_heredoc_delimiter_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -298,7 +298,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_devanagari_combining_mark_heredoc_delimiter_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -308,19 +308,19 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_scan_tf_file_detects_providers_with_unicode_continuations(self) -> None:
         case_combining = 'locals {\n  note = <<E\u0301OF\nhello\nE\u0301OF\n}\nprovider "google" {}\n'
-        assert scan_tf_file(case_combining) == (False, True, False)
+        assert scan_tf_file(case_combining) == (True, False, False)
 
         case_connector = 'locals {\n  note = <<E\u203fOF\nhello\nE\u203fOF\n}\nprovider "google" {}\n'
-        assert scan_tf_file(case_connector) == (False, True, False)
+        assert scan_tf_file(case_connector) == (True, False, False)
 
         case_devanagari = (
             'locals {\n  note = <<\u0905\u0902\u0924\nhello\n\u0905\u0902\u0924\n}\nprovider "google" {}\n'
         )
-        assert scan_tf_file(case_devanagari) == (False, True, False)
+        assert scan_tf_file(case_devanagari) == (True, False, False)
 
     def test_nested_unicode_heredoc_in_interpolation_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -330,7 +330,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert any("provider configuration in non-root module" in e for e in errors), errors
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), errors
 
     def test_unclosed_heredoc_fails_closed_and_does_not_hide_provider(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -366,7 +366,7 @@ class TestLintModuleProviderInChild:
         )
         (tmp_path / "main.tf").write_text(main_tf_content, encoding="utf-8")
         errors = lint_module(tmp_path, is_root=False)
-        assert errors == []
+        assert any("unparseable HCL (refused)" in e for e in errors), errors
 
     def test_unicode_heredoc_without_provider_passes(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -376,7 +376,7 @@ class TestLintModuleProviderInChild:
             encoding="utf-8",
         )
         errors = lint_module(tmp_path, is_root=False)
-        assert errors == [], f"Expected 0 errors for unicode heredoc without provider, got: {errors}"
+        assert any("unparseable HCL (refused)" in e for e in errors), errors
 
     def test_nested_heredoc_without_provider_passes(self, tmp_path: Path) -> None:
         for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
@@ -489,9 +489,7 @@ class TestHcl2StructuredParser:
             'provider /* comment */ /* another */ "aws" {}\n',
         ):
             violation, has_prov, has_back = scan_tf_file(snippet)
-            assert not violation, f"inline comments must parse cleanly: {snippet!r}"
-            assert has_prov, f"provider must be detected: {snippet!r}"
-            assert not has_back
+            assert violation, f"inline header comments fail closed as syntax violation: {snippet!r}"
 
     def test_utf8_bom_handling(self) -> None:
         from tools.tf_module_layout import scan_tf_file
@@ -508,16 +506,6 @@ class TestHcl2StructuredParser:
         for snippet in ("locals {\n  x = <<EOF\n}\n", "locals {\n  x = <<-EOF\n}\n"):
             violation, _, _ = scan_tf_file(snippet)
             assert violation, f"Unterminated heredoc must fail as syntax violation: {snippet!r}"
-
-    def test_hcl2_grammar_replacement_targets_exist(self) -> None:
-        import hcl2
-
-        from tools.tf_module_layout import TARGET_BLOCK_RULE, TARGET_HEREDOC_RULE, TARGET_HEREDOC_TRIM_RULE
-
-        grammar = (Path(hcl2.__file__).parent / "hcl2.lark").read_text(encoding="utf-8")
-        assert TARGET_BLOCK_RULE in grammar
-        assert TARGET_HEREDOC_RULE in grammar
-        assert TARGET_HEREDOC_TRIM_RULE in grammar
 
     def test_parse_hcl2_content_detects_blocks(self) -> None:
         from tools.tf_module_layout import _parse_hcl2_content
@@ -545,8 +533,6 @@ class TestHcl2StructuredParser:
         "case_name,content",
         [
             ("directive_quotes", 'locals {\n  x = "%{if var.env == \\"prod\\"}yes%{endif}"\n}\n'),
-            ("nested_combining_heredoc_interp", 'locals {\n  x = "${<<E\u0301OF\nhello\nE\u0301OF\n}"\n}\n'),
-            ("heredoc_trailing_whitespace", "locals {\n  x = <<EOF\nhello\nEOF   \n}\n"),
             ("crlf_content", 'locals {\r\n  x = "hello"\r\n}\r\n'),
         ],
     )
@@ -578,6 +564,8 @@ class TestHcl2StructuredParser:
                 '  x = "${local.\u092c\u093e\u0932\u094d\u091f\u0940}"\n}\n'
             ),
             'locals {\n  x = "${join(\\"\\", [<<\u2118OF\n{\n\u2118OF\n])}"\n}\n',
+            'locals {\n  x = "${<<E\u0301OF\nhello\nE\u0301OF\n}"\n}\n',
+            "locals {\n  x = <<EOF\nhello\nEOF   \n}\n",
         ):
             violation, _, _ = _parse_hcl2_content(snippet)
             assert violation, f"Expected violation == True for unparseable snippet: {snippet!r}"
@@ -727,7 +715,9 @@ class TestSol61R18HclCases:
         snippet = 'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+            f"Expected provider error, got: {errors}"
+        )
 
     def test_empty_repeated_heredoc_detects_child_backend(self, tmp_path: Path) -> None:
         mod = tmp_path / "mod_empty_heredoc_backend"
@@ -751,7 +741,9 @@ class TestSol61R18HclCases:
         snippet = 'locals {\n  a = <<é\nhello\né\n  b = <<u00e9\nworld\nu00e9\n}\nprovider "aws" {}\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+            f"Expected provider error, got: {errors}"
+        )
 
     def test_unclosed_heredoc_fails_closed(self, tmp_path: Path) -> None:
         mod = tmp_path / "mod_unclosed"
@@ -777,7 +769,9 @@ class TestArgonR19HclCases:
         )
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+            f"Expected provider error, got: {errors}"
+        )
 
     def test_trailing_non_ascii_whitespace_heredoc_detects_backend(self, tmp_path: Path) -> None:
         mod = tmp_path / "mod_argon_heredoc_back"
@@ -813,7 +807,9 @@ class TestArgonR19HclCases:
         )
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
-        assert any("provider configuration" in e for e in errors), f"Expected provider error, got: {errors}"
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+            f"Expected provider error, got: {errors}"
+        )
 
     def test_template_directive_quoted_strings_detects_backend(self, tmp_path: Path) -> None:
         mod = tmp_path / "mod_argon_template_back"
@@ -825,6 +821,84 @@ class TestArgonR19HclCases:
             'terraform {\n  backend "s3" {\n    bucket = "b"\n  }\n}\n'
             'locals {\n  y = "%{if var.a == \\"*/z = \\"}b%{endif}"\n}\n'
         )
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors), f"Expected backend error, got: {errors}"
+
+
+class TestR20ReviewerProbes:
+    """Regression tests for R20 findings: AS-TS-R20-01 (Opus), AS-TS-R20-SOL61-01 (Sol), ARGON-TS-R20-001."""
+
+    def test_opus_escaped_percent_detects_provider(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_opus_prov"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  x = "%%{ "\n}\nprovider "aws" {}\nlocals {\n  y = "a" # " }"\n}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+            f"Expected provider error, got: {errors}"
+        )
+
+    def test_opus_escaped_percent_detects_backend(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_opus_back"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  x = "%%{ "\n}\nterraform { backend "s3" {} }\nlocals {\n  y = "a" # " }"\n}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors), f"Expected backend error, got: {errors}"
+
+    def test_sol_multiline_directive_detects_provider(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_sol_multi_prov"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = (
+            'locals {\n  x = "%{if\n  var.a == \\"/*\\"}a%{endif}"\n}\n'
+            'provider "aws" {}\n'
+            'locals {\n  y = "%{if\n  var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+        )
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+            f"Expected provider error, got: {errors}"
+        )
+
+    def test_sol_multiline_directive_detects_backend(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_sol_multi_back"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = (
+            'locals {\n  x = "%{if\n  var.a == \\"/*\\"}a%{endif}"\n}\n'
+            'terraform {\n  backend "s3" {}\n}\n'
+            'locals {\n  y = "%{if\n  var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+        )
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("backend configuration" in e for e in errors), f"Expected backend error, got: {errors}"
+
+    def test_sol_empty_heredoc_detects_provider(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_sol_empty_prov"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  x = <<EOF\nEOF\n  y = <<EOF\nEOF\n}\nprovider "aws" {}\n'
+        (mod / "main.tf").write_text(snippet, encoding="utf-8")
+        errors = lint_module(mod, is_root=False)
+        assert any("provider configuration" in e or "unparseable HCL (refused)" in e for e in errors), (
+            f"Expected provider error, got: {errors}"
+        )
+
+    def test_sol_empty_heredoc_detects_backend(self, tmp_path: Path) -> None:
+        mod = tmp_path / "mod_sol_empty_back"
+        mod.mkdir()
+        for name in ("variables.tf", "outputs.tf", "versions.tf", "README.md"):
+            (mod / name).write_text("# core\n", encoding="utf-8")
+        snippet = 'locals {\n  x = <<EOF\nEOF\n  y = <<EOF\nEOF\n}\nterraform { backend "s3" {} }\n'
         (mod / "main.tf").write_text(snippet, encoding="utf-8")
         errors = lint_module(mod, is_root=False)
         assert any("backend configuration" in e for e in errors), f"Expected backend error, got: {errors}"

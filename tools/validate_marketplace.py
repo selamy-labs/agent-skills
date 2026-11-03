@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -205,49 +206,87 @@ def _load_release_mapping(workflow_input: dict[str, Any] | str | Path) -> tuple[
         return (None, [f"Failed to parse YAML: {exc}"])
 
 
+CANONICAL_CHECKOUT_WITH: dict[str, Any] = {
+    "ref": "${{ github.event.workflow_run.head_sha || github.sha }}",
+    "fetch-depth": 0,
+}
+CANONICAL_SETUP_PYTHON_WITH: dict[str, Any] = {
+    "python-version": "3.12",
+}
+CANONICAL_PLAN_CMD: str = "python scripts/semantic_release.py --notes-file release-notes.md"
+CANONICAL_TAG_CMD_LINES: tuple[str, ...] = (
+    'git config user.name "github-actions[bot]"',
+    'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
+    'git tag -a "${{ steps.plan.outputs.next_tag }}" -F release-notes.md',
+    'git push origin "${{ steps.plan.outputs.next_tag }}"',
+)
+CANONICAL_RELEASE_CMD: str = 'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md'
+
+
+def _is_pinned_action(uses_val: Any, action_name: str, pinned_tag: str) -> bool:
+    if not isinstance(uses_val, str):
+        return False
+    if uses_val == f"{action_name}@{pinned_tag}":
+        return True
+    if uses_val.startswith(f"{action_name}@"):
+        ref = uses_val.split("@", 1)[1]
+        if len(ref) == 40 and bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref)):
+            return True
+    return False
+
+
 def _check_release_step_0(s0: Any, errors: list[str]) -> None:
-    if not isinstance(s0, dict) or not str(s0.get("uses", "")).startswith("actions/checkout@"):
-        errors.append("job 'release' step 0 must use actions/checkout")
+    if not isinstance(s0, dict) or not _is_pinned_action(s0.get("uses"), "actions/checkout", "v7.0.0"):
+        errors.append("job 'release' step 0 must use pinned actions/checkout")
         return
-    w0 = s0.get("with", {})
-    if w0.get("fetch-depth") != 0 or w0.get("ref") != "${{ github.event.workflow_run.head_sha || github.sha }}":
-        errors.append("job 'release' step 0 checkout must specify fetch-depth: 0 and exact ref")
+    if s0.get("with") != CANONICAL_CHECKOUT_WITH:
+        errors.append("job 'release' step 0 checkout must specify exact fetch-depth and ref")
+    if "env" in s0:
+        errors.append("job 'release' step 0 must not declare env")
 
 
 def _check_release_step_1(s1: Any, errors: list[str]) -> None:
-    if not isinstance(s1, dict) or not str(s1.get("uses", "")).startswith("actions/setup-python@"):
-        errors.append("job 'release' step 1 must use actions/setup-python")
+    if not isinstance(s1, dict) or not _is_pinned_action(s1.get("uses"), "actions/setup-python", "v6.3.0"):
+        errors.append("job 'release' step 1 must use pinned actions/setup-python")
         return
-    if s1.get("with", {}).get("python-version") != "3.12":
+    if s1.get("with") != CANONICAL_SETUP_PYTHON_WITH:
         errors.append("job 'release' step 1 must specify python-version: '3.12'")
+    if "env" in s1:
+        errors.append("job 'release' step 1 must not declare env")
 
 
 def _check_release_step_2(s2: Any, errors: list[str]) -> None:
     if not isinstance(s2, dict) or s2.get("name") != "Plan release" or s2.get("id") != "plan":
         errors.append("job 'release' step 2 must be Plan release")
         return
-    if "scripts/semantic_release.py" not in s2.get("run", ""):
-        errors.append("job 'release' step 2 must run semantic_release.py")
+    if str(s2.get("run", "")).strip() != CANONICAL_PLAN_CMD:
+        errors.append("job 'release' step 2 must run exact canonical semantic_release.py command")
+    if "env" in s2:
+        errors.append("job 'release' step 2 must not declare env")
 
 
 def _check_release_step_3(s3: Any, errors: list[str]) -> None:
     if not isinstance(s3, dict) or s3.get("name") != "Create tag":
         errors.append("job 'release' step 3 must be Create tag")
         return
-    if s3.get("if") != "steps.plan.outputs.release_needed == 'true'" or "git tag -a" not in s3.get("run", ""):
-        errors.append("job 'release' step 3 must check release_needed and create git tag")
+    if s3.get("if") != "steps.plan.outputs.release_needed == 'true'":
+        errors.append("job 'release' step 3 must check release_needed")
+    lines = tuple(line.strip() for line in str(s3.get("run", "")).strip().splitlines() if line.strip())
+    if lines != CANONICAL_TAG_CMD_LINES:
+        errors.append("job 'release' step 3 must run exact canonical git tag and push commands")
+    if "env" in s3:
+        errors.append("job 'release' step 3 must not declare env")
 
 
 def _check_release_step_4(s4: Any, errors: list[str]) -> None:
-    expected_cmd = 'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md'
     if not isinstance(s4, dict) or s4.get("name") != "Create GitHub release":
         errors.append("job 'release' step 4 must be Create GitHub release")
         return
     if s4.get("if") != "steps.plan.outputs.release_needed == 'true'":
         errors.append("job 'release' step 4 must check release_needed")
-    elif s4.get("run", "").strip() != expected_cmd:
+    if str(s4.get("run", "")).strip() != CANONICAL_RELEASE_CMD:
         errors.append("job 'release' step 4 must run canonical gh release create")
-    elif s4.get("env") != {"GH_TOKEN": "${{ github.token }}"}:
+    if s4.get("env") != {"GH_TOKEN": "${{ github.token }}"}:
         errors.append("job 'release' step 4 env must be exactly GH_TOKEN")
 
 
@@ -272,10 +311,53 @@ def validate_release_publish_job(job: dict[str, Any], job_name: str = "release")
     perms = job.get("permissions")
     if perms != {"contents": "write"}:
         errors.append(f"job '{job_name}' permissions must be {{'contents': 'write'}}, got: {perms!r}")
+    if job.get("runs-on") != "ubuntu-latest":
+        errors.append(f"job '{job_name}' runs-on must be 'ubuntu-latest', got: {job.get('runs-on')!r}")
+    if "container" in job:
+        errors.append(f"job '{job_name}' must not declare a container")
+    if "services" in job:
+        errors.append(f"job '{job_name}' must not declare services")
     if job.get("continue-on-error") is not None:
         errors.append(f"job '{job_name}' must not declare continue-on-error")
     _check_release_publish_steps(job.get("steps", []), errors)
     return errors
+
+
+def _validate_release_workflow_triggers(on_triggers: Any, errors: list[str]) -> None:
+    allowed_triggers = {"workflow_run", "workflow_dispatch"}
+    if isinstance(on_triggers, dict):
+        extra = set(on_triggers.keys()) - allowed_triggers
+        if extra:
+            errors.append(f"release workflow triggers must only be {sorted(allowed_triggers)}, got: {sorted(extra)}")
+    elif isinstance(on_triggers, list):
+        extra = set(on_triggers) - allowed_triggers
+        if extra:
+            errors.append(f"release workflow triggers must only be {sorted(allowed_triggers)}, got: {sorted(extra)}")
+
+
+def _validate_release_workflow_jobs(jobs: Any, errors: list[str]) -> None:
+    if not isinstance(jobs, dict):
+        errors.append("Release workflow jobs must be a mapping")
+        return
+
+    verify_job = jobs.get("verify")
+    release_job = jobs.get("release")
+    if verify_job is None and release_job is None:
+        errors.append("release workflow missing 'verify' or 'release' target job")
+        return
+
+    extra_jobs = set(jobs.keys()) - {"verify", "release"}
+    if extra_jobs:
+        errors.append(
+            f"release workflow jobs must contain only 'verify' and 'release', got unexpected: {sorted(extra_jobs)}"
+        )
+
+    if verify_job is not None:
+        errors.extend(validate_job_gates(verify_job, "verify"))
+        errors.extend(validate_release_scanners(verify_job, "verify"))
+
+    if release_job is not None:
+        errors.extend(validate_release_publish_job(release_job, "release"))
 
 
 def validate_release_workflow(workflow_input: dict[str, Any] | str | Path) -> list[str]:
@@ -291,29 +373,9 @@ def validate_release_workflow(workflow_input: dict[str, Any] | str | Path) -> li
     if wf_perms != {"contents": "read"}:
         errors.append(f"release workflow permissions must be {{'contents': 'read'}}, got: {wf_perms!r}")
 
-    jobs = doc.get("jobs", {})
-    if not isinstance(jobs, dict):
-        return ["Release workflow jobs must be a mapping"]
-
-    verify_job = jobs.get("verify")
-    release_job = jobs.get("release")
-
-    if verify_job is None and release_job is None:
-        errors.append("release workflow missing 'verify' or 'release' target job")
-        return errors
-
-    extra_jobs = set(jobs.keys()) - {"verify", "release"}
-    if extra_jobs:
-        errors.append(
-            f"release workflow jobs must contain only 'verify' and 'release', got unexpected: {sorted(extra_jobs)}"
-        )
-
-    if verify_job is not None:
-        errors.extend(validate_job_gates(verify_job, "verify"))
-        errors.extend(validate_release_scanners(verify_job, "verify"))
-
-    if release_job is not None:
-        errors.extend(validate_release_publish_job(release_job, "release"))
+    on_triggers = doc.get("on") if "on" in doc else cast(dict[Any, Any], doc).get(True)
+    _validate_release_workflow_triggers(on_triggers, errors)
+    _validate_release_workflow_jobs(doc.get("jobs"), errors)
 
     return errors
 

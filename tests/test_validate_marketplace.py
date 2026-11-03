@@ -294,3 +294,227 @@ def test_validate_quality_workflow_rejects_python_c_argument_bypass() -> None:
             step["run"] = 'python3 -c "pass" scripts/privacy_scan.py'
     errs = validate_quality_workflow(doc)
     assert any("missing required step: privacy_scan.py" in e for e in errs)
+
+
+def _make_valid_release_job() -> dict[str, Any]:
+    return {
+        "runs-on": "ubuntu-latest",
+        "permissions": {"contents": "write"},
+        "steps": [
+            {
+                "uses": "actions/checkout@v7.0.0",
+                "with": {
+                    "ref": "${{ github.event.workflow_run.head_sha || github.sha }}",
+                    "fetch-depth": 0,
+                },
+            },
+            {
+                "uses": "actions/setup-python@v6.3.0",
+                "with": {"python-version": "3.12"},
+            },
+            {
+                "name": "Plan release",
+                "id": "plan",
+                "run": "python scripts/semantic_release.py --notes-file release-notes.md",
+            },
+            {
+                "name": "Create tag",
+                "if": "steps.plan.outputs.release_needed == 'true'",
+                "run": (
+                    'git config user.name "github-actions[bot]"\n'
+                    'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"\n'
+                    'git tag -a "${{ steps.plan.outputs.next_tag }}" -F release-notes.md\n'
+                    'git push origin "${{ steps.plan.outputs.next_tag }}"\n'
+                ),
+            },
+            {
+                "name": "Create GitHub release",
+                "if": "steps.plan.outputs.release_needed == 'true'",
+                "env": {"GH_TOKEN": "${{ github.token }}"},
+                "run": 'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md',
+            },
+        ],
+    }
+
+
+def test_validate_release_publish_job_valid() -> None:
+    from tools.validate_marketplace import validate_release_publish_job
+
+    job = _make_valid_release_job()
+    assert validate_release_publish_job(job) == []
+
+
+def test_validate_release_publish_job_attributes() -> None:
+    from tools.validate_marketplace import validate_release_publish_job
+
+    job1 = _make_valid_release_job()
+    job1["permissions"] = {"contents": "read"}
+    assert any("permissions must be {'contents': 'write'}" in e for e in validate_release_publish_job(job1))
+
+    job2 = _make_valid_release_job()
+    job2["runs-on"] = "self-hosted"
+    assert any("runs-on must be 'ubuntu-latest'" in e for e in validate_release_publish_job(job2))
+
+    job3 = _make_valid_release_job()
+    job3["container"] = "attacker/image"
+    assert any("must not declare a container" in e for e in validate_release_publish_job(job3))
+
+    job4 = _make_valid_release_job()
+    job4["services"] = {"redis": {}}
+    assert any("must not declare services" in e for e in validate_release_publish_job(job4))
+
+    job5 = _make_valid_release_job()
+    job5["continue-on-error"] = True
+    assert any("must not declare continue-on-error" in e for e in validate_release_publish_job(job5))
+
+    job6 = _make_valid_release_job()
+    job6["steps"] = "not a list"
+    assert any("steps must be a list" in e for e in validate_release_publish_job(job6))
+
+    job7 = _make_valid_release_job()
+    job7["steps"] = job7["steps"][:4]
+    assert any("must have exactly 5 canonical steps" in e for e in validate_release_publish_job(job7))
+
+
+def test_validate_release_step_0_and_1_errors() -> None:
+    from tools.validate_marketplace import validate_release_publish_job
+
+    for bad_s0 in (
+        "not a dict",
+        {"uses": "actions/checkout@main"},
+        {"uses": "actions/checkout@v7.0.0", "with": {}},
+        {
+            "uses": "actions/checkout@v7.0.0",
+            "with": {
+                "ref": "${{ github.event.workflow_run.head_sha || github.sha }}",
+                "fetch-depth": 0,
+            },
+            "env": {"A": "B"},
+        },
+    ):
+        job = _make_valid_release_job()
+        job["steps"][0] = bad_s0
+        assert len(validate_release_publish_job(job)) > 0
+
+    # Pinned commit SHA is accepted
+    job_sha = _make_valid_release_job()
+    job_sha["steps"][0]["uses"] = "actions/checkout@0123456789abcdef0123456789abcdef01234567"
+    job_sha["steps"][1]["uses"] = "actions/setup-python@0123456789abcdef0123456789abcdef01234567"
+    assert validate_release_publish_job(job_sha) == []
+
+    for bad_s1 in (
+        "not a dict",
+        {"uses": "actions/setup-python@attacker"},
+        {"uses": "actions/setup-python@v6.3.0", "with": {"python-version": "3.11"}},
+        {
+            "uses": "actions/setup-python@v6.3.0",
+            "with": {"python-version": "3.12"},
+            "env": {"A": "B"},
+        },
+    ):
+        job = _make_valid_release_job()
+        job["steps"][1] = bad_s1
+        assert len(validate_release_publish_job(job)) > 0
+
+
+def test_validate_release_step_2_3_4_errors() -> None:
+    from tools.validate_marketplace import validate_release_publish_job
+
+    # Step 2 errors
+    for bad_s2 in (
+        "not a dict",
+        {"name": "Wrong", "id": "plan", "run": "python scripts/semantic_release.py --notes-file release-notes.md"},
+        {"name": "Plan release", "id": "plan", "run": "echo evil"},
+        {
+            "name": "Plan release",
+            "id": "plan",
+            "run": "python scripts/semantic_release.py --notes-file release-notes.md",
+            "env": {"A": "B"},
+        },
+    ):
+        job = _make_valid_release_job()
+        job["steps"][2] = bad_s2
+        assert len(validate_release_publish_job(job)) > 0
+
+    # Step 3 errors
+    for bad_s3 in (
+        "not a dict",
+        {"name": "Wrong"},
+        {"name": "Create tag", "if": "true", "run": "git tag -a v1"},
+        {"name": "Create tag", "if": "steps.plan.outputs.release_needed == 'true'", "run": "echo evil"},
+        {
+            "name": "Create tag",
+            "if": "steps.plan.outputs.release_needed == 'true'",
+            "run": "git config user.name 'b'\ngit config user.email 'e'\ngit tag -a\ngit push",
+            "env": {"A": "B"},
+        },
+    ):
+        job = _make_valid_release_job()
+        job["steps"][3] = bad_s3
+        assert len(validate_release_publish_job(job)) > 0
+
+    # Step 4 errors
+    for bad_s4 in (
+        "not a dict",
+        {"name": "Wrong"},
+        {"name": "Create GitHub release", "if": "true"},
+        {
+            "name": "Create GitHub release",
+            "if": "steps.plan.outputs.release_needed == 'true'",
+            "run": "echo evil",
+            "env": {"GH_TOKEN": "${{ github.token }}"},
+        },
+        {
+            "name": "Create GitHub release",
+            "if": "steps.plan.outputs.release_needed == 'true'",
+            "run": 'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md',
+            "env": {"GH_TOKEN": "stolen", "EXTRA": "1"},
+        },
+    ):
+        job = _make_valid_release_job()
+        job["steps"][4] = bad_s4
+        assert len(validate_release_publish_job(job)) > 0
+
+
+def test_validate_release_workflow_triggers_and_jobs_errors() -> None:
+    from tools.validate_marketplace import validate_release_workflow
+
+    doc = yaml.safe_load(RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8"))
+
+    # Unparseable/bad input
+    assert any("Failed to parse YAML" in e for e in validate_release_workflow("not: yaml: [broken"))
+
+    # Bad permissions
+    doc_bad_perm = dict(doc)
+    doc_bad_perm["permissions"] = {"contents": "write"}
+    assert any("release workflow permissions" in e for e in validate_release_workflow(doc_bad_perm))
+
+    # Extra triggers as dict
+    doc_trig_dict = dict(doc)
+    on_key = "on" if "on" in doc_trig_dict else True
+    doc_trig_dict[on_key] = {"workflow_dispatch": {}, "pull_request": {}}
+    assert any("release workflow triggers" in e for e in validate_release_workflow(doc_trig_dict))
+
+    # Extra triggers as list
+    doc_trig_list = dict(doc)
+    doc_trig_list[on_key] = ["workflow_dispatch", "push"]
+    assert any("release workflow triggers" in e for e in validate_release_workflow(doc_trig_list))
+
+    # Jobs not mapping
+    doc_bad_jobs = dict(doc)
+    doc_bad_jobs["jobs"] = "not a map"
+    assert any("Release workflow jobs must be a mapping" in e for e in validate_release_workflow(doc_bad_jobs))
+
+    # Missing verify and release
+    doc_no_jobs = dict(doc)
+    doc_no_jobs["jobs"] = {}
+    assert any("missing 'verify' or 'release' target job" in e for e in validate_release_workflow(doc_no_jobs))
+
+    # Extra jobs
+    doc_extra_job = dict(doc)
+    doc_extra_job["jobs"] = dict(doc["jobs"])
+    doc_extra_job["jobs"]["evil"] = {"runs-on": "ubuntu-latest"}
+    assert any(
+        "release workflow jobs must contain only 'verify' and 'release'" in e
+        for e in validate_release_workflow(doc_extra_job)
+    )
