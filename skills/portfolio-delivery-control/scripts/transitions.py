@@ -13,6 +13,7 @@ from admission import verify_mandatory_gates
 from providers import (
     ALLOWED_MERGE_IDENTITIES,
     fetch_ci_checks_from_provider,
+    fetch_pr_base_branch,
     is_hex_40,
     is_hex_64,
     iso_timestamp,
@@ -208,8 +209,12 @@ def _verify_ship_disk_receipt(
     fam = str(r.get("family", ""))
     sess = str(r.get("reviewer_session_id", ""))
     disp = str(r.get("dispatch_id", ""))
-    exp_sha = r.get("report_sha256")
-    exp_path = r.get("report_path")
+    exp_sha = str(r.get("report_sha256") or "").strip()
+    exp_path = str(r.get("report_path") or "").strip()
+    if not exp_sha or not is_hex_64(exp_sha):
+        return False
+    if not exp_path:
+        return False
     return _check_receipt_file_on_disk(
         control_dir,
         work_id,
@@ -218,8 +223,8 @@ def _verify_ship_disk_receipt(
         commit_sha,
         tree_sha,
         dispatch_id=disp,
-        expected_report_sha256=str(exp_sha) if exp_sha else None,
-        expected_report_path=str(exp_path) if exp_path else None,
+        expected_report_sha256=exp_sha,
+        expected_report_path=exp_path,
     )
 
 
@@ -320,8 +325,7 @@ def _guard_live_provider_ci(
     repo: str = "",
     base_branch: str = "main",
     control_dir: Path | str | None = None,
-    policy_path: Path | str | None = None,
-    required_checks: list[str] | None = None,
+    required_checks: list[Any] | None = None,
 ) -> tuple[bool, str]:
     if not pr_ref:
         return False, "CI_CHECK_FAILED"
@@ -333,7 +337,6 @@ def _guard_live_provider_ci(
             runner=command_runner,
             cwd=wt_path,
             control_dir=control_dir,
-            policy_path=policy_path,
         )
     if not req_checks:
         return False, "CI_CHECK_MISSING"
@@ -362,7 +365,7 @@ def _dispatch_action(
     command_runner: Callable[..., Any] | None,
     merge_identity: str = "selamy-labs-bot",
     remote: str = "origin",
-    required_checks: list[str] | None = None,
+    required_checks: list[Any] | None = None,
     repo: str = "",
 ) -> tuple[bool, dict[str, Any]]:
     if action == "push":
@@ -380,6 +383,7 @@ def _dispatch_action(
             runner=command_runner,
             required_checks=required_checks,
             repo=repo,
+            expected_base_branch=base_branch,
         )
     if action == "complete_spec_task":
         return reconcile_and_complete_spec_task(spec_path, task_id)
@@ -425,6 +429,18 @@ def _record_transition_outcome(
         p_row["next_action"] = f"Publish PR for {wi.get('work_id')}"
 
 
+def _validate_transition_action(
+    action: str,
+    merge_identity: str,
+    iso_now: str,
+) -> dict[str, Any] | None:
+    if action not in VALID_ACTIONS:
+        return {"status": "refused", "reason_code": "INVALID_ACTION", "observed_at": iso_now}
+    if action == "merge_pr" and merge_identity not in ALLOWED_MERGE_IDENTITIES:
+        return {"status": "refused", "reason_code": "DISALLOWED_MERGE_IDENTITY", "observed_at": iso_now}
+    return None
+
+
 def _validate_transition_args(
     action: str,
     target_branch: str,
@@ -432,12 +448,11 @@ def _validate_transition_args(
     merge_identity: str,
     iso_now: str,
 ) -> dict[str, Any] | None:
-    if action not in VALID_ACTIONS:
-        return {"status": "refused", "reason_code": "INVALID_ACTION", "observed_at": iso_now}
+    act_err = _validate_transition_action(action, merge_identity, iso_now)
+    if act_err:
+        return act_err
     if action == "push" and target_branch in {"main", "master", base_branch}:
         return {"status": "refused", "reason_code": "PROTECTED_BRANCH_PUSH", "observed_at": iso_now}
-    if action == "merge_pr" and merge_identity not in ALLOWED_MERGE_IDENTITIES:
-        return {"status": "refused", "reason_code": "DISALLOWED_MERGE_IDENTITY", "observed_at": iso_now}
     return None
 
 
@@ -449,18 +464,22 @@ def _guard_action_ci(
     pr_ref: str,
     iso_now: str,
     repo: str = "",
-    base_branch: str = "main",
+    expected_base_branch: str = "main",
     control_dir: Path | str | None = None,
-    policy_path: Path | str | None = None,
-) -> tuple[bool, dict[str, Any] | None]:
+) -> tuple[bool, dict[str, Any] | None, list[Any] | None]:
     if action in {"complete_spec_task", "merge_pr"}:
+        if not pr_ref:
+            return False, {"status": "refused", "reason_code": "CI_CHECK_FAILED", "observed_at": iso_now}, None
+        pr_base = fetch_pr_base_branch(repo, pr_ref, runner=command_runner, cwd=wt_path)
+        if pr_base and pr_base != expected_base_branch:
+            return False, {"status": "refused", "reason_code": "BASE_BRANCH_MISMATCH", "observed_at": iso_now}, None
+        target_base = pr_base or expected_base_branch
         req_checks = resolve_required_checks(
             repo,
-            base_branch=base_branch,
+            base_branch=target_base,
             runner=command_runner,
             cwd=wt_path,
             control_dir=control_dir,
-            policy_path=policy_path,
         )
         ci_ok, ci_code = _guard_live_provider_ci(
             pr_ref,
@@ -468,18 +487,20 @@ def _guard_action_ci(
             command_runner,
             wt_path,
             repo=repo,
-            base_branch=base_branch,
-            control_dir=control_dir,
-            policy_path=policy_path,
             required_checks=req_checks,
         )
         if not ci_ok:
-            return False, {
-                "status": "refused",
-                "reason_code": ci_code,
-                "observed_at": iso_now,
-            }
-    return True, None
+            return (
+                False,
+                {
+                    "status": "refused",
+                    "reason_code": ci_code,
+                    "observed_at": iso_now,
+                },
+                None,
+            )
+        return True, None, req_checks
+    return True, None, None
 
 
 def _write_transition_receipt(
@@ -620,27 +641,30 @@ def execute_transition(
     claim_token: str | None = None,
     remote: str = "origin",
     branch: str | None = None,
-    base_branch: str = "main",
     pr_number: int | str | None = None,
     pr_title: str | None = None,
     pr_body: str | None = None,
     merge_identity: str = "selamy-labs-bot",
     command_runner: Callable[..., Any] | None = None,
     now: str | None = None,
-    policy_path: Path | str | None = None,
 ) -> dict[str, Any]:
     iso_now = now or iso_timestamp()
-    now_dt = datetime.datetime.fromisoformat(iso_now)
-    target_branch = branch or f"feat/{work_id}"
-    arg_err = _validate_transition_args(action, target_branch, base_branch, merge_identity, iso_now)
-    if arg_err:
-        return arg_err
+    act_err = _validate_transition_action(action, merge_identity, iso_now)
+    if act_err:
+        return act_err
 
+    now_dt = datetime.datetime.fromisoformat(iso_now)
     ok, ref, doc, wi, status_file = _load_and_guard_transition_item(
         control_dir, work_id, action, claim_token, now_dt, iso_now
     )
     if ref:
         return ref
+
+    expected_base_branch = str(wi.get("base_branch") or "main")
+    target_branch = branch or f"feat/{work_id}"
+    arg_err = _validate_transition_args(action, target_branch, expected_base_branch, merge_identity, iso_now)
+    if arg_err:
+        return arg_err
 
     cand = wi.get("candidate", {})
     commit_sha = str(wi.get("commit_sha") or cand.get("commit_sha") or "")
@@ -649,7 +673,7 @@ def execute_transition(
     pr_ref = str(pr_val if pr_val is not None else (target_branch or "")).strip()
     repo = str(wi.get("repo") or "").strip()
 
-    _, ci_ref = _guard_action_ci(
+    _, ci_ref, req_checks = _guard_action_ci(
         action,
         commit_sha,
         command_runner,
@@ -657,25 +681,11 @@ def execute_transition(
         pr_ref,
         iso_now,
         repo=repo,
-        base_branch=base_branch,
+        expected_base_branch=expected_base_branch,
         control_dir=control_dir,
-        policy_path=policy_path,
     )
     if ci_ref:
         return ci_ref
-
-    req_checks = (
-        resolve_required_checks(
-            repo,
-            base_branch=base_branch,
-            runner=command_runner,
-            cwd=wt_path,
-            control_dir=control_dir,
-            policy_path=policy_path,
-        )
-        if action == "merge_pr"
-        else None
-    )
 
     title, body = _format_pr_text(wi, work_id, pr_title, pr_body)
     return _dispatch_and_record_transition(
@@ -686,7 +696,7 @@ def execute_transition(
         action,
         commit_sha,
         pr_ref,
-        (target_branch, base_branch, title, body),
+        (target_branch, expected_base_branch, title, body),
         command_runner,
         merge_identity,
         remote,

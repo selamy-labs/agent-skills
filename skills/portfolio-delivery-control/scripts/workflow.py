@@ -43,6 +43,7 @@ from providers import (
     ALLOWED_MERGE_IDENTITIES,
     APPROVED_BOT_IDENTITIES,
     fetch_ci_checks_from_provider,
+    fetch_pr_base_branch,
     fetch_required_checks_from_provider,
     is_approved_identity,
     is_hex_40,
@@ -127,6 +128,7 @@ __all__ = [
     "claim_work",
     "execute_transition",
     "fetch_ci_checks_from_provider",
+    "fetch_pr_base_branch",
     "fetch_required_checks_from_provider",
     "inspect_modified_paths",
     "is_approved_identity",
@@ -406,14 +408,12 @@ def execute_transition(
     claim_token: str | None = None,
     remote: str = "origin",
     branch: str | None = None,
-    base_branch: str = "main",
     pr_number: int | str | None = None,
     pr_title: str | None = None,
     pr_body: str | None = None,
     merge_identity: str = "selamy-labs-bot",
     command_runner: Any = None,
     now: str | None = None,
-    policy_path: Path | str | None = None,
 ) -> dict[str, Any]:
     with workflow_lock(control_dir):
         return _execute_transition_impl(
@@ -423,14 +423,12 @@ def execute_transition(
             claim_token=claim_token,
             remote=remote,
             branch=branch,
-            base_branch=base_branch,
             pr_number=pr_number,
             pr_title=pr_title,
             pr_body=pr_body,
             merge_identity=merge_identity,
             command_runner=command_runner,
             now=now,
-            policy_path=policy_path,
         )
 
 
@@ -504,12 +502,10 @@ def _add_trans_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--claim-token")
     p.add_argument("--remote", default="origin")
     p.add_argument("--branch")
-    p.add_argument("--base-branch", default="main")
     p.add_argument("--pr-number")
     p.add_argument("--pr-title")
     p.add_argument("--pr-body")
     p.add_argument("--merge-identity", default="selamy-labs-bot")
-    p.add_argument("--policy", dest="policy_path", help="Path to delivery-policy.json")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -592,12 +588,10 @@ def _dispatch_cli(args: argparse.Namespace) -> dict[str, Any]:
             claim_token=args.claim_token,
             remote=args.remote,
             branch=args.branch,
-            base_branch=args.base_branch,
             pr_number=args.pr_number,
             pr_title=args.pr_title,
             pr_body=args.pr_body,
             merge_identity=args.merge_identity,
-            policy_path=getattr(args, "policy_path", None),
         )
     return {"status": "error", "error": f"Unknown command {cmd}"}
 

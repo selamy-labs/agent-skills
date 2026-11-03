@@ -45,6 +45,7 @@ TRANSITION_REFUSAL_CODES = {
     "APPROVAL_FILE_NOT_FOUND",
     "APPROVAL_READ_FAILED",
     "APPROVAL_WITHDRAWN",
+    "BASE_BRANCH_MISMATCH",
     "CI_CHECK_FAILED",
     "CI_CHECK_MISSING",
     "CLAIM_EXPIRED",
@@ -66,6 +67,7 @@ TRANSITION_REFUSAL_CODES = {
     "MERGE_NOT_COMPLETED",
     "MISSING_EXACT_HEAD_CI",
     "PROVIDER_AUTH_FAILED",
+    "PROVIDER_EXECUTION_FAILED",
     "PR_HEAD_MISMATCH",
     "PR_NOT_OPEN",
     "PR_VIEW_FAILED",
@@ -471,6 +473,48 @@ def _mod_candidate_revision_mismatch(ctx: dict[str, Any]) -> None:
     )
 
 
+def _mod_base_branch_mismatch(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "merge_pr"
+    c_sha = ctx["c_sha"]
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "api user" in cmd_str:
+            return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+        if "auth status" in cmd_str:
+            return 0, "Logged in to github.com as selamy-labs-bot"
+        if "required_status_checks" in cmd_str:
+            return 0, json.dumps({"contexts": ["test"]})
+        if "pr view" in cmd_str:
+            return 0, json.dumps(
+                {
+                    "headRefOid": c_sha,
+                    "state": "OPEN",
+                    "baseRefName": "mismatched-base-branch",
+                    "statusCheckRollup": [
+                        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                    ],
+                }
+            )
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
+def _mod_provider_execution_failed(ctx: dict[str, Any]) -> None:
+    ctx["action"] = "push"
+
+    def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+        cmd_str = " ".join(cmd)
+        if "ls-remote" in cmd_str:
+            return 0, ""
+        if "push" in cmd_str:
+            return 1, "fatal: remote error: push rejected"
+        return 0, ""
+
+    ctx["cmd_runner"] = runner
+
+
 TRANS_MODIFIERS = {
     "INVALID_ACTION": _mod_invalid_action,
     "PROTECTED_BRANCH_PUSH": _mod_protected_branch,
@@ -491,12 +535,14 @@ TRANS_MODIFIERS = {
     "MISSING_TRANSITION_EVIDENCE": _mod_missing_transition_evidence,
     "CI_CHECK_FAILED": _mod_ci_check_failed,
     "CI_CHECK_MISSING": _mod_ci_check_missing,
+    "BASE_BRANCH_MISMATCH": _mod_base_branch_mismatch,
     "CANDIDATE_REVISION_MISMATCH": _mod_candidate_revision_mismatch,
     "CREATED_PR_VIEW_FAILED": _mod_created_pr_view_failed,
     "MERGE_FAILED": _mod_merge_failed,
     "MERGE_NOT_COMPLETED": _mod_merge_not_completed,
     "MISSING_EXACT_HEAD_CI": _mod_missing_exact_head_ci,
     "PROVIDER_AUTH_FAILED": _mod_provider_auth_failed,
+    "PROVIDER_EXECUTION_FAILED": _mod_provider_execution_failed,
     "PR_HEAD_MISMATCH": _mod_pr_head_mismatch,
     "PR_NOT_OPEN": _mod_pr_not_open,
     "PR_VIEW_FAILED": _mod_pr_view_failed,
@@ -1154,35 +1200,59 @@ class _CodeVisitor(ast.NodeVisitor):
                     self.var_map[target.id] = val
         self.generic_visit(node)
 
-    def _resolve_str(self, node: ast.AST | None) -> str | None:
+    def _resolve_codes(self, node: ast.AST | None) -> list[str]:
+        if node is None:
+            return []
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
+            return [node.value]
         if isinstance(node, ast.Name) and node.id in self.var_map:
-            return self.var_map[node.id]
-        return None
+            return [self.var_map[node.id]]
+        if isinstance(node, ast.IfExp):
+            return self._resolve_codes(node.body) + self._resolve_codes(node.orelse)
+        return []
+
+    def _add_if_valid(self, node: ast.AST | None) -> None:
+        for val in self._resolve_codes(node):
+            if val and val.isupper() and "_" in val:
+                self.codes.add(val)
 
     def visit_Dict(self, node: ast.Dict) -> None:
         for k, v in zip(node.keys, node.values):
             if isinstance(k, ast.Constant) and k.value == "reason_code":
-                val = self._resolve_str(v)
-                if val and val.isupper() and "_" in val:
-                    self.codes.add(val)
+                self._add_if_valid(v)
         self.generic_visit(node)
 
     def visit_Return(self, node: ast.Return) -> None:
         if node.value and isinstance(node.value, ast.Tuple) and len(node.value.elts) >= 2:
             first = node.value.elts[0]
             if isinstance(first, ast.Constant) and first.value is False:
-                val = self._resolve_str(node.value.elts[1])
-                if val and val.isupper() and "_" in val:
-                    self.codes.add(val)
+                self._add_if_valid(node.value.elts[1])
+        elif isinstance(node.value, ast.IfExp):
+            self._add_if_valid(node.value.body)
+            self._add_if_valid(node.value.orelse)
         self.generic_visit(node)
 
+    def _visit_make_refusal_call(self, node: ast.Call) -> None:
+        if len(node.args) >= 3:
+            self._add_if_valid(node.args[2])
+
+    def _visit_dict_call(self, node: ast.Call) -> None:
+        for kw in node.keywords:
+            if kw.arg == "reason_code":
+                self._add_if_valid(kw.value)
+
+    def _visit_get_call(self, node: ast.Call) -> None:
+        if len(node.args) >= 2 and isinstance(node.args[0], ast.Constant) and node.args[0].value == "reason_code":
+            self._add_if_valid(node.args[1])
+
     def visit_Call(self, node: ast.Call) -> None:
-        if isinstance(node.func, ast.Name) and node.func.id == "make_refusal" and len(node.args) >= 3:
-            val = self._resolve_str(node.args[2])
-            if val and val.isupper() and "_" in val:
-                self.codes.add(val)
+        if isinstance(node.func, ast.Name):
+            if node.func.id == "make_refusal":
+                self._visit_make_refusal_call(node)
+            elif node.func.id == "dict":
+                self._visit_dict_call(node)
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+            self._visit_get_call(node)
         self.generic_visit(node)
 
 
@@ -1343,6 +1413,65 @@ class TestGuardInventory(unittest.TestCase):
             ("argon", "gemini-4.0-argon-high", "disp-02", "sess-r2"),
             ("sol", "gpt-6.1-sol-high", "disp-03", "sess-r3"),
         ]
+        rec_dir = self.state_dir / "receipts"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        rep_dir = self.state_dir / "reports"
+        rep_dir.mkdir(parents=True, exist_ok=True)
+
+        reviews_list: list[dict[str, Any]] = []
+        for fam, model, disp_id, sess in reviews_data:
+            rep_path = rep_dir / f"report_{work_id}_{fam}_{sess}.json"
+            rep_content = json.dumps(
+                {
+                    "schema": "review-receipt/v1",
+                    "dispatch_id": disp_id,
+                    "reviewer_session_id": sess,
+                    "family": fam,
+                    "model": model,
+                    "commit_sha": self.c_sha,
+                    "tree_sha": self.t_sha,
+                    "verdict": "SHIP",
+                    "findings": [],
+                }
+            )
+            rep_path.write_text(rep_content, encoding="utf-8")
+            rep_sha = hashlib.sha256(rep_content.encode("utf-8")).hexdigest()
+            rec_path = rec_dir / f"review_{work_id}_{fam}_{sess}.json"
+            rec_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "review-receipt/v1",
+                        "work_id": work_id,
+                        "dispatch_id": disp_id,
+                        "reviewer_session_id": sess,
+                        "family": fam,
+                        "model": model,
+                        "commit_sha": self.c_sha,
+                        "tree_sha": self.t_sha,
+                        "verdict": "SHIP",
+                        "findings": [],
+                        "report_path": str(rep_path),
+                        "report_sha256": rep_sha,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            reviews_list.append(
+                {
+                    "dispatch_id": disp_id,
+                    "reviewer_session_id": sess,
+                    "session_id": sess,
+                    "family": fam,
+                    "reviewer_family": fam,
+                    "model": model,
+                    "verdict": "SHIP",
+                    "commit_sha": self.c_sha,
+                    "tree_sha": self.t_sha,
+                    "report_path": str(rep_path),
+                    "report_sha256": rep_sha,
+                }
+            )
+
         doc: dict[str, Any] = {
             "delivery_control": {
                 "projects": {
@@ -1396,20 +1525,7 @@ class TestGuardInventory(unittest.TestCase):
                         "tree_sha": self.t_sha,
                         "qualified": True,
                         "stage": "review",
-                        "reviews": [
-                            {
-                                "dispatch_id": disp_id,
-                                "reviewer_session_id": sess,
-                                "session_id": sess,
-                                "family": fam,
-                                "reviewer_family": fam,
-                                "model": model,
-                                "verdict": "SHIP",
-                                "commit_sha": self.c_sha,
-                                "tree_sha": self.t_sha,
-                            }
-                            for fam, model, disp_id, sess in reviews_data
-                        ],
+                        "reviews": reviews_list,
                         "transitions": [
                             {
                                 "action": "merge_pr",
@@ -1424,48 +1540,6 @@ class TestGuardInventory(unittest.TestCase):
         }
         status_file = self.state_dir / "coordinator-status.json"
         status_file.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-
-        rec_dir = self.state_dir / "receipts"
-        rec_dir.mkdir(parents=True, exist_ok=True)
-        rep_dir = self.state_dir / "reports"
-        rep_dir.mkdir(parents=True, exist_ok=True)
-        for fam, model, disp_id, sess in reviews_data:
-            rep_path = rep_dir / f"report_{work_id}_{fam}_{sess}.json"
-            rep_content = json.dumps(
-                {
-                    "schema": "review-receipt/v1",
-                    "dispatch_id": disp_id,
-                    "reviewer_session_id": sess,
-                    "family": fam,
-                    "model": model,
-                    "commit_sha": self.c_sha,
-                    "tree_sha": self.t_sha,
-                    "verdict": "SHIP",
-                    "findings": [],
-                }
-            )
-            rep_path.write_text(rep_content, encoding="utf-8")
-            rep_sha = hashlib.sha256(rep_content.encode("utf-8")).hexdigest()
-            rec_path = rec_dir / f"review_{work_id}_{fam}_{sess}.json"
-            rec_path.write_text(
-                json.dumps(
-                    {
-                        "schema": "review-receipt/v1",
-                        "work_id": work_id,
-                        "dispatch_id": disp_id,
-                        "reviewer_session_id": sess,
-                        "family": fam,
-                        "model": model,
-                        "commit_sha": self.c_sha,
-                        "tree_sha": self.t_sha,
-                        "verdict": "SHIP",
-                        "findings": [],
-                        "report_path": str(rep_path),
-                        "report_sha256": rep_sha,
-                    }
-                ),
-                encoding="utf-8",
-            )
         return work_id
 
     def _assert_transition_no_side_effects(self, code: str, doc_before: dict[str, Any], status_file: Path) -> None:
@@ -1643,9 +1717,28 @@ def sample_dict():
 def sample_call():
     c_var = "MUTANT_CALL_CODE"
     make_refusal(doc, wi, c_var)
+
+def sample_ifexp():
+    return False, "MUTANT_IFEXP_A" if True else "MUTANT_IFEXP_B"
+
+def sample_kwarg_dict():
+    return dict(status="refused", reason_code="MUTANT_KWARG_DICT")
+
+def sample_dict_get():
+    res = {}
+    return res.get("reason_code", "MUTANT_GET_CODE")
 """
         extracted = extract_refusal_codes_from_ast(mutant_src)
-        expected_mutants = {"MUTANT_PAREN_CODE", "MUTANT_VAR_CODE", "MUTANT_DICT_CODE", "MUTANT_CALL_CODE"}
+        expected_mutants = {
+            "MUTANT_PAREN_CODE",
+            "MUTANT_VAR_CODE",
+            "MUTANT_DICT_CODE",
+            "MUTANT_CALL_CODE",
+            "MUTANT_IFEXP_A",
+            "MUTANT_IFEXP_B",
+            "MUTANT_KWARG_DICT",
+            "MUTANT_GET_CODE",
+        }
         self.assertEqual(extracted, expected_mutants)
         self.assertTrue(bool(expected_mutants - TRANSITION_REFUSAL_CODES))
 

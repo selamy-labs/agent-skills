@@ -60,9 +60,16 @@ def _build_test_ledger(work_id: str, reviews_data: list[tuple[str, str, str, str
     }
 
 
-def _build_test_reviews(reviews_data: list[tuple[str, str, str, str]], c_sha: str, t_sha: str) -> list[dict[str, Any]]:
-    return [
-        {
+def _build_test_reviews(
+    reviews_data: list[tuple[str, str, str, str]],
+    c_sha: str,
+    t_sha: str,
+    state_dir: Path | None = None,
+    work_id: str = "",
+) -> list[dict[str, Any]]:
+    res = []
+    for fam, model, disp_id, sess in reviews_data:
+        r: dict[str, Any] = {
             "dispatch_id": disp_id,
             "reviewer_session_id": sess,
             "family": fam,
@@ -71,8 +78,13 @@ def _build_test_reviews(reviews_data: list[tuple[str, str, str, str]], c_sha: st
             "commit_sha": c_sha,
             "tree_sha": t_sha,
         }
-        for fam, model, disp_id, sess in reviews_data
-    ]
+        if state_dir and work_id:
+            rep_path = state_dir / "reports" / f"report_{work_id}_{fam}_{sess}.json"
+            if rep_path.exists():
+                r["report_path"] = str(rep_path)
+                r["report_sha256"] = hashlib.sha256(rep_path.read_bytes()).hexdigest()
+        res.append(r)
+    return res
 
 
 def _pr_view_resp(cmd_str: str, c_sha: str) -> tuple[int, str]:
@@ -252,6 +264,9 @@ class TestTransitions(unittest.TestCase):
             ("argon", "gemini-4.0-argon-high", "disp-02", "sess-r2"),
             ("sol", "gpt-6.1-sol-high", "disp-03", "sess-r3"),
         ]
+        if qualified:
+            self._write_test_review_receipts(work_id, reviews_data)
+
         doc: dict[str, Any] = {
             "delivery_control": {
                 "projects": {
@@ -284,7 +299,17 @@ class TestTransitions(unittest.TestCase):
                         "tree_sha": self.t_sha,
                         "qualified": qualified,
                         "stage": "review",
-                        "reviews": _build_test_reviews(reviews_data, self.c_sha, self.t_sha) if qualified else [],
+                        "reviews": (
+                            _build_test_reviews(
+                                reviews_data,
+                                self.c_sha,
+                                self.t_sha,
+                                state_dir=self.state_dir,
+                                work_id=work_id,
+                            )
+                            if qualified
+                            else []
+                        ),
                         "transitions": (
                             [
                                 {
@@ -316,9 +341,6 @@ class TestTransitions(unittest.TestCase):
             }
         status_file = self.state_dir / "coordinator-status.json"
         status_file.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-
-        if qualified:
-            self._write_test_review_receipts(work_id, reviews_data)
 
     def test_mp464_regression_red_ci_plus_unbound_reviews_refused_no_effect(self) -> None:
         """Regression test reproducing MP464 (ARGON-01 & ARGON-03):
@@ -488,7 +510,6 @@ class TestTransitions(unittest.TestCase):
             action="push",
             claim_token=self.claim_token,
             branch="main",
-            base_branch="main",
         )
         self.assertEqual(res_push.get("status"), "refused")
         self.assertEqual(res_push.get("reason_code"), "PROTECTED_BRANCH_PUSH")
@@ -1032,13 +1053,16 @@ class TestTransitions(unittest.TestCase):
 
     def test_protected_branch_push_to_base_branch(self) -> None:
         self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+        status_file = self.state_dir / "coordinator-status.json"
+        doc = json.loads(status_file.read_text(encoding="utf-8"))
+        doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]["base_branch"] = "devel"
+        status_file.write_text(json.dumps(doc), encoding="utf-8")
         res = execute_transition(
             str(self.state_dir),
             "selamy-labs-agent-skills-152-MP464",
             "push",
             claim_token=self.claim_token,
             branch="devel",
-            base_branch="devel",
         )
         self.assertEqual(res.get("status"), "refused")
         self.assertEqual(res.get("reason_code"), "PROTECTED_BRANCH_PUSH")
@@ -1156,9 +1180,9 @@ class TestTransitions(unittest.TestCase):
         self.assertFalse(ok_l1)
         self.assertEqual(err_l1, "CI_CHECK_MISSING")
 
-        # _guard_action_ci for push action returns (True, None) (no CI guard for push)
+        # _guard_action_ci for push action returns (True, None, None) (no CI guard for push)
         res_g_push = _guard_action_ci("push", self.c_sha, None, Path(self.temp_dir), "", "2026-11-03T10:00:00Z")
-        self.assertEqual(res_g_push, (True, None))
+        self.assertEqual(res_g_push, (True, None, None))
 
         # execute_transition with invalid action
         res_bad_act = execute_transition(
@@ -1444,7 +1468,6 @@ exit 0
             claim_token=self.claim_token,
             pr_number=152,
             command_runner=runner_with_policy_gate,
-            policy_path=policy_file,
         )
         self.assertEqual(res_ok.get("status"), "transitioned")
 
@@ -1475,7 +1498,6 @@ exit 0
             claim_token=self.claim_token,
             pr_number=152,
             command_runner=runner_missing_policy_gate,
-            policy_path=policy_file,
         )
         self.assertEqual(res_fail.get("status"), "refused")
         self.assertEqual(res_fail.get("reason_code"), "CI_CHECK_MISSING")
@@ -1603,6 +1625,219 @@ exit 0
         self.assertEqual(res.get("status"), "transitioned")
         pr_view_cmds = [c for c in capture_runner.captured_cmds if "pr" in c and "view" in c]
         self.assertTrue(any("--repo" in c and "selamy-labs/agent-skills" in c for c in pr_view_cmds))
+
+    def test_execute_transition_refuses_when_pr_base_branch_differs_from_work_item(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+        status_file = self.state_dir / "coordinator-status.json"
+        doc_before = json.loads(status_file.read_text(encoding="utf-8"))
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return _weak_base_branch_runner(cmd, self.c_sha)
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="merge_pr",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "BASE_BRANCH_MISMATCH")
+
+        doc_after = json.loads(status_file.read_text(encoding="utf-8"))
+        self.assertEqual(doc_before, doc_after)
+
+    def test_execute_transition_weaker_policy_cannot_drop_provider_required_check(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+        policy_file = self.state_dir / "delivery-policy.json"
+        policy_file.write_text(
+            json.dumps({"required_checks": {"agent-skills": ["Quality"]}}),
+            encoding="utf-8",
+        )
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return _weaker_policy_runner(cmd, self.c_sha)
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="merge_pr",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
+
+    def test_execute_transition_refuses_when_check_app_id_does_not_match(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return _app_id_mismatch_runner(cmd, self.c_sha)
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
+
+    def test_execute_transition_skipped_unrelated_check_passes(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return _skipped_unrelated_runner(cmd, self.c_sha)
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "transitioned")
+
+    def test_execute_transition_duplicate_check_one_failing_refuses(self) -> None:
+        self._setup_coordinator_state(task_id="MP464", qualified=True, with_merge_transition=True)
+
+        def runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return _duplicate_check_failing_runner(cmd, self.c_sha)
+
+        res = execute_transition(
+            control_dir=str(self.state_dir),
+            work_id="selamy-labs-agent-skills-152-MP464",
+            action="complete_spec_task",
+            claim_token=self.claim_token,
+            pr_number=152,
+            command_runner=runner,
+        )
+        self.assertEqual(res.get("status"), "refused")
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_FAILED")
+
+
+def _weak_base_branch_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "api user" in cmd_str:
+        return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+    if "auth status" in cmd_str:
+        return 0, "Logged in to github.com as selamy-labs-bot"
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"contexts": ["test"]})
+    if "pr view" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "state": "OPEN",
+                "baseRefName": "weak",
+                "statusCheckRollup": [
+                    {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                ],
+            }
+        )
+    return 0, ""
+
+
+def _weaker_policy_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "api user" in cmd_str:
+        return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+    if "auth status" in cmd_str:
+        return 0, "Logged in to github.com as selamy-labs-bot"
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"contexts": ["Quality", "Release"]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
+    if "pr view" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "state": "OPEN",
+                "baseRefName": "main",
+                "statusCheckRollup": [
+                    {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha}
+                ],
+            }
+        )
+    return 0, ""
+
+
+def _app_id_mismatch_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"checks": [{"context": "Quality", "app_id": 12345}]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
+    if "pr view" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "state": "OPEN",
+                "baseRefName": "main",
+                "statusCheckRollup": [
+                    {
+                        "name": "Quality",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "head_sha": c_sha,
+                        "app": None,
+                    }
+                ],
+            }
+        )
+    return 0, ""
+
+
+def _skipped_unrelated_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"contexts": ["Quality"]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
+    if "pr view" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "state": "OPEN",
+                "baseRefName": "main",
+                "statusCheckRollup": [
+                    {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha},
+                    {
+                        "name": "dependabot-auto-merge",
+                        "status": "COMPLETED",
+                        "conclusion": "SKIPPED",
+                        "head_sha": c_sha,
+                    },
+                ],
+            }
+        )
+    return 0, ""
+
+
+def _duplicate_check_failing_runner(cmd: list[str], c_sha: str) -> tuple[int, str]:
+    cmd_str = " ".join(cmd)
+    if "required_status_checks" in cmd_str:
+        return 0, json.dumps({"contexts": ["Quality"]})
+    if "rules/branches" in cmd_str:
+        return 0, json.dumps([])
+    if "pr view" in cmd_str:
+        return 0, json.dumps(
+            {
+                "headRefOid": c_sha,
+                "state": "OPEN",
+                "baseRefName": "main",
+                "statusCheckRollup": [
+                    {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": c_sha},
+                    {"name": "Quality", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": c_sha},
+                ],
+            }
+        )
+    return 0, ""
 
 
 if __name__ == "__main__":

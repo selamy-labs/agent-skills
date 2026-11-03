@@ -18,11 +18,18 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from providers import (  # noqa: E402
+    _check_app_matches,
+    _extract_repo_required_checks,
+    _is_named_check_passing,
     _post_merge_verify,
+    _read_policy_dict,
     _run_cmd,
     _verify_created_pr,
+    _verify_merge_pr_view,
     check_existing_pr,
     fetch_ci_checks_from_provider,
+    fetch_pr_base_branch,
+    fetch_required_checks_from_provider,
     get_commit_modified_paths,
     get_remote_branch_sha,
     inspect_git_commit,
@@ -31,10 +38,13 @@ from providers import (  # noqa: E402
     is_hex_40,
     is_hex_64,
     iso_timestamp,
+    load_policy_required_checks,
+    parse_required_checks,
     reconcile_and_complete_spec_task,
     reconcile_and_merge_pr,
     reconcile_and_publish_pr,
     reconcile_and_push,
+    resolve_required_checks,
     sha256_file,
     stamp_rollup_head_sha,
     verify_live_status_rollup,
@@ -207,6 +217,8 @@ class TestProviders(unittest.TestCase):
             cmd_str = " ".join(cmd)
             if "api user" in cmd_str:
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["test"]})
             if "pr view" in cmd_str:
                 return 0, json.dumps(merged_pr_view)
             return 0, ""
@@ -391,29 +403,34 @@ class TestProviders(unittest.TestCase):
     def test_reconcile_and_merge_pr_execution_and_post_verify(self) -> None:
         merged_state = [False]
 
+        def _flow_pr_view() -> str:
+            if merged_state[0]:
+                return json.dumps(
+                    {
+                        "state": "MERGED",
+                        "mergedAt": "2026-11-03T10:00:00Z",
+                        "mergeCommit": {"oid": "c" * 40},
+                        "headRefOid": self.c_sha,
+                    }
+                )
+            return json.dumps(
+                {
+                    "state": "OPEN",
+                    "headRefOid": self.c_sha,
+                    "statusCheckRollup": [
+                        {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
+                    ],
+                }
+            )
+
         def merge_flow_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
             cmd_str = " ".join(cmd)
             if "api user" in cmd_str:
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["test"]})
             if "pr view" in cmd_str:
-                if merged_state[0]:
-                    return 0, json.dumps(
-                        {
-                            "state": "MERGED",
-                            "mergedAt": "2026-11-03T10:00:00Z",
-                            "mergeCommit": {"oid": "c" * 40},
-                            "headRefOid": self.c_sha,
-                        }
-                    )
-                return 0, json.dumps(
-                    {
-                        "state": "OPEN",
-                        "headRefOid": self.c_sha,
-                        "statusCheckRollup": [
-                            {"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha}
-                        ],
-                    }
-                )
+                return 0, _flow_pr_view()
             if "pr merge" in cmd_str:
                 merged_state[0] = True
                 return 0, "Merged PR #152"
@@ -771,9 +788,12 @@ class TestProviders(unittest.TestCase):
 
     def test_reconcile_and_merge_pr_reconciles_already_merged(self) -> None:
         def already_merged_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
-            if "api user" in " ".join(cmd):
+            cmd_str = " ".join(cmd)
+            if "api user" in cmd_str:
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
-            if "pr view" in " ".join(cmd):
+            if "required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["test"]})
+            if "pr view" in cmd_str:
                 return 0, json.dumps(
                     {
                         "state": "MERGED",
@@ -797,6 +817,8 @@ class TestProviders(unittest.TestCase):
             cmd_str = " ".join(cmd)
             if "api user" in cmd_str:
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["test"]})
             if "pr view" in cmd_str:
                 return 0, json.dumps(
                     {
@@ -820,6 +842,8 @@ class TestProviders(unittest.TestCase):
             cmd_str = " ".join(cmd)
             if "api user" in cmd_str:
                 return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["test"]})
             if "pr merge" in cmd_str:
                 return 0, "Merge queued"
             if "pr view" in cmd_str:
@@ -837,6 +861,310 @@ class TestProviders(unittest.TestCase):
         ok6, res6 = reconcile_and_merge_pr(self.worktree, "152", self.c_sha, runner=post_merge_fail_runner)
         self.assertFalse(ok6)
         self.assertEqual(res6.get("reason_code"), "MERGE_NOT_COMPLETED")
+
+    def test_parse_required_checks_rulesets(self) -> None:
+        ruleset_payload = [
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [
+                        {"context": "ci/test", "integration_id": 12345},
+                        {"context": "lint", "app_id": 67890},
+                    ]
+                },
+            },
+            {"type": "pull_request", "parameters": {}},
+            "not-a-dict-rule",
+            {"type": "required_status_checks", "parameters": "not-a-dict"},
+            {"type": "required_status_checks", "parameters": {"required_status_checks": "not-a-list"}},
+        ]
+        parsed = parse_required_checks(ruleset_payload)
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0], {"context": "ci/test", "app_id": 12345})
+        self.assertEqual(parsed[1], {"context": "lint", "app_id": 67890})
+
+        # Non-dict and non-list returns empty
+        self.assertEqual(parse_required_checks("string"), [])
+        self.assertEqual(parse_required_checks(12345), [])
+
+    def test_parse_required_checks_branch_protection(self) -> None:
+        bp_payload = {
+            "contexts": ["build", "Quality"],
+            "checks": [
+                {"context": "Quality", "app_id": 12345},
+                {"context": "Release", "integration_id": 67890},
+                "not-a-dict",
+            ],
+        }
+        parsed = parse_required_checks(bp_payload)
+        self.assertEqual(len(parsed), 3)
+        quality_entry = next(c for c in parsed if c["context"] == "Quality")
+        self.assertEqual(quality_entry["app_id"], 12345)
+        build_entry = next(c for c in parsed if c["context"] == "build")
+        self.assertIsNone(build_entry["app_id"])
+        release_entry = next(c for c in parsed if c["context"] == "Release")
+        self.assertEqual(release_entry["app_id"], 67890)
+
+        # Malformed branch protection
+        self.assertEqual(parse_required_checks({"contexts": "not-a-list", "checks": "not-a-list"}), [])
+
+    def test_query_branch_protection_checks_variations(self) -> None:
+        def error_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "404 Not Found"
+
+        res1 = fetch_required_checks_from_provider(self.worktree, "main", runner=error_runner)
+        self.assertIsNone(res1)
+
+        def bad_json_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "not-valid-json"
+
+        res2 = fetch_required_checks_from_provider(self.worktree, "main", runner=bad_json_runner)
+        self.assertIsNone(res2)
+
+    def test_fetch_required_checks_from_provider_unions_protection_and_rulesets(self) -> None:
+        def union_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["Quality"]})
+            if "rules/branches" in cmd_str:
+                return 0, json.dumps(
+                    [
+                        {
+                            "type": "required_status_checks",
+                            "parameters": {"required_status_checks": [{"context": "Release", "integration_id": 99}]},
+                        }
+                    ]
+                )
+            return 0, ""
+
+        checks = fetch_required_checks_from_provider("selamy-labs/agent-skills", "main", runner=union_runner)
+        self.assertIsNotNone(checks)
+        contexts = [c["context"] for c in checks]  # type: ignore[index]
+        self.assertIn("Quality", contexts)
+        self.assertIn("Release", contexts)
+
+    def test_policy_required_checks_extract_and_read(self) -> None:
+        # _extract_repo_required_checks list
+        self.assertEqual(_extract_repo_required_checks(["check1", " "], "org/repo"), ["check1"])
+        # _extract_repo_required_checks dict formats
+        d = {
+            "selamy-labs/agent-skills": ["check-exact"],
+            "my-repo": ["check-base"],
+            "repo_dash": ["check-dash"],
+        }
+        self.assertEqual(_extract_repo_required_checks(d, "selamy-labs/agent-skills"), ["check-exact"])
+        self.assertEqual(_extract_repo_required_checks(d, "org/my-repo"), ["check-base"])
+        self.assertEqual(_extract_repo_required_checks(d, "org/repo-dash"), ["check-dash"])
+        self.assertIsNone(_extract_repo_required_checks(d, "unknown/repo"))
+        self.assertIsNone(_extract_repo_required_checks(12345, "org/repo"))
+
+        # _read_policy_dict
+        nonexistent = self.worktree / "does-not-exist.json"
+        self.assertIsNone(_read_policy_dict(nonexistent))
+
+        bad_json_file = self.worktree / "bad.json"
+        bad_json_file.write_text("invalid json", encoding="utf-8")
+        self.assertIsNone(_read_policy_dict(bad_json_file))
+
+        list_json_file = self.worktree / "list.json"
+        list_json_file.write_text("[1, 2, 3]", encoding="utf-8")
+        self.assertIsNone(_read_policy_dict(list_json_file))
+
+        valid_file = self.worktree / "valid.json"
+        valid_file.write_text(json.dumps({"required_checks": ["gate1"]}), encoding="utf-8")
+        self.assertEqual(_read_policy_dict(valid_file), {"required_checks": ["gate1"]})
+
+        # load_policy_required_checks
+        self.assertIsNone(load_policy_required_checks("selamy-labs/agent-skills", control_dir=None))
+        ctrl = self.worktree / "ctrl"
+        ctrl.mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(load_policy_required_checks("selamy-labs/agent-skills", control_dir=ctrl))
+        (ctrl / "delivery-policy.json").write_text(
+            json.dumps({"required_checks": {"agent-skills": ["custom-gate"]}}), encoding="utf-8"
+        )
+        loaded = load_policy_required_checks("selamy-labs/agent-skills", control_dir=ctrl)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded[0]["context"], "custom-gate")  # type: ignore[index]
+
+    def test_resolve_required_checks_union_behavior(self) -> None:
+        def provider_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "protection/required_status_checks" in cmd_str:
+                return 0, json.dumps({"contexts": ["Quality", "Release"]})
+            return 0, json.dumps([])
+
+        ctrl = self.worktree / "ctrl_res"
+        ctrl.mkdir(parents=True, exist_ok=True)
+        (ctrl / "delivery-policy.json").write_text(
+            json.dumps({"required_checks": {"agent-skills": ["Quality", "Security"]}}),
+            encoding="utf-8",
+        )
+        resolved = resolve_required_checks("selamy-labs/agent-skills", runner=provider_runner, control_dir=ctrl)
+        self.assertIsNotNone(resolved)
+        ctxs = [c["context"] for c in resolved]  # type: ignore[index]
+        self.assertIn("Quality", ctxs)
+        self.assertIn("Release", ctxs)
+        self.assertIn("Security", ctxs)
+
+        def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "error"
+
+        self.assertIsNone(resolve_required_checks("unknown", runner=fail_runner, control_dir=Path("/nonexistent")))
+
+    def test_verify_merge_pr_view_failure_branches(self) -> None:
+        def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "network error"
+
+        ok1, reason1, _, _ = _verify_merge_pr_view(self.worktree, "152", self.c_sha, runner=fail_runner)
+        self.assertFalse(ok1)
+        self.assertEqual(reason1, "PR_VIEW_FAILED")
+
+        def bad_json_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "not-json"
+
+        ok2, reason2, _, _ = _verify_merge_pr_view(self.worktree, "152", self.c_sha, runner=bad_json_runner)
+        self.assertFalse(ok2)
+        self.assertEqual(reason2, "PR_VIEW_FAILED")
+
+        def non_dict_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "[]"
+
+        ok3, reason3, _, _ = _verify_merge_pr_view(self.worktree, "152", self.c_sha, runner=non_dict_runner)
+        self.assertFalse(ok3)
+        self.assertEqual(reason3, "PR_VIEW_FAILED")
+
+        def head_mismatch_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"headRefOid": "9" * 40, "baseRefName": "main"})
+
+        ok4, reason4, _, _ = _verify_merge_pr_view(self.worktree, "152", self.c_sha, runner=head_mismatch_runner)
+        self.assertFalse(ok4)
+        self.assertEqual(reason4, "PR_HEAD_MISMATCH")
+
+        def base_mismatch_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"headRefOid": self.c_sha, "baseRefName": "weak"})
+
+        ok5, reason5, _, _ = _verify_merge_pr_view(
+            self.worktree, "152", self.c_sha, runner=base_mismatch_runner, expected_base_branch="main"
+        )
+        self.assertFalse(ok5)
+        self.assertEqual(reason5, "BASE_BRANCH_MISMATCH")
+
+        def ok_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"headRefOid": self.c_sha, "baseRefName": "main"})
+
+        ok6, reason6, _, info6 = _verify_merge_pr_view(
+            self.worktree, "152", self.c_sha, runner=ok_runner, expected_base_branch="main"
+        )
+        self.assertTrue(ok6)
+        self.assertEqual(reason6, "")
+        self.assertEqual(info6.get("baseRefName"), "main")
+
+    def test_fetch_pr_base_branch_variations(self) -> None:
+        def fail_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 1, "error"
+
+        self.assertIsNone(fetch_pr_base_branch("selamy-labs/agent-skills", "152", runner=fail_runner))
+
+        def bad_json_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "not-json"
+
+        self.assertIsNone(fetch_pr_base_branch("selamy-labs/agent-skills", "152", runner=bad_json_runner))
+
+        def non_dict_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, "[]"
+
+        self.assertIsNone(fetch_pr_base_branch("selamy-labs/agent-skills", "152", runner=non_dict_runner))
+
+        def ok_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            return 0, json.dumps({"baseRefName": "main"})
+
+        self.assertEqual(fetch_pr_base_branch("selamy-labs/agent-skills", "152", runner=ok_runner), "main")
+
+    def test_check_app_matches_behavior(self) -> None:
+        self.assertTrue(_check_app_matches({"app": {"id": 123}}, None))
+        self.assertTrue(_check_app_matches({}, None))
+
+        self.assertTrue(_check_app_matches({"app": {"id": 12345}}, 12345))
+        self.assertTrue(_check_app_matches({"app": 12345}, 12345))
+        self.assertTrue(_check_app_matches({"app_id": 12345}, 12345))
+        self.assertTrue(_check_app_matches({"integration_id": 12345}, 12345))
+        self.assertFalse(_check_app_matches({"app": {"id": 99999}}, 12345))
+        self.assertFalse(_check_app_matches({"app": None}, 12345))
+        self.assertFalse(_check_app_matches({}, 12345))
+
+    def test_reconcile_and_merge_pr_defaults_to_resolving_required_checks_and_fails_closed_when_none(self) -> None:
+        def fail_checks_runner(cmd: list[str], cwd: Any = None) -> tuple[int, str]:
+            cmd_str = " ".join(cmd)
+            if "api user" in cmd_str:
+                return 0, json.dumps({"login": "selamy-labs-bot", "type": "Bot"})
+            if "pr view" in cmd_str:
+                return 0, json.dumps(
+                    {
+                        "state": "OPEN",
+                        "headRefOid": self.c_sha,
+                        "statusCheckRollup": [
+                            {
+                                "name": "any-check",
+                                "status": "COMPLETED",
+                                "conclusion": "SUCCESS",
+                                "head_sha": self.c_sha,
+                            }
+                        ],
+                    }
+                )
+            return 1, "Not found"
+
+        ok, res = reconcile_and_merge_pr(
+            self.worktree, "152", self.c_sha, runner=fail_checks_runner, required_checks=None
+        )
+        self.assertFalse(ok)
+        self.assertEqual(res.get("reason_code"), "CI_CHECK_MISSING")
+
+    def test_verify_live_status_rollup_skipped_neutral_non_required_check_passes(self) -> None:
+        rollup = [
+            {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha},
+            {"name": "dependabot-auto-merge", "status": "COMPLETED", "conclusion": "SKIPPED", "head_sha": self.c_sha},
+            {"name": "optional-linter", "status": "COMPLETED", "conclusion": "NEUTRAL", "head_sha": self.c_sha},
+        ]
+        ok, code = verify_live_status_rollup(rollup, self.c_sha, required_checks=[{"context": "Quality"}])
+        self.assertTrue(ok)
+        self.assertEqual(code, "")
+
+        # Negative control: when required check itself is SKIPPED
+        req_skipped = [
+            {"name": "Quality", "status": "COMPLETED", "conclusion": "SKIPPED", "head_sha": self.c_sha},
+        ]
+        ok_sk, code_sk = verify_live_status_rollup(req_skipped, self.c_sha, required_checks=[{"context": "Quality"}])
+        self.assertFalse(ok_sk)
+        self.assertEqual(code_sk, "CI_CHECK_FAILED")
+
+        # Negative control: when optional check is FAILURE
+        rollup_failed = [
+            {"name": "Quality", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha},
+            {"name": "optional-check", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": self.c_sha},
+        ]
+        ok_f, code_f = verify_live_status_rollup(rollup_failed, self.c_sha, required_checks=[{"context": "Quality"}])
+        self.assertFalse(ok_f)
+        self.assertEqual(code_f, "CI_CHECK_FAILED")
+
+    def test_is_named_check_passing_duplicate_check_names_all_must_pass(self) -> None:
+        # First passing, second failing
+        rollup_one_failed = [
+            {"name": "test-gate", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha},
+            {"name": "test-gate", "status": "COMPLETED", "conclusion": "FAILURE", "head_sha": self.c_sha},
+        ]
+        ok1, code1 = _is_named_check_passing("test-gate", rollup_one_failed, self.c_sha)
+        self.assertFalse(ok1)
+        self.assertEqual(code1, "CI_CHECK_FAILED")
+
+        # Both passing
+        rollup_both_passed = [
+            {"name": "test-gate", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha},
+            {"name": "test-gate", "status": "COMPLETED", "conclusion": "SUCCESS", "head_sha": self.c_sha},
+        ]
+        ok2, code2 = _is_named_check_passing("test-gate", rollup_both_passed, self.c_sha)
+        self.assertTrue(ok2)
+        self.assertEqual(code2, "")
 
 
 if __name__ == "__main__":

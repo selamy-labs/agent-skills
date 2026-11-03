@@ -295,40 +295,86 @@ def fetch_ci_checks_from_provider(
     return _parse_pr_view_rollup(out, cand_sha)
 
 
-def _parse_contexts(contexts: Any) -> list[str]:
+def fetch_pr_base_branch(
+    repo: str | Path | None,
+    pr_ref: str,
+    runner: Callable[..., Any] | None = None,
+    cwd: Path | str | None = None,
+) -> str | None:
+    repo_name = str(repo).strip() if isinstance(repo, str) else ""
+    worktree = Path(cwd or (repo if isinstance(repo, Path) else "."))
+    cmd = ["gh", "pr", "view", pr_ref]
+    if repo_name:
+        cmd.extend(["--repo", repo_name])
+    cmd.extend(["--json", "baseRefName"])
+    code, out = _run_cmd(cmd, worktree, runner)
+    if code != 0 or not out.strip():
+        return None
+    try:
+        data = json.loads(out)
+        if isinstance(data, dict):
+            val = str(data.get("baseRefName") or "").strip()
+            return val or None
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
+def _normalize_req_check(req: Any) -> dict[str, Any]:
+    if isinstance(req, str):
+        return {"context": req.strip(), "app_id": None}
+    if isinstance(req, dict):
+        ctx = str(req.get("context") or req.get("name") or "").strip()
+        app_id = req.get("app_id") or req.get("integration_id")
+        return {"context": ctx, "app_id": app_id}
+    return {"context": str(req).strip(), "app_id": None}
+
+
+def _merge_check_descriptors(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in items:
+        ctx = str(item.get("context") or "").strip()
+        if not ctx:
+            continue
+        if ctx not in merged or (merged[ctx].get("app_id") is None and item.get("app_id") is not None):
+            merged[ctx] = item
+    return list(merged.values())
+
+
+def _parse_contexts(contexts: Any) -> list[dict[str, Any]]:
     if not isinstance(contexts, list):
         return []
-    return [c.strip() for c in contexts if isinstance(c, str) and c.strip()]
+    return [{"context": c.strip(), "app_id": None} for c in contexts if isinstance(c, str) and c.strip()]
 
 
-def _parse_check_objects(checks_list: Any) -> list[str]:
+def _parse_check_objects(checks_list: Any) -> list[dict[str, Any]]:
     if not isinstance(checks_list, list):
         return []
-    res: list[str] = []
+    res: list[dict[str, Any]] = []
     for c in checks_list:
         if isinstance(c, dict):
             ctx = str(c.get("context") or "").strip()
             if ctx:
-                res.append(ctx)
+                app_id = c.get("app_id") or c.get("integration_id")
+                res.append({"context": ctx, "app_id": app_id})
     return res
 
 
-def _parse_dict_required_checks(data: dict[str, Any]) -> list[str]:
+def _parse_dict_required_checks(data: dict[str, Any]) -> list[dict[str, Any]]:
     combined = _parse_contexts(data.get("contexts")) + _parse_check_objects(data.get("checks"))
-    res: list[str] = []
-    for item in combined:
-        if item not in res:
-            res.append(item)
-    return res
+    return _merge_check_descriptors(combined)
 
 
-def _extract_rule_check_context(rsc: Any) -> str:
+def _extract_rule_check_item(rsc: Any) -> dict[str, Any] | None:
     if isinstance(rsc, dict):
-        return str(rsc.get("context") or "").strip()
-    return ""
+        ctx = str(rsc.get("context") or "").strip()
+        if ctx:
+            app_id = rsc.get("integration_id") or rsc.get("app_id")
+            return {"context": ctx, "app_id": app_id}
+    return None
 
 
-def _extract_rule_contexts(rule: Any) -> list[str]:
+def _extract_rule_contexts(rule: Any) -> list[dict[str, Any]]:
     if not (isinstance(rule, dict) and rule.get("type") == "required_status_checks"):
         return []
     params = rule.get("parameters")
@@ -337,19 +383,22 @@ def _extract_rule_contexts(rule: Any) -> list[str]:
     rsc_list = params.get("required_status_checks")
     if not isinstance(rsc_list, list):
         return []
-    return [_extract_rule_check_context(rsc) for rsc in rsc_list if _extract_rule_check_context(rsc)]
+    items: list[dict[str, Any]] = []
+    for rsc in rsc_list:
+        cand = _extract_rule_check_item(rsc)
+        if cand is not None:
+            items.append(cand)
+    return items
 
 
-def _parse_ruleset_required_checks(data: list[Any]) -> list[str]:
-    checks: list[str] = []
+def _parse_ruleset_required_checks(data: list[Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
     for rule in data:
-        for ctx in _extract_rule_contexts(rule):
-            if ctx not in checks:
-                checks.append(ctx)
-    return checks
+        items.extend(_extract_rule_contexts(rule))
+    return _merge_check_descriptors(items)
 
 
-def parse_required_checks(data: Any) -> list[str]:
+def parse_required_checks(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, dict):
         return _parse_dict_required_checks(data)
     if isinstance(data, list):
@@ -359,7 +408,7 @@ def parse_required_checks(data: Any) -> list[str]:
 
 def _query_branch_protection_checks(
     endpoint: str, worktree: Path, runner: Callable[..., Any] | None
-) -> list[str] | None:
+) -> list[dict[str, Any]] | None:
     code, out = _run_cmd(["gh", "api", endpoint], worktree, runner)
     if code != 0 or not out.strip():
         return None
@@ -374,7 +423,7 @@ def fetch_required_checks_from_provider(
     base_branch: str = "main",
     runner: Callable[..., Any] | None = None,
     cwd: Path | str | None = None,
-) -> list[str] | None:
+) -> list[dict[str, Any]] | None:
     worktree = Path(cwd if cwd else ".")
     repo_name = str(repo).strip() if repo else ""
     bp_endpoint = (
@@ -382,16 +431,23 @@ def fetch_required_checks_from_provider(
         if repo_name
         else f"repos/{{owner}}/{{repo}}/branches/{base_branch}/protection/required_status_checks"
     )
-    bp_res = _query_branch_protection_checks(bp_endpoint, worktree, runner)
-    if bp_res is not None:
-        return bp_res
-
     rules_endpoint = (
         f"repos/{repo_name}/rules/branches/{base_branch}"
         if repo_name
         else f"repos/{{owner}}/{{repo}}/rules/branches/{base_branch}"
     )
-    return _query_branch_protection_checks(rules_endpoint, worktree, runner)
+    bp_res = _query_branch_protection_checks(bp_endpoint, worktree, runner)
+    rules_res = _query_branch_protection_checks(rules_endpoint, worktree, runner)
+
+    if bp_res is None and rules_res is None:
+        return None
+
+    combined: list[dict[str, Any]] = []
+    if bp_res:
+        combined.extend(bp_res)
+    if rules_res:
+        combined.extend(rules_res)
+    return _merge_check_descriptors(combined)
 
 
 def _clean_string_list(items: list[Any]) -> list[str]:
@@ -429,24 +485,16 @@ def _read_policy_dict(p: Path) -> dict[str, Any] | None:
 
 def load_policy_required_checks(
     repo: str,
-    base_branch: str = "main",
     control_dir: Path | str | None = None,
-    policy_path: Path | str | None = None,
-) -> list[str] | None:
-    candidates: list[Path] = []
-    if policy_path:
-        candidates.append(Path(policy_path))
-    if control_dir:
-        candidates.append(Path(control_dir) / "delivery-policy.json")
-        candidates.append(Path(control_dir).parent / "delivery-policy.json")
-    candidates.append(Path.home() / ".local/state/project-portfolio/delivery-policy.json")
-
-    for p in candidates:
-        doc = _read_policy_dict(p)
-        if doc and "required_checks" in doc:
-            res = _extract_repo_required_checks(doc["required_checks"], repo)
-            if res is not None:
-                return res
+) -> list[dict[str, Any]] | None:
+    if not control_dir:
+        return None
+    p = Path(control_dir) / "delivery-policy.json"
+    doc = _read_policy_dict(p)
+    if doc and "required_checks" in doc:
+        raw = _extract_repo_required_checks(doc["required_checks"], repo)
+        if raw is not None:
+            return [_normalize_req_check(x) for x in raw]
     return None
 
 
@@ -456,20 +504,19 @@ def resolve_required_checks(
     runner: Callable[..., Any] | None = None,
     cwd: Path | str | None = None,
     control_dir: Path | str | None = None,
-    policy_path: Path | str | None = None,
-) -> list[str] | None:
+) -> list[dict[str, Any]] | None:
     provider_checks = fetch_required_checks_from_provider(repo, base_branch, runner=runner, cwd=cwd)
-    if provider_checks is not None and len(provider_checks) > 0:
-        return provider_checks
-    policy_checks = load_policy_required_checks(
-        str(repo or ""),
-        base_branch=base_branch,
-        control_dir=control_dir,
-        policy_path=policy_path,
-    )
-    if policy_checks is not None:
-        return policy_checks
-    return provider_checks
+    policy_checks = load_policy_required_checks(str(repo or ""), control_dir=control_dir)
+
+    if provider_checks is None and policy_checks is None:
+        return None
+
+    combined: list[dict[str, Any]] = []
+    if provider_checks:
+        combined.extend(provider_checks)
+    if policy_checks:
+        combined.extend(policy_checks)
+    return _merge_check_descriptors(combined)
 
 
 def reconcile_and_push(
@@ -604,43 +651,105 @@ def _check_name_matches(item: dict[str, Any], req_name: str) -> bool:
     return name == req_name
 
 
-def _is_named_check_passing(req_name: str, rollup: list[dict[str, Any]], commit_sha: str) -> tuple[bool, str]:
+def _check_app_matches(item: dict[str, Any], req_app_id: int | str | None) -> bool:
+    if req_app_id is None:
+        return True
+    app_val = item.get("app")
+    actual_id = None
+    if isinstance(app_val, dict):
+        actual_id = app_val.get("id")
+    elif app_val is not None:
+        actual_id = app_val
+    else:
+        actual_id = item.get("app_id") or item.get("integration_id")
+
+    if actual_id is None:
+        return False
+    return str(actual_id).strip() == str(req_app_id).strip()
+
+
+def _item_matches_check(item: Any, req_name: str, req_app_id: int | str | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return _check_name_matches(item, req_name) and _check_app_matches(item, req_app_id)
+
+
+def _is_named_check_passing(
+    req: Any,
+    rollup: list[dict[str, Any]],
+    commit_sha: str,
+) -> tuple[bool, str]:
+    norm = _normalize_req_check(req)
+    req_name = norm["context"]
+    req_app_id = norm["app_id"]
+
+    matched = False
     for item in rollup:
-        if isinstance(item, dict) and _check_name_matches(item, req_name):
+        if _item_matches_check(item, req_name, req_app_id):
+            matched = True
             if not _is_ci_check_passing(item, commit_sha):
                 return False, "CI_CHECK_FAILED"
-            return True, ""
-    return False, "CI_CHECK_MISSING"
+    if not matched:
+        return False, "CI_CHECK_MISSING"
+    return True, ""
 
 
 def _verify_all_required_present(
-    rollup: list[dict[str, Any]], commit_sha: str, required_checks: list[str]
+    rollup: list[dict[str, Any]], commit_sha: str, required_checks: list[Any]
 ) -> tuple[bool, str]:
     if not required_checks:
         return False, "CI_CHECK_MISSING"
-    for req_name in required_checks:
-        ok, err = _is_named_check_passing(req_name, rollup, commit_sha)
+    for req in required_checks:
+        ok, err = _is_named_check_passing(req, rollup, commit_sha)
         if not ok:
             return False, err
+    return True, ""
+
+
+def _is_item_failed(item: Any, commit_sha: str) -> bool:
+    if not isinstance(item, dict):
+        return True
+    c_sha = str(item.get("head_sha") or item.get("commit_sha") or item.get("sha") or "").strip()
+    if c_sha and c_sha != commit_sha:
+        return True
+    concl = str(item.get("conclusion") or "").upper()
+    state = str(item.get("state") or "").upper()
+    if concl in {"FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
+        return True
+    if state in {"FAILURE", "ERROR"}:
+        return True
+    return False
+
+
+def _verify_required_and_clean_rollup(
+    rollup: list[dict[str, Any]], commit_sha: str, required_checks: list[Any]
+) -> tuple[bool, str]:
+    ok, err = _verify_all_required_present(rollup, commit_sha, required_checks)
+    if not ok:
+        return False, err
+    for item in rollup:
+        if _is_item_failed(item, commit_sha):
+            return False, "CI_CHECK_FAILED"
+    return True, ""
+
+
+def _verify_all_checks_passing(rollup: list[dict[str, Any]], commit_sha: str) -> tuple[bool, str]:
+    for item in rollup:
+        if not isinstance(item, dict) or not _is_ci_check_passing(item, commit_sha):
+            return False, "CI_CHECK_FAILED"
     return True, ""
 
 
 def verify_live_status_rollup(
     rollup: list[dict[str, Any]],
     commit_sha: str,
-    required_checks: list[str] | None = None,
+    required_checks: list[Any] | None = None,
 ) -> tuple[bool, str]:
     if not rollup:
         return False, "MISSING_EXACT_HEAD_CI"
     if required_checks is not None:
-        ok, err = _verify_all_required_present(rollup, commit_sha, required_checks)
-        if not ok:
-            return False, err
-
-    for item in rollup:
-        if not isinstance(item, dict) or not _is_ci_check_passing(item, commit_sha):
-            return False, "CI_CHECK_FAILED"
-    return True, ""
+        return _verify_required_and_clean_rollup(rollup, commit_sha, required_checks)
+    return _verify_all_checks_passing(rollup, commit_sha)
 
 
 def _post_merge_verify(
@@ -693,11 +802,12 @@ def _verify_merge_pr_view(
     commit_sha: str,
     runner: Callable[..., Any] | None = None,
     repo: str = "",
+    expected_base_branch: str = "",
 ) -> tuple[bool, str, str, dict[str, Any]]:
     cmd = ["gh", "pr", "view", pr_ref]
     if repo:
         cmd.extend(["--repo", repo])
-    cmd.extend(["--json", "state,mergeCommit,headRefOid,statusCheckRollup,mergedAt"])
+    cmd.extend(["--json", "state,mergeCommit,headRefOid,statusCheckRollup,mergedAt,baseRefName"])
     code, out = _run_cmd(
         cmd,
         worktree,
@@ -714,13 +824,17 @@ def _verify_merge_pr_view(
     head_ref = str(info.get("headRefOid") or "").strip()
     if head_ref != commit_sha:
         return False, "PR_HEAD_MISMATCH", f"PR head {head_ref} != {commit_sha}", {}
+    if expected_base_branch:
+        base_ref = str(info.get("baseRefName") or "").strip()
+        if base_ref and base_ref != expected_base_branch:
+            return False, "BASE_BRANCH_MISMATCH", f"PR baseRefName {base_ref} != {expected_base_branch}", {}
     return True, "", "", info
 
 
 def _verify_merge_ci(
     info: dict[str, Any],
     commit_sha: str,
-    required_checks: list[str] | None = None,
+    required_checks: list[Any] | None = None,
 ) -> tuple[bool, str]:
     stamp_rollup_head_sha(info.get("statusCheckRollup"), commit_sha)
     rollup = info.get("statusCheckRollup")
@@ -729,37 +843,30 @@ def _verify_merge_ci(
     return verify_live_status_rollup(rollup, commit_sha, required_checks=required_checks)
 
 
-def reconcile_and_merge_pr(
+def _resolve_merge_required_checks(
+    repo: str,
+    pr_ref: str,
+    expected_base_branch: str,
+    worktree: Path,
+    runner: Callable[..., Any] | None,
+    required_checks: list[Any] | None,
+) -> tuple[bool, list[Any] | None]:
+    if required_checks is not None:
+        return True, required_checks
+    target_base = expected_base_branch or fetch_pr_base_branch(repo, pr_ref, runner=runner, cwd=worktree) or "main"
+    resolved = resolve_required_checks(repo, base_branch=target_base, runner=runner, cwd=worktree)
+    if not resolved:
+        return False, None
+    return True, resolved
+
+
+def _execute_pr_merge(
     worktree: Path,
     pr_ref: str,
     commit_sha: str,
-    merge_identity: str = "selamy-labs-bot",
-    runner: Callable[..., Any] | None = None,
-    required_checks: list[str] | None = None,
-    repo: str = "",
+    runner: Callable[..., Any] | None,
+    repo: str,
 ) -> tuple[bool, dict[str, Any]]:
-    id_ok, id_err = verify_provider_bot_actor(worktree, merge_identity, runner)
-    if not id_ok:
-        return False, {"error": "Provider authenticated user disallowed", "reason_code": id_err}
-
-    pr_ok, pr_reason, pr_err, info = _verify_merge_pr_view(worktree, pr_ref, commit_sha, runner, repo=repo)
-    if not pr_ok:
-        return False, {"error": pr_err, "reason_code": pr_reason}
-
-    ci_ok, ci_err = _verify_merge_ci(info, commit_sha, required_checks=required_checks)
-    if not ci_ok:
-        return False, {"error": "CI checks missing or failed", "reason_code": ci_err}
-
-    merged, mc_oid = is_pr_already_merged(info)
-    if merged:
-        return True, {
-            "reconciled_existing_effect": True,
-            "state": "MERGED",
-            "merge_commit": mc_oid,
-            "merge_commit_sha": mc_oid,
-            "merged_at": info.get("mergedAt"),
-        }
-
     merge_cmd = ["gh", "pr", "merge", pr_ref]
     if repo:
         merge_cmd.extend(["--repo", repo])
@@ -780,6 +887,53 @@ def reconcile_and_merge_pr(
         "merged_at": post_data.get("mergedAt"),
         "output": merge_out,
     }
+
+
+def reconcile_and_merge_pr(
+    worktree: Path,
+    pr_ref: str,
+    commit_sha: str,
+    merge_identity: str = "selamy-labs-bot",
+    runner: Callable[..., Any] | None = None,
+    required_checks: list[Any] | None = None,
+    repo: str = "",
+    expected_base_branch: str = "",
+) -> tuple[bool, dict[str, Any]]:
+    id_ok, id_err = verify_provider_bot_actor(worktree, merge_identity, runner)
+    if not id_ok:
+        return False, {"error": "Provider authenticated user disallowed", "reason_code": id_err}
+
+    pr_ok, pr_reason, pr_err, info = _verify_merge_pr_view(
+        worktree, pr_ref, commit_sha, runner, repo=repo, expected_base_branch=expected_base_branch
+    )
+    if not pr_ok:
+        return False, {"error": pr_err, "reason_code": pr_reason}
+
+    rollup = info.get("statusCheckRollup")
+    if not isinstance(rollup, list) or not rollup:
+        return False, {"error": "Missing exact head CI", "reason_code": "MISSING_EXACT_HEAD_CI"}
+
+    res_ok, resolved_checks = _resolve_merge_required_checks(
+        repo, pr_ref, expected_base_branch, worktree, runner, required_checks
+    )
+    if not res_ok:
+        return False, {"error": "Required checks missing or could not be resolved", "reason_code": "CI_CHECK_MISSING"}
+
+    ci_ok, ci_err = _verify_merge_ci(info, commit_sha, required_checks=resolved_checks)
+    if not ci_ok:
+        return False, {"error": "CI checks missing or failed", "reason_code": ci_err}
+
+    merged, mc_oid = is_pr_already_merged(info)
+    if merged:
+        return True, {
+            "reconciled_existing_effect": True,
+            "state": "MERGED",
+            "merge_commit": mc_oid,
+            "merge_commit_sha": mc_oid,
+            "merged_at": info.get("mergedAt"),
+        }
+
+    return _execute_pr_merge(worktree, pr_ref, commit_sha, runner, repo)
 
 
 def reconcile_and_complete_spec_task(
