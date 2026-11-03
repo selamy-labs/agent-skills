@@ -25,6 +25,113 @@ Exit 0 means the recorded structural checks pass, 1 means attention is needed, a
 
 The script reads `coordinator-status.json`, `local-actions.json`, and an optional results file. The normalized current view lives in `coordinator-status.json.delivery_control`; see [the contract](references/contract.md). Existing historical records remain historical. Do not create an independently maintained CSV or spreadsheet. A human-readable export can be generated from the same report.
 
+## Executable workflow management layer (`workflow.py`)
+
+A focused, deterministic, zero-daemon executable workflow-management module `skills/portfolio-delivery-control/scripts/workflow.py` (callable via subcommands `admit`, `claim`, `record-implementation`, `record-review`, `execute-transition` or direct Python API) mutates and transitions work items under an exclusive `flock` on the control directory lockfile (`.workflow.lock`).
+
+### Operations and Subcommands
+
+1. **`admit` (`admit_work`)**:
+   - Admit and deduplicate real work from GitHub issues or SpecKit `tasks.md` entries under exclusive lock.
+   - Binds a stable `work_id` to `project`, `repository`, immutable `task_id`, `spec_path` (verifying task exists in spec when present), `base_sha` (40-hex SHA), initial stage `admitted`, `prerequisites`, `required_completion_action` (`push`, `publish_pr`, or `merge_pr`; default `"merge_pr"`), and `approval_ref` (`path:sha256`).
+   - Validates live approval file on disk: Resolves directive file path, calculates live SHA-256 digest, checks for revocation/withdrawal markers (`WITHDRAWN`, `REVOKED`, `DO NOT PUBLISH`, `"status": "withdrawn"`), and verifies hash match before admitting.
+   - Refuses before mutation on duplicate work ID (`DUPLICATE_WORK_ID`), malformed base SHA (`INVALID_BASE_SHA`), missing spec task (`MISSING_SPEC_TASK`), absent/invalid approval (`ABSENT_APPROVAL`, `MISSING_APPROVAL`), stale approval hash (`STALE_APPROVAL`), or withdrawn approval (`APPROVAL_WITHDRAWN`), writing a durable refusal receipt to `<control-dir>/receipts/refusal_<work_id>_<reason>.json`.
+   - CLI:
+     ```sh
+     python3 /absolute/portfolio-delivery-control/scripts/workflow.py admit \
+       --control-dir /absolute/control \
+       --work-id W-001 \
+       --project project-name \
+       --repository owner/repo \
+       --task-id TASK-001 \
+       --base-sha 0123456789abcdef0123456789abcdef01234567 \
+       --approval-ref /path/to/directive.md \
+       --approval-sha256 <sha256> \
+       --required-completion-action merge_pr \
+       --spec-path /path/to/tasks.md
+     ```
+
+2. **`claim` (`claim_work`)**:
+   - Atomically claims admitted work with `owner` (session/lane ID), verified `worktree`, path scope (`write_paths`), generated cryptographic `claim_token`, and TTL-based expiration `expires_at`.
+   - Pre-effect refusals:
+     - `WRITER_CONFLICT`: Reused active session holding a claim on another active work item ("a reused session cannot count as two simultaneous writers").
+     - `COMPETING_ACTIVE_CLAIM`: Overlapping claim on work ID or intersecting write paths.
+     - `SCOPE_ESCAPE`: Worktree or write paths outside allowed roots or intersecting protected directories (`skills/portfolio-delivery-control`).
+     - `UNMET_PREREQUISITES`: Incomplete prerequisite work items.
+   - CLI:
+     ```sh
+     python3 /absolute/portfolio-delivery-control/scripts/workflow.py claim \
+       --control-dir /absolute/control \
+       --work-id W-001 \
+       --owner lane-session-1 \
+       --worktree /path/to/worktree \
+       --write-paths src/module/ \
+       --allowed-roots /path/to/workspace \
+       --ttl-seconds 7200
+     ```
+
+3. **`record-implementation` (`record_implementation`)**:
+   - Binds implementation round, commit SHA, tree SHA, parent SHA, patch/bundle/receipt artifacts, and gate results (`test_exit_code == 0`) to an active claim.
+   - Verifies the live git repository at `worktree` (`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`, `git rev-parse HEAD^`, `git rev-list --count base_sha..HEAD`, and commit identity `selamy-labs-bot`).
+   - Refuses on git mismatches (`HEAD_MISMATCH`, `TREE_MISMATCH`, `BASE_SHA_DRIFT`, `NON_SINGLE_COMMIT_RANGE`, `INVALID_COMMIT_IDENTITY`), artifact hash mismatches (`ARTIFACT_HASH_MISMATCH`), or missing mandatory gates (`MISSING_MANDATORY_GATE`).
+   - Automatically invalidates prior reviews and transitions if `commit_sha` or `tree_sha` differs from previous candidate revision.
+   - Advances stage to `review` and records durable implementation receipt.
+   - CLI:
+     ```sh
+     python3 /absolute/portfolio-delivery-control/scripts/workflow.py record-implementation \
+       --control-dir /absolute/control \
+       --work-id W-001 \
+       --owner lane-session-1 \
+       --claim-token <token> \
+       --round 1 \
+       --commit-sha <40-hex> \
+       --tree-sha <40-hex> \
+       --parent-sha <40-hex> \
+       --gate-results '{"test_exit_code": 0}'
+     ```
+
+4. **`record-review` (`record_review`)**:
+   - Binds an independent review report (`reviewer_id`, `model`, `family` in `argon`, `opus`, `sol`, `session_id`, `verdict` in `SHIP`, `REVISE`, `report_path`, `report_sha256`) to the candidate.
+   - Enforces strict reviewer provenance: Refuses unattributed reports lacking non-empty model or reviewer attestation (`REPORT_IDENTITY_MISMATCH`).
+   - Refuses duplicate report reuse across reviewers on the current revision (`REPORT_IDENTITY_MISMATCH`).
+   - Enforces embedded self-review refusal: Inspects report tokens (`session`, `session_id`, `conversationId`, `authorModel`, `reviewer`, `model`, `dispatch`, `attestation`) against implementer identity, claim owner, candidate model, and flash models (`SELF_REVIEW_FORBIDDEN`).
+   - Verifies embedded reviewer consistency against caller session, reviewer, account, and dispatch (`REPORT_IDENTITY_MISMATCH`).
+   - Validates report file SHA-256 and verified commit/tree match candidate.
+   - Refuses forbidden models (`claude-fable-5-1`), duplicate reviewer family/session per round, or revision drift.
+   - `REVISE` verdict reverts stage to `implementing` with `remediation_required: true` and records actionable defect IDs.
+   - 3 distinct reviewer families (`argon`, `opus`, `sol`) and 3 distinct sessions with `SHIP` marks candidate `qualified: true`.
+   - CLI:
+     ```sh
+     python3 /absolute/portfolio-delivery-control/scripts/workflow.py record-review \
+       --control-dir /absolute/control \
+       --work-id W-001 \
+       --reviewer-id rev-opus \
+       --model claude-3-7-sonnet \
+       --family opus \
+       --session-id sess-rev-1 \
+       --verdict SHIP \
+       --report-path /path/to/report.json \
+       --report-sha256 <sha256>
+     ```
+
+5. **`execute-transition` (`execute_transition`)**:
+   - Executes guarded side effects (`push`, `publish_pr`, `merge_pr`, `complete_spec_task`) through maintained helpers with provider reconciliation.
+   - Pre-effect guards: Validates claim freshness, live git revision matching qualified candidate, 3 unanimous `SHIP` reviews, mandatory gates, live primary operator approval verification on disk (checking hash match and absence of withdrawal markers), exact-head CI, and approved bot identity (for `merge_pr`).
+   - Provider-authoritative merge CI: Evaluates `provider_checks` (`statusCheckRollup` from `gh pr view`). Requires non-empty, green rollup (`MISSING_EXACT_HEAD_CI`). Caller `ci_checks` cannot override provider CI and must explicitly match `commit_sha`.
+   - Provider actor identity verification: Calls `gh api user` and enforces actor identity matching `ALLOWED_MERGE_IDENTITIES` (`selamy-labs-bot`), refusing unauthorized human/bot actors with `DISALLOWED_MERGE_IDENTITY`.
+   - Already-merged reconciliation verification: Verifies `headRefOid == commit_sha` and valid provider CI before returning reconciled success, recording `merge_commit_sha`.
+   - Revision-bound transitions: Requires prior transitions matching `required_completion_action` bound to the current candidate commit and tree (`MISSING_TRANSITION_EVIDENCE`).
+   - Updates `coordinator-status.json` with truthful CI/branch protection projection and writes durable transition receipts.
+   - CLI:
+     ```sh
+     python3 /absolute/portfolio-delivery-control/scripts/workflow.py execute-transition \
+       --control-dir /absolute/control \
+       --work-id W-001 \
+       --action push \
+       --claim-token <token> \
+       --branch feat/my-branch
+     ```
+
 ## Resolve the report
 
 1. **Coverage:** Every primary-authorized project has an owner, next action, current stage, dated progress evidence, or an explicit blocker/wait. Priority for one foundation does not remove other projects. Unresolved product scope can advance through a bounded discovery artifact; it does not authorize invented implementations or deployments. Legacy entries are projected with RFC 6901 source pointers, canonical SHA-256 digests, and verified fact age.

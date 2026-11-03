@@ -149,19 +149,28 @@ class Audit:
             self.add(code, label, project, control_id=control_id, control_status=control_status)
 
 
+def check_source_times(a, name, row):
+    times = [a.time(row[k], f"{name}.{k}") for k in TIME_KEYS if k in row]
+    valid = [t for t in times if t]
+    if len(set(valid)) > 1:
+        a.add("ALIAS_DRIFT", f"{name} timestamp aliases disagree")
+    return max(valid) if valid else datetime.min.replace(tzinfo=UTC)
+
+
 def coordinator_sources(a, doc):
     nested = doc.get("coordinator", {})
     if not isinstance(nested, dict):
         a.add("COORDINATOR_INVALID", "coordinator must be an object", schema=True)
         nested = {}
-    sources = []
-    for name, row in [("root", doc), ("coordinator", nested)]:
-        times = [a.time(row[k], f"{name}.{k}") for k in TIME_KEYS if k in row]
-        valid = [t for t in times if t]
-        if len(set(valid)) > 1:
-            a.add("ALIAS_DRIFT", f"{name} timestamp aliases disagree")
-        sources.append((max(valid) if valid else datetime.min.replace(tzinfo=UTC), name, row))
+    sources = [(check_source_times(a, name, row), name, row) for name, row in [("root", doc), ("coordinator", nested)]]
     return sorted(sources, key=lambda item: (item[0], item[1] == "root"), reverse=True)
+
+
+def _append_field_candidate(a, source_time, name, field, key, value, candidates):
+    if text(value) or (field == "next_action" and evidence(value)):
+        candidates.append((source_time, name, key, value))
+    else:
+        a.add("COORDINATOR_FIELD_INVALID", f"{name}.{key}", schema=True)
 
 
 def field_candidates(a, sources, field, aliases):
@@ -171,10 +180,7 @@ def field_candidates(a, sources, field, aliases):
         if field == "model":
             values = values[:1]  # Display names are not model IDs.
         for key, value in values:
-            if text(value) or (field == "next_action" and evidence(value)):
-                candidates.append((source_time, name, key, value))
-            else:
-                a.add("COORDINATOR_FIELD_INVALID", f"{name}.{key}", schema=True)
+            _append_field_candidate(a, source_time, name, field, key, value, candidates)
     return candidates
 
 
@@ -220,23 +226,22 @@ def check_single_review(a, project, review, role, row_rev):
     return review["reviewer"]
 
 
+def _pick_role_review(role_reviews, target_rev):
+    if is_hex_sha(target_rev):
+        target_matches = [r for r in role_reviews if r.get("revision") == target_rev]
+        if target_matches:
+            return (target_matches[0], True) if len(target_matches) == 1 else (None, False)
+    if len(role_reviews) == 1:
+        return role_reviews[0], True
+    return None, False
+
+
 def check_single_role_review(a, project, reviews, role, target_rev, identities):
     role_reviews = [r for r in reviews if isinstance(r, dict) and r.get("role") == role]
-    target_matches = (
-        [r for r in role_reviews if r.get("revision") == target_rev] if is_hex_sha(target_rev) else role_reviews
-    )
-
-    if target_matches:
-        if len(target_matches) != 1:
-            a.add("REVIEW_MISSING_OR_DUPLICATE", f"Expected one {role} review", project)
-            return
-        selected = target_matches[0]
-    elif len(role_reviews) == 1:
-        selected = role_reviews[0]
-    else:
+    selected, ok = _pick_role_review(role_reviews, target_rev)
+    if not ok:
         a.add("REVIEW_MISSING_OR_DUPLICATE", f"Expected one {role} review", project)
         return
-
     ident = check_single_review(a, project, selected, role, target_rev)
     if ident:
         identities.append(ident)
@@ -269,6 +274,15 @@ def review_checks(a_or_reviews, project_or_policy=None, row_or_target=None, role
         a.add("REVIEW_NOT_INDEPENDENT", "Reviewer identities repeat", project)
 
 
+def _check_merge_gates(a, project, head, ci, protection, approval):
+    if ci.get("revision") != head or ci.get("status") != "success" or not evidence(ci.get("evidence")):
+        a.add("CI_NOT_CURRENT", "Successful CI at this revision with evidence required", project)
+    if protection.get("verified") is not True or not evidence(protection.get("evidence")):
+        a.add("PROTECTION_UNPROVEN", "Effective protection evidence required", project)
+    if not text(approval.get("authority")):
+        a.add("AUTHORITY_MISSING", "Primary authority reference required; this audit cannot grant approval", project)
+
+
 def merge_checks(a, project, row, roles):
     head = row.get("revision")
     if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
@@ -280,12 +294,7 @@ def merge_checks(a, project, row, roles):
         if not gates[key]:
             a.add("MERGE_GATE_MISSING", f"{key} evidence object missing", project)
     ci, protection, approval = (gates[k] for k in ("ci", "branch_protection", "approval"))
-    if ci.get("revision") != head or ci.get("status") != "success" or not evidence(ci.get("evidence")):
-        a.add("CI_NOT_CURRENT", "Successful CI at this revision with evidence required", project)
-    if protection.get("verified") is not True or not evidence(protection.get("evidence")):
-        a.add("PROTECTION_UNPROVEN", "Effective protection evidence required", project)
-    if not text(approval.get("authority")):
-        a.add("AUTHORITY_MISSING", "Primary authority reference required; this audit cannot grant approval", project)
+    _check_merge_gates(a, project, head, ci, protection, approval)
 
 
 def check_worker_permissions(a, project, worker):
@@ -295,6 +304,20 @@ def check_worker_permissions(a, project, worker):
         a.add("SANDBOX_UNPROVEN", "Worker sandbox is not recorded as enabled", project)
     if worker.get("permission_bypass") is True and not text(worker.get("authority")):
         a.add("BYPASS_AUTHORITY_MISSING", "Permission bypass lacks primary authority reference", project)
+
+
+def _check_review_worker(a, project, worker, reviewer_models, banned):
+    model = worker["model"]
+    if worker.get("write_paths"):
+        a.add("WORKER_INVALID", "Reviewer worker must have empty write_paths (read-only)", project, True)
+    if not reviewer_models:
+        a.add(
+            "REVIEWER_MODEL_INVALID",
+            "Review worker present but policy reviewer_models is missing or empty",
+            project,
+        )
+    elif model not in reviewer_models or model in banned:
+        a.add("REVIEWER_MODEL_INVALID", f"Reviewer model {model} is not allowed or is banned", project)
 
 
 def check_worker_role_model(a, project, worker, policy):
@@ -307,16 +330,7 @@ def check_worker_role_model(a, project, worker, policy):
         implementer_model, reviewer_models, banned = policy, None, []
 
     if role == "review":
-        if worker.get("write_paths"):
-            a.add("WORKER_INVALID", "Reviewer worker must have empty write_paths (read-only)", project, True)
-        if not reviewer_models:
-            a.add(
-                "REVIEWER_MODEL_INVALID",
-                "Review worker present but policy reviewer_models is missing or empty",
-                project,
-            )
-        elif model not in reviewer_models or model in banned:
-            a.add("REVIEWER_MODEL_INVALID", f"Reviewer model {model} is not allowed or is banned", project)
+        _check_review_worker(a, project, worker, reviewer_models, banned)
     elif role not in ("implementation", "remediation", "implementer") or model != implementer_model:
         a.add("IMPLEMENTER_MODEL", "Implementation/remediation model or role differs from policy", project)
 
@@ -422,6 +436,16 @@ def blocker_since_time(a, project, blocker, row, progress):
     return row.get("last_progress_at"), progress
 
 
+def _evaluate_stale_blocker(a, project, since_val, since_time, policy):
+    is_stale = (since_val is None) or (
+        since_time is not None and (a.now - since_time).total_seconds() > policy["max_progress_age_minutes"] * 60
+    )
+    if since_val is None:
+        a.add("BLOCKER_STALE", "Blocker has no active recheck deadline and no recent progress timestamp", project)
+    elif is_stale:
+        a.add("BLOCKER_STALE", "No recorded artifact or stage advancement within policy window", project)
+
+
 def blocker_check(a, project, row, policy, progress=None):
     if row.get("stage") in ("done", "complete"):
         return
@@ -432,20 +456,17 @@ def blocker_check(a, project, row, policy, progress=None):
         a.add("BLOCKER_INVALID", "Blocked needs accountable owner, reason and evidence", project, True)
         return
     since_val, since_time = blocker_since_time(a, project, blocker, row, progress)
-    is_stale = (since_val is None) or (
-        since_time is not None and (a.now - since_time).total_seconds() > policy["max_progress_age_minutes"] * 60
-    )
     recheck_val = next(
         (blocker[k] for k in ("recheck_at", "recheck_by", "until") if blocker.get(k) is not None),
         None,
     )
     if recheck_val is not None:
+        is_stale = (since_val is None) or (
+            since_time is not None and (a.now - since_time).total_seconds() > policy["max_progress_age_minutes"] * 60
+        )
         check_blocker_recheck(a, project, recheck_val, policy, is_stale)
         return
-    if since_val is None:
-        a.add("BLOCKER_STALE", "Blocker has no active recheck deadline and no recent progress timestamp", project)
-    elif is_stale:
-        a.add("BLOCKER_STALE", "No recorded artifact or stage advancement within policy window", project)
+    _evaluate_stale_blocker(a, project, since_val, since_time, policy)
 
 
 def check_claim_expiry(a, project, wi):
@@ -514,6 +535,19 @@ def resolve_requested_transition_str(row, wi):
     return None
 
 
+def _check_work_item_stage_claim(a, project, row, stage, wi, trans_str, policy):
+    if stage in ACTIVE_CLAIM_STAGES:
+        return check_active_stage_claim(a, project, row, stage, wi, policy)
+    if trans_str in TRANSITION_CLAIM_STAGES:
+        if "work_item" not in row or wi is None:
+            return True
+        if not isinstance(wi, dict):
+            a.add("WORK_ITEM_INVALID", "work_item must be an object", project, schema=True)
+            return False
+        check_claim_token(a, project, wi, policy)
+    return True
+
+
 def validate_work_item(a, project, row, policy):
     if not isinstance(row, dict):
         return
@@ -521,16 +555,8 @@ def validate_work_item(a, project, row, policy):
     wi = row.get("work_item")
     trans_str = resolve_requested_transition_str(row, wi)
 
-    if stage in ACTIVE_CLAIM_STAGES:
-        if not check_active_stage_claim(a, project, row, stage, wi, policy):
-            return
-    elif trans_str in TRANSITION_CLAIM_STAGES:
-        if "work_item" not in row or wi is None:
-            return
-        if not isinstance(wi, dict):
-            a.add("WORK_ITEM_INVALID", "work_item must be an object", project, schema=True)
-            return
-        check_claim_token(a, project, wi, policy)
+    if not _check_work_item_stage_claim(a, project, row, stage, wi, trans_str, policy):
+        return
 
     if "work_item" not in row or wi is None:
         return
@@ -679,7 +705,7 @@ def resolve_allowed_reviewer_models(models):
     if isinstance(models, dict):
         banned = set(models.get("banned_models", []))
         models = models.get("reviewer_models")
-    if not models or not isinstance(models, (list, set, tuple)):
+    if not models or not isinstance(models, list | set | tuple):
         return None
     allowed = set(models) - banned
     return allowed or None
@@ -809,16 +835,20 @@ def guard_merge_or_complete(a, project, row, wi, policy, target):
         )
 
 
-def resolve_requested_transition(a, project, row, wi):
-    target = None
-    has_target = False
-    if "requested_transition" in row:
-        has_target = True
-        target = row.get("requested_transition")
+def _extract_requested_targets(row, wi):
+    target = row.get("requested_transition") if "requested_transition" in row else None
+    has_target = "requested_transition" in row
+    wi_target = None
     if isinstance(wi, dict) and "requested_transition" in wi:
         has_target = True
         wi_target = wi.get("requested_transition")
-        if target is not None and wi_target is not None and target != wi_target:
+    return target, wi_target, has_target
+
+
+def resolve_requested_transition(a, project, row, wi):
+    target, wi_target, has_target = _extract_requested_targets(row, wi)
+    if wi_target is not None:
+        if target is not None and target != wi_target:
             a.add(
                 "STAGE_TRANSITION_REJECTED",
                 "Conflicting requested_transition between row and work_item",
@@ -826,7 +856,7 @@ def resolve_requested_transition(a, project, row, wi):
                 schema=True,
             )
             return None, False, False
-        target = wi_target if wi_target is not None else target
+        target = wi_target
 
     if not has_target:
         return None, True, False
@@ -904,6 +934,19 @@ def check_admission_uniqueness(a, project, row, active_admissions):
         active_admissions[key] = project
 
 
+def _check_stage_progress(a, project, row, stage, policy, progress):
+    if stage == "waiting":
+        waiting_check(a, project, row)
+    elif stage == "blocked":
+        blocker_check(a, project, row, policy, progress)
+    elif stage != "done" and progress and (a.now - progress).total_seconds() > policy["max_progress_age_minutes"] * 60:
+        a.add("PROGRESS_AGING", "No recorded artifact or stage advancement within policy window", project)
+    if stage != "blocked" and "blocker" in row:
+        blocker_check(a, project, row, policy, progress)
+    if stage == "merge_ready":
+        merge_checks(a, project, row, policy["required_review_roles"])
+
+
 def project_row(a, project, row, policy):
     stage = row.get("stage")
     if (
@@ -921,16 +964,7 @@ def project_row(a, project, row, policy):
         project,
     )
     progress = a.time(row.get("last_progress_at"), "Project last_progress_at", project)
-    if stage == "waiting":
-        waiting_check(a, project, row)
-    elif stage == "blocked":
-        blocker_check(a, project, row, policy, progress)
-    elif stage != "done" and progress and (a.now - progress).total_seconds() > policy["max_progress_age_minutes"] * 60:
-        a.add("PROGRESS_AGING", "No recorded artifact or stage advancement within policy window", project)
-    if stage != "blocked" and "blocker" in row:
-        blocker_check(a, project, row, policy, progress)
-    if stage == "merge_ready":
-        merge_checks(a, project, row, policy["required_review_roles"])
+    _check_stage_progress(a, project, row, stage, policy, progress)
 
     validate_work_item(a, project, row, policy)
     wi = row.get("work_item")
@@ -1000,6 +1034,41 @@ def control_status(a, project, identifier, control, revision_id):
         )
 
 
+def _check_control_entry(a, project, identifier, control, row, policy, summary):
+    if not isinstance(control, dict) or not text(control.get("owner")) or not isinstance(control.get("status"), str):
+        a.add(
+            "CONTROL_INVALID",
+            f"Control {identifier}: object, owner and status required",
+            project,
+            True,
+            control_id=identifier,
+            control_status="invalid",
+        )
+        return
+    if "evidence" in control and (
+        not isinstance(control["evidence"], list) or any(not text(v) for v in control["evidence"])
+    ):
+        a.add(
+            "CONTROL_INVALID",
+            f"Control {identifier}: evidence must be a list of references",
+            project,
+            True,
+            control_id=identifier,
+            control_status="invalid",
+        )
+    a.fresh(
+        control.get("observed_at"),
+        policy["max_snapshot_age_minutes"],
+        "CONTROL_STALE",
+        f"Control {identifier}: observation",
+        project,
+        control_id=identifier,
+        control_status="stale",
+    )
+    control_status(a, project, identifier, control, row.get("revision"))
+    summary.append({"id": identifier, "status": control["status"]})
+
+
 def control_checks(a, project, row, policy):
     required = policy["required_controls"]
     if not required:
@@ -1027,43 +1096,7 @@ def control_checks(a, project, row, policy):
                 control_status="missing",
             )
             continue
-        control = controls[identifier]
-        if (
-            not isinstance(control, dict)
-            or not text(control.get("owner"))
-            or not isinstance(control.get("status"), str)
-        ):
-            a.add(
-                "CONTROL_INVALID",
-                f"Control {identifier}: object, owner and status required",
-                project,
-                True,
-                control_id=identifier,
-                control_status="invalid",
-            )
-            continue
-        if "evidence" in control and (
-            not isinstance(control["evidence"], list) or any(not text(v) for v in control["evidence"])
-        ):
-            a.add(
-                "CONTROL_INVALID",
-                f"Control {identifier}: evidence must be a list of references",
-                project,
-                True,
-                control_id=identifier,
-                control_status="invalid",
-            )
-        a.fresh(
-            control.get("observed_at"),
-            policy["max_snapshot_age_minutes"],
-            "CONTROL_STALE",
-            f"Control {identifier}: observation",
-            project,
-            control_id=identifier,
-            control_status="stale",
-        )
-        control_status(a, project, identifier, control, row.get("revision"))
-        summary.append({"id": identifier, "status": control["status"]})
+        _check_control_entry(a, project, identifier, controls[identifier], row, policy, summary)
     return summary
 
 
@@ -1139,6 +1172,31 @@ def legacy_project_entry(a, project, legacy_entry, source_pointer):
     return res
 
 
+def _process_single_expected_project(a, project, rows, malformed_container, doc, policy, workers, active_admissions):
+    if malformed_container:
+        a.add("PROJECT_INVALID", "Project row must be an object", project, schema=True)
+        return {"project": project, "coverage": "invalid"}
+    if project in rows:
+        row = rows[project]
+        if not isinstance(row, dict):
+            a.add("PROJECT_INVALID", "Project row must be an object", project, schema=True)
+            return {"project": project, "coverage": "invalid"}
+        res = project_row(a, project, row, policy)
+        worker_checks(a, project, row, policy, workers)
+        check_admission_uniqueness(a, project, row, active_admissions)
+        return res
+    legacy_entry, source_pointer = find_legacy_project(doc, project)
+    if source_pointer is not None:
+        return legacy_project_entry(a, project, legacy_entry, source_pointer)
+    a.add(
+        "PROJECT_MISSING",
+        f"Project {project} is absent from delivery_control and legacy initiatives",
+        project=project,
+        schema=True,
+    )
+    return {"project": project, "coverage": "absent"}
+
+
 def project_checks(a, contract, policy, doc=None):
     rows = contract.get("projects", {})
     malformed_container = "projects" in contract and not isinstance(contract.get("projects"), dict)
@@ -1148,31 +1206,10 @@ def project_checks(a, contract, policy, doc=None):
     workers, summary = [], []
     active_admissions = {}
     for project in policy["expected_projects"]:
-        if malformed_container:
-            a.add("PROJECT_INVALID", "Project row must be an object", project, schema=True)
-            summary.append({"project": project, "coverage": "invalid"})
-            continue
-        if project in rows:
-            row = rows[project]
-            if not isinstance(row, dict):
-                a.add("PROJECT_INVALID", "Project row must be an object", project, schema=True)
-                summary.append({"project": project, "coverage": "invalid"})
-                continue
-            summary.append(project_row(a, project, row, policy))
-            worker_checks(a, project, row, policy, workers)
-            check_admission_uniqueness(a, project, row, active_admissions)
-            continue
-        legacy_entry, source_pointer = find_legacy_project(doc, project)
-        if source_pointer is not None:
-            summary.append(legacy_project_entry(a, project, legacy_entry, source_pointer))
-            continue
-        summary.append({"project": project, "coverage": "absent"})
-        a.add(
-            "PROJECT_MISSING",
-            f"Project {project} is absent from delivery_control and legacy initiatives",
-            project=project,
-            schema=True,
+        item = _process_single_expected_project(
+            a, project, rows, malformed_container, doc, policy, workers, active_admissions
         )
+        summary.append(item)
     writer_conflicts(a, workers)
     return summary
 
@@ -1194,6 +1231,16 @@ def collection_records(a, doc, keys, kind):
     return records
 
 
+def _extract_completed_result(a, row, complete):
+    if row.get("status") not in ("completed", "done", "succeeded", "fulfilled"):
+        return
+    identity, rev = row.get("id", row.get("action_id")), revision(row)
+    if not text(identity) or (rev is not None and not text(rev)):
+        a.add("RESULT_ID_INVALID", "Result ID and optional revision must be strings", schema=True)
+    else:
+        complete.add((identity, rev))
+
+
 def completed_results(a, directory):
     path = directory / "local-action-results.json"
     if not path.exists():
@@ -1204,30 +1251,28 @@ def completed_results(a, directory):
         a.add("RESULT_SCHEMA_UNKNOWN", "Results file has no recognized results/items collection")
     complete = set()
     for row in collection_records(a, results, keys, "RESULT"):
-        if row.get("status") not in ("completed", "done", "succeeded", "fulfilled"):
-            continue
-        identity, rev = row.get("id", row.get("action_id")), revision(row)
-        if not text(identity) or (rev is not None and not text(rev)):
-            a.add("RESULT_ID_INVALID", "Result ID and optional revision must be strings", schema=True)
-        else:
-            complete.add((identity, rev))
+        _extract_completed_result(a, row, complete)
     return complete, "recognized" if keys else "unknown_schema"
+
+
+def _check_action_item(a, item, seen, conflicts):
+    action_id = item.get("id")
+    if not text(action_id):
+        a.add("ACTION_ID_MISSING", "Local action lacks stable ID", schema=True)
+        return
+    if revision(item) is not None and not text(revision(item)):
+        a.add("ACTION_REVISION_INVALID", "Local action revision must be a string", schema=True)
+        return
+    if action_id in seen and seen[action_id] != item:
+        a.add("ACTION_ID_CONFLICT", "Duplicate local-action ID has conflicting content")
+        conflicts.add(action_id)
+    seen[action_id] = item
 
 
 def deduplicate_actions(a, records):
     seen, conflicts = {}, set()
     for item in records:
-        action_id = item.get("id")
-        if not text(action_id):
-            a.add("ACTION_ID_MISSING", "Local action lacks stable ID", schema=True)
-            continue
-        if revision(item) is not None and not text(revision(item)):
-            a.add("ACTION_REVISION_INVALID", "Local action revision must be a string", schema=True)
-            continue
-        if action_id in seen and seen[action_id] != item:
-            a.add("ACTION_ID_CONFLICT", "Duplicate local-action ID has conflicting content")
-            conflicts.add(action_id)
-        seen[action_id] = item
+        _check_action_item(a, item, seen, conflicts)
     return {identity: item for identity, item in seen.items() if identity not in conflicts}
 
 
@@ -1270,18 +1315,7 @@ def validate_policy_model_lists(a, policy):
             policy[key] = []
 
 
-def load_policy(a, path):
-    policy, _ = a.read(Path(path))
-    defaults = {
-        "max_snapshot_age_minutes": 30,
-        "max_progress_age_minutes": 60,
-        "max_recheck_horizon_hours": 168,
-        "directives": [],
-        "required_controls": [],
-        "reviewer_models": None,
-        "banned_models": [],
-    }
-    policy = defaults | policy
+def _check_policy_lists(a, policy):
     for key in ("expected_projects", "required_review_roles"):
         if not evidence(policy.get(key)) or len(policy[key]) != len(set(policy[key])):
             a.add("POLICY_INVALID", f"{key} must contain unique nonempty strings", schema=True)
@@ -1294,6 +1328,9 @@ def load_policy(a, path):
         a.add("POLICY_INVALID", "required_controls must contain unique nonempty strings", schema=True)
         policy["required_controls"] = []
     validate_policy_model_lists(a, policy)
+
+
+def _check_policy_time_keys(a, policy, defaults):
     for key in ("max_snapshot_age_minutes", "max_progress_age_minutes"):
         if not isinstance(policy[key], int | float) or isinstance(policy[key], bool) or not 0 < policy[key] <= 1440:
             a.add("POLICY_INVALID", f"{key} must be positive and at most 1440", schema=True)
@@ -1302,6 +1339,22 @@ def load_policy(a, path):
     if not isinstance(horizon, int | float) or isinstance(horizon, bool) or horizon <= 0:
         a.add("POLICY_INVALID", "max_recheck_horizon_hours must be a positive number", schema=True)
         policy["max_recheck_horizon_hours"] = 168
+
+
+def load_policy(a, path):
+    policy, _ = a.read(Path(path))
+    defaults = {
+        "max_snapshot_age_minutes": 30,
+        "max_progress_age_minutes": 60,
+        "max_recheck_horizon_hours": 168,
+        "directives": [],
+        "required_controls": [],
+        "reviewer_models": None,
+        "banned_models": [],
+    }
+    policy = defaults | policy
+    _check_policy_lists(a, policy)
+    _check_policy_time_keys(a, policy, defaults)
     return policy
 
 
@@ -1365,8 +1418,7 @@ def map_token_positions(pattern, text, pos_attr="start"):
     return mapping
 
 
-def find_prompt_blocks(text: str) -> list[tuple[int, int]]:
-    starts = map_token_positions(DISPATCH_TOKEN_PATTERN, text, "start")
+def _find_closed_blocks(text, starts):
     closed_starts = set()
     blocks = []
     for m in DISPATCH_END_PATTERN.finditer(text):
@@ -1377,7 +1429,12 @@ def find_prompt_blocks(text: str) -> list[tuple[int, int]]:
             closed_start = preceding[-1]
             blocks.append((closed_start, m.end()))
             closed_starts.add((disp_id, closed_start))
+    return blocks, closed_starts
 
+
+def find_prompt_blocks(text: str) -> list[tuple[int, int]]:
+    starts = map_token_positions(DISPATCH_TOKEN_PATTERN, text, "start")
+    blocks, closed_starts = _find_closed_blocks(text, starts)
     disp_matches = list(DISPATCH_TOKEN_PATTERN.finditer(text))
     for i, m in enumerate(disp_matches):
         disp_id = m.group(1)
@@ -1528,6 +1585,19 @@ def project_recheck_deadline(blk):
     return None
 
 
+def _populate_blocker_fields(entry, blk, recheck, not_before, is_stale):
+    if blk.get("owner"):
+        entry["owner"] = blk["owner"]
+    if blk.get("reason"):
+        entry["reason"] = blk["reason"]
+    if recheck:
+        entry["recheck_at"] = recheck
+    if not_before:
+        entry["not_before"] = not_before
+    if is_stale:
+        entry["stale"] = True
+
+
 def extract_project_blocker(proj, r, stale_projects):
     if not isinstance(r, dict):
         return None
@@ -1539,16 +1609,7 @@ def extract_project_blocker(proj, r, stale_projects):
     if not (recheck or not_before or is_stale):
         return None
     entry = {"project": proj, "stage": r.get("stage")}
-    if blk.get("owner"):
-        entry["owner"] = blk["owner"]
-    if blk.get("reason"):
-        entry["reason"] = blk["reason"]
-    if recheck:
-        entry["recheck_at"] = recheck
-    if not_before:
-        entry["not_before"] = not_before
-    if is_stale:
-        entry["stale"] = True
+    _populate_blocker_fields(entry, blk, recheck, not_before, is_stale)
     return entry
 
 
@@ -1669,11 +1730,19 @@ def build_compact_projection(projects, a, contract, defer_input, status=None, ex
     return bound_value(compact, max_str_len=240, max_list_len=50)
 
 
+def _count_coverage(projects, status):
+    return sum(1 for p in projects if p.get("coverage") == status)
+
+
+def _count_severity(diagnostics, severity):
+    return sum(1 for d in diagnostics if d.get("severity") == severity)
+
+
 def build_audit_summary(projects, a):
-    norm = sum(1 for p in projects if p.get("coverage") == "normalized")
-    leg = sum(1 for p in projects if p.get("coverage") == "legacy_unverified")
-    absent = sum(1 for p in projects if p.get("coverage") == "absent")
-    inv = sum(1 for p in projects if p.get("coverage") == "invalid")
+    norm = _count_coverage(projects, "normalized")
+    leg = _count_coverage(projects, "legacy_unverified")
+    absent = _count_coverage(projects, "absent")
+    inv = _count_coverage(projects, "invalid")
     cov = {
         "normalized": norm,
         "legacy_unverified": leg,
@@ -1687,8 +1756,8 @@ def build_audit_summary(projects, a):
         "invalid": inv,
         "coverage_counts": cov,
         "diagnostic_counts": {
-            "schema_error": sum(1 for d in a.diagnostics if d.get("severity") == "schema_error"),
-            "attention": sum(1 for d in a.diagnostics if d.get("severity") == "attention"),
+            "schema_error": _count_severity(a.diagnostics, "schema_error"),
+            "attention": _count_severity(a.diagnostics, "attention"),
         },
     }
 
