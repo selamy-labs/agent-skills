@@ -12,10 +12,7 @@ from typing import Any
 from admission import verify_mandatory_gates
 from providers import (
     ALLOWED_MERGE_IDENTITIES,
-    fetch_ci_checks_from_provider,
-    fetch_commit_check_runs_from_provider,
-    fetch_pr_base_branch,
-    has_app_pinned_checks,
+    evaluate_pr_ci,
     is_hex_40,
     is_hex_64,
     iso_timestamp,
@@ -23,9 +20,7 @@ from providers import (
     reconcile_and_merge_pr,
     reconcile_and_publish_pr,
     reconcile_and_push,
-    resolve_required_checks,
     sha256_file,
-    verify_live_status_rollup,
 )
 from receipts import check_qualification, validate_review_receipt
 
@@ -319,45 +314,6 @@ def _guard_pre_transition(
     return True, ""
 
 
-def _guard_live_provider_ci(
-    pr_ref: str,
-    commit_sha: str,
-    command_runner: Callable[..., Any] | None,
-    wt_path: Path,
-    repo: str = "",
-    base_branch: str = "main",
-    control_dir: Path | str | None = None,
-    required_checks: list[Any] | None = None,
-) -> tuple[bool, str]:
-    if not pr_ref:
-        return False, "CI_CHECK_FAILED"
-    req_checks = required_checks
-    if req_checks is None:
-        req_checks = resolve_required_checks(
-            repo,
-            base_branch=base_branch,
-            runner=command_runner,
-            cwd=wt_path,
-            control_dir=control_dir,
-        )
-    if not req_checks:
-        return False, "CI_CHECK_MISSING"
-    live_checks = fetch_ci_checks_from_provider(repo, pr_ref, commit_sha, runner=command_runner, cwd=wt_path)
-    if live_checks is None:
-        return False, "MISSING_EXACT_HEAD_CI"
-    if not live_checks:
-        return False, "CI_CHECK_MISSING"
-    check_runs = None
-    if has_app_pinned_checks(req_checks):
-        check_runs = fetch_commit_check_runs_from_provider(repo, commit_sha, runner=command_runner, cwd=wt_path)
-        if check_runs is None:
-            return False, "MISSING_EXACT_HEAD_CI"
-    v_ok, v_err = verify_live_status_rollup(live_checks, commit_sha, required_checks=req_checks, check_runs=check_runs)
-    if not v_ok:
-        return False, v_err
-    return True, ""
-
-
 def _dispatch_action(
     action: str,
     wt_path: Path,
@@ -372,7 +328,6 @@ def _dispatch_action(
     command_runner: Callable[..., Any] | None,
     merge_identity: str = "selamy-labs-bot",
     remote: str = "origin",
-    required_checks: list[Any] | None = None,
     repo: str = "",
     control_dir: Path | str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
@@ -389,7 +344,6 @@ def _dispatch_action(
             commit_sha,
             merge_identity=merge_identity,
             runner=command_runner,
-            required_checks=required_checks,
             repo=repo,
             expected_base_branch=base_branch,
             control_dir=control_dir,
@@ -465,33 +419,6 @@ def _validate_transition_args(
     return None
 
 
-def _validate_pr_base_and_checks(
-    repo: str,
-    pr_ref: str,
-    expected_base_branch: str,
-    command_runner: Callable[..., Any] | None,
-    wt_path: Path,
-    control_dir: Path | str | None,
-) -> tuple[str | None, list[Any] | None, str | None]:
-    if not pr_ref:
-        return None, None, "CI_CHECK_FAILED"
-    pr_base = fetch_pr_base_branch(repo, pr_ref, runner=command_runner, cwd=wt_path)
-    if not pr_base:
-        return None, None, "PR_VIEW_FAILED"
-    if pr_base != expected_base_branch:
-        return None, None, "BASE_BRANCH_MISMATCH"
-    req_checks = resolve_required_checks(
-        repo,
-        base_branch=pr_base,
-        runner=command_runner,
-        cwd=wt_path,
-        control_dir=control_dir,
-    )
-    if not req_checks:
-        return None, None, "CI_CHECK_MISSING"
-    return pr_base, req_checks, None
-
-
 def _guard_action_ci(
     action: str,
     commit_sha: str,
@@ -502,37 +429,23 @@ def _guard_action_ci(
     repo: str = "",
     expected_base_branch: str = "main",
     control_dir: Path | str | None = None,
-) -> tuple[bool, dict[str, Any] | None, list[Any] | None]:
+) -> tuple[bool, dict[str, Any] | None]:
     if action not in {"complete_spec_task", "merge_pr"}:
-        return True, None, None
-
-    pr_base, req_checks, err_code = _validate_pr_base_and_checks(
-        repo, pr_ref, expected_base_branch, command_runner, wt_path, control_dir
-    )
-    if err_code:
-        return False, {"status": "refused", "reason_code": err_code, "observed_at": iso_now}, None
-
-    ci_ok, ci_code = _guard_live_provider_ci(
+        return True, None
+    if not pr_ref:
+        return False, {"status": "refused", "reason_code": "CI_CHECK_FAILED", "observed_at": iso_now}
+    ci_ok, ci_code, _ = evaluate_pr_ci(
+        wt_path,
         pr_ref,
         commit_sha,
-        command_runner,
-        wt_path,
-        repo=repo,
-        base_branch=pr_base or "",
+        runner=command_runner,
+        expected_base_branch=expected_base_branch,
         control_dir=control_dir,
-        required_checks=req_checks,
+        repo=repo,
     )
     if not ci_ok:
-        return (
-            False,
-            {
-                "status": "refused",
-                "reason_code": ci_code,
-                "observed_at": iso_now,
-            },
-            None,
-        )
-    return True, None, req_checks
+        return False, {"status": "refused", "reason_code": ci_code, "observed_at": iso_now}
+    return True, None
 
 
 def _write_transition_receipt(
@@ -627,7 +540,6 @@ def _dispatch_and_record_transition(
     remote: str,
     status_file: Path,
     iso_now: str,
-    required_checks: list[str] | None = None,
     repo: str = "",
 ) -> dict[str, Any]:
     target_branch, base_branch, title, body = params
@@ -646,7 +558,6 @@ def _dispatch_and_record_transition(
         command_runner,
         merge_identity=merge_identity,
         remote=remote,
-        required_checks=required_checks,
         repo=repo,
         control_dir=status_file.parent,
     )
@@ -706,7 +617,7 @@ def execute_transition(
     pr_ref = str(pr_val if pr_val is not None else (target_branch or "")).strip()
     repo = str(wi.get("repo") or "").strip()
 
-    _, ci_ref, req_checks = _guard_action_ci(
+    _, ci_ref = _guard_action_ci(
         action,
         commit_sha,
         command_runner,
@@ -735,6 +646,5 @@ def execute_transition(
         remote,
         status_file,
         iso_now,
-        required_checks=req_checks,
         repo=repo,
     )

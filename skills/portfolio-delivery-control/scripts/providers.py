@@ -245,653 +245,16 @@ def verify_provider_bot_actor(
     return True, ""
 
 
-def stamp_rollup_head_sha(rollup: Any, commit_sha: str) -> None:
-    if not isinstance(rollup, list) or not is_hex_40(commit_sha):
-        return
-    for item in rollup:
-        if isinstance(item, dict):
-            c_sha = (
-                item.get("head_sha")
-                or item.get("commit_sha")
-                or item.get("sha")
-                or item.get("headSha")
-                or item.get("revision")
-            )
-            if not c_sha:
-                item["head_sha"] = commit_sha
-
-
-def _parse_pr_view_rollup(out: str, cand_sha: str) -> list[dict[str, Any]] | None:
-    try:
-        info = json.loads(out)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(info, dict) or info.get("headRefOid") != cand_sha:
-        return None
-    rollup = info.get("statusCheckRollup")
-    if not isinstance(rollup, list):
-        return None
-    checks = [dict(item) for item in rollup if isinstance(item, dict)]
-    stamp_rollup_head_sha(checks, cand_sha)
-    return checks
-
-
-def fetch_ci_checks_from_provider(
-    repo: str | Path | None,
-    pr_ref: str,
-    cand_sha: str,
+def get_commit_modified_paths(
+    worktree: Path,
+    commit_sha: str,
     runner: Callable[..., Any] | None = None,
-    cwd: Path | str | None = None,
-) -> list[dict[str, Any]] | None:
-    repo_name = str(repo).strip() if isinstance(repo, str) else ""
-    worktree = Path(cwd or (repo if isinstance(repo, Path) else "."))
-    cmd = ["gh", "pr", "view", pr_ref]
-    if repo_name:
-        cmd.extend(["--repo", repo_name])
-    cmd.extend(["--json", "statusCheckRollup,headRefOid"])
+) -> list[str]:
+    cmd = ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit_sha]
     code, out = _run_cmd(cmd, worktree, runner)
     if code != 0 or not out.strip():
-        return None
-    return _parse_pr_view_rollup(out, cand_sha)
-
-
-def fetch_pr_base_branch(
-    repo: str | Path | None,
-    pr_ref: str,
-    runner: Callable[..., Any] | None = None,
-    cwd: Path | str | None = None,
-) -> str | None:
-    repo_name = str(repo).strip() if isinstance(repo, str) else ""
-    worktree = Path(cwd or (repo if isinstance(repo, Path) else "."))
-    cmd = ["gh", "pr", "view", pr_ref]
-    if repo_name:
-        cmd.extend(["--repo", repo_name])
-    cmd.extend(["--json", "baseRefName"])
-    code, out = _run_cmd(cmd, worktree, runner)
-    if code != 0 or not out.strip():
-        return None
-    try:
-        data = json.loads(out)
-        if isinstance(data, dict):
-            val = str(data.get("baseRefName") or "").strip()
-            return val or None
-    except json.JSONDecodeError:
-        pass
-    return None
-
-
-def _extract_runs_from_dict(data: dict[str, Any]) -> list[dict[str, Any]] | None:
-    runs = data.get("check_runs")
-    if isinstance(runs, list):
-        return [dict(r) for r in runs if isinstance(r, dict)]
-    return None
-
-
-def _extract_runs_from_list(data: list[Any]) -> list[dict[str, Any]] | None:
-    if not data:
-        return None
-    res: list[dict[str, Any]] = []
-    for page in data:
-        if not isinstance(page, dict):
-            return None
-        page_runs = _extract_runs_from_dict(page)
-        if page_runs is None:
-            return None
-        res.extend(page_runs)
-    return res
-
-
-def _skip_leading_whitespace(s: str, pos: int) -> int:
-    while pos < len(s) and s[pos].isspace():
-        pos += 1
-    return pos
-
-
-def _decode_concatenated_json(out_str: str) -> list[Any] | None:
-    decoder = json.JSONDecoder()
-    pos = 0
-    res: list[Any] = []
-    while True:
-        pos = _skip_leading_whitespace(out_str, pos)
-        if pos >= len(out_str):
-            break
-        try:
-            val, idx = decoder.raw_decode(out_str[pos:])
-            pos += idx
-        except Exception:
-            return None
-        res.append(val)
-    return res if res else None
-
-
-def _extract_runs_from_page(page: Any) -> list[dict[str, Any]] | None:
-    if isinstance(page, dict):
-        return _extract_runs_from_dict(page)
-    if isinstance(page, list):
-        return _extract_runs_from_list(page)
-    return None
-
-
-def _parse_paginated_check_runs_data(out: str) -> list[dict[str, Any]] | None:
-    out_str = out.strip()
-    if not out_str:
-        return None
-    pages = _decode_concatenated_json(out_str)
-    if pages is None:
-        return None
-    runs: list[dict[str, Any]] = []
-    for page in pages:
-        page_runs = _extract_runs_from_page(page)
-        if page_runs is None:
-            return None
-        runs.extend(page_runs)
-    return runs
-
-
-def _extract_dict_status_items(page: dict[str, Any]) -> list[dict[str, Any]] | None:
-    if "statuses" in page and isinstance(page["statuses"], list):
-        for item in page["statuses"]:
-            if not isinstance(item, dict):
-                return None
-        return [dict(x) for x in page["statuses"]]
-    if "state" in page:
-        return [page]
-    return []
-
-
-def _flatten_single_status_page(page: Any) -> list[dict[str, Any]] | None:
-    if isinstance(page, list):
-        for item in page:
-            if not isinstance(item, dict):
-                return None
-        return [dict(x) for x in page]
-    if isinstance(page, dict):
-        return _extract_dict_status_items(page)
-    return None
-
-
-def _flatten_status_pages(pages: list[Any]) -> list[dict[str, Any]] | None:
-    result: list[dict[str, Any]] = []
-    for page in pages:
-        items = _flatten_single_status_page(page)
-        if items is None:
-            return None
-        result.extend(items)
-    return result
-
-
-def _filter_latest_statuses_per_context(statuses: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    latest: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for st in statuses:
-        ctx = str(st.get("context") or st.get("name") or "").strip()
-        if ctx and ctx not in seen:
-            seen.add(ctx)
-            latest.append(st)
-    return latest
-
-
-def _parse_statuses_data(out: str) -> list[dict[str, Any]] | None:
-    out_str = out.strip()
-    if not out_str:
         return []
-    pages = _decode_concatenated_json(out_str)
-    if pages is None:
-        return None
-    flat = _flatten_status_pages(pages)
-    if flat is None:
-        return None
-    return _filter_latest_statuses_per_context(flat)
-
-
-def _normalize_commit_status_state(state_raw: str) -> tuple[str, str, str]:
-    if state_raw == "success":
-        return "SUCCESS", "COMPLETED", "SUCCESS"
-    if state_raw == "pending":
-        return "PENDING", "IN_PROGRESS", "PENDING"
-    if state_raw in {"failure", "error"}:
-        return "FAILURE", "COMPLETED", "FAILURE"
-    return state_raw.upper(), "COMPLETED", state_raw.upper()
-
-
-def _normalize_commit_status_item(item: dict[str, Any], cand_sha: str) -> dict[str, Any] | None:
-    if "state" not in item:
-        return None
-    ctx = str(item.get("context") or item.get("name") or "").strip()
-    if not ctx:
-        return None
-    concl, status, state = _normalize_commit_status_state(str(item.get("state") or "").lower())
-    app_val = item.get("app") or item.get("app_id") or item.get("integration_id")
-    return {
-        "name": ctx,
-        "context": ctx,
-        "status": status,
-        "conclusion": concl,
-        "state": state,
-        "head_sha": cand_sha,
-        "app": app_val,
-    }
-
-
-def _fetch_endpoint_output(
-    endpoint: str,
-    worktree: Path,
-    runner: Callable[..., Any] | None,
-) -> tuple[int, str]:
-    return _run_cmd(["gh", "api", "--paginate", endpoint], worktree, runner)
-
-
-def _append_statuses_if_available(
-    repo_name: str,
-    cand_sha: str,
-    worktree: Path,
-    runner: Callable[..., Any] | None,
-    runs: list[dict[str, Any]],
-) -> bool:
-    st_ep = (
-        f"repos/{repo_name}/commits/{cand_sha}/statuses"
-        if repo_name
-        else f"repos/{{owner}}/{{repo}}/commits/{cand_sha}/statuses"
-    )
-    s_code, s_out = _fetch_endpoint_output(st_ep, worktree, runner)
-    if s_code != 0:
-        return False
-    if s_out.strip():
-        statuses = _parse_statuses_data(s_out)
-        if statuses is None:
-            return False
-        for st in statuses:
-            norm = _normalize_commit_status_item(st, cand_sha)
-            if norm is not None:
-                runs.append(norm)
-    return True
-
-
-def fetch_commit_check_runs_from_provider(
-    repo: str | Path | None,
-    cand_sha: str,
-    runner: Callable[..., Any] | None = None,
-    cwd: Path | str | None = None,
-) -> list[dict[str, Any]] | None:
-    worktree = Path(cwd or (repo if isinstance(repo, Path) else "."))
-    repo_name = str(repo).strip() if isinstance(repo, str) else ""
-    cr_ep = (
-        f"repos/{repo_name}/commits/{cand_sha}/check-runs"
-        if repo_name
-        else f"repos/{{owner}}/{{repo}}/commits/{cand_sha}/check-runs"
-    )
-    code, out = _fetch_endpoint_output(cr_ep, worktree, runner)
-    if code != 0 or not out.strip():
-        return None
-
-    runs = _parse_paginated_check_runs_data(out)
-    if runs is None:
-        return None
-
-    if not _append_statuses_if_available(repo_name, cand_sha, worktree, runner, runs):
-        return None
-
-    stamp_rollup_head_sha(runs, cand_sha)
-    return runs
-
-
-def has_app_pinned_checks(required_checks: list[Any] | None) -> bool:
-    if not required_checks:
-        return False
-    for req in required_checks:
-        norm = _normalize_req_check(req)
-        if norm.get("app_id") is not None:
-            return True
-    return False
-
-
-def _normalize_req_check(req: Any) -> dict[str, Any]:
-    if isinstance(req, str):
-        return {"context": req.strip(), "app_id": None}
-    if isinstance(req, dict):
-        ctx = str(req.get("context") or req.get("name") or "").strip()
-        app_id = req.get("app_id") or req.get("integration_id")
-        return {"context": ctx, "app_id": app_id}
-    return {"context": str(req).strip(), "app_id": None}
-
-
-def _normalize_descriptor_app_id(app_id: Any) -> Any:
-    if app_id is None:
-        return None
-    try:
-        return int(app_id)
-    except (ValueError, TypeError):
-        return str(app_id).strip()
-
-
-def _group_descriptors_by_context(items: list[dict[str, Any]]) -> dict[str, list[Any]]:
-    by_ctx: dict[str, list[Any]] = {}
-    for item in items:
-        ctx = str(item.get("context") or "").strip()
-        if ctx:
-            app_id = _normalize_descriptor_app_id(item.get("app_id"))
-            by_ctx.setdefault(ctx, []).append(app_id)
-    return by_ctx
-
-
-def _build_context_descriptors(ctx: str, apps: list[Any]) -> list[dict[str, Any]]:
-    pinned = [a for a in apps if a is not None]
-    if not pinned:
-        return [{"context": ctx, "app_id": None}]
-    unique_apps = list(dict.fromkeys(pinned))
-    return [{"context": ctx, "app_id": a} for a in unique_apps]
-
-
-def _merge_check_descriptors(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_ctx = _group_descriptors_by_context(items)
-    result: list[dict[str, Any]] = []
-    for ctx, apps in by_ctx.items():
-        result.extend(_build_context_descriptors(ctx, apps))
-    return result
-
-
-def _parse_contexts(contexts: Any) -> list[dict[str, Any]]:
-    if not isinstance(contexts, list):
-        return []
-    return [{"context": c.strip(), "app_id": None} for c in contexts if isinstance(c, str) and c.strip()]
-
-
-def _parse_check_objects(checks_list: Any) -> list[dict[str, Any]]:
-    if not isinstance(checks_list, list):
-        return []
-    res: list[dict[str, Any]] = []
-    for c in checks_list:
-        if isinstance(c, dict):
-            ctx = str(c.get("context") or "").strip()
-            if ctx:
-                app_id = c.get("app_id") or c.get("integration_id")
-                res.append({"context": ctx, "app_id": app_id})
-    return res
-
-
-def _parse_dict_required_checks(data: dict[str, Any]) -> list[dict[str, Any]]:
-    combined = _parse_contexts(data.get("contexts")) + _parse_check_objects(data.get("checks"))
-    return _merge_check_descriptors(combined)
-
-
-def _extract_rule_check_item(rsc: Any) -> dict[str, Any] | None:
-    if isinstance(rsc, dict):
-        ctx = str(rsc.get("context") or "").strip()
-        if ctx:
-            app_id = rsc.get("integration_id") or rsc.get("app_id")
-            return {"context": ctx, "app_id": app_id}
-    return None
-
-
-def _extract_rule_contexts(rule: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
-    if rule.get("type") != "required_status_checks":
-        return True, []
-    params = rule.get("parameters")
-    if not isinstance(params, dict):
-        return False, []
-    rsc_list = params.get("required_status_checks")
-    if not isinstance(rsc_list, list):
-        return False, []
-    items: list[dict[str, Any]] = []
-    for rsc in rsc_list:
-        cand = _extract_rule_check_item(rsc)
-        if cand is None:
-            return False, []
-        items.append(cand)
-    return True, items
-
-
-def _extract_page_rules(page: Any) -> list[dict[str, Any]] | None:
-    if not isinstance(page, list):
-        return None
-    page_items: list[dict[str, Any]] = []
-    for rule in page:
-        if not isinstance(rule, dict):
-            return None
-        valid, items = _extract_rule_contexts(rule)
-        if not valid:
-            return None
-        page_items.extend(items)
-    return page_items
-
-
-def _parse_ruleset_pages(pages: list[Any]) -> list[dict[str, Any]] | None:
-    all_rules: list[dict[str, Any]] = []
-    for page in pages:
-        page_items = _extract_page_rules(page)
-        if page_items is None:
-            return None
-        all_rules.extend(page_items)
-    return _merge_check_descriptors(all_rules)
-
-
-def _extract_rule_contexts_permissive(rule: Any) -> list[dict[str, Any]]:
-    if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
-        return []
-    params = rule.get("parameters")
-    if not isinstance(params, dict):
-        return []
-    rsc_list = params.get("required_status_checks")
-    if not isinstance(rsc_list, list):
-        return []
-    items: list[dict[str, Any]] = []
-    for rsc in rsc_list:
-        cand = _extract_rule_check_item(rsc)
-        if cand is not None:
-            items.append(cand)
-    return items
-
-
-def _parse_ruleset_required_checks(data: list[Any]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for rule in data:
-        items.extend(_extract_rule_contexts_permissive(rule))
-    return _merge_check_descriptors(items)
-
-
-def parse_required_checks(data: Any) -> list[dict[str, Any]]:
-    if isinstance(data, dict):
-        return _parse_dict_required_checks(data)
-    if isinstance(data, list):
-        return _parse_ruleset_required_checks(data)
-    return []
-
-
-def _is_branch_protection_absence(code: int, out: str) -> bool:
-    if code == 0:
-        return False
-    lower = out.lower()
-    return "branch not protected" in lower or "required status checks not enabled" in lower
-
-
-def _validate_protection_contexts_and_checks(data: dict[str, Any]) -> bool:
-    if "contexts" not in data and "checks" not in data:
-        return False
-    contexts = data.get("contexts")
-    if contexts is not None and (not isinstance(contexts, list) or any(not isinstance(c, str) for c in contexts)):
-        return False
-    checks = data.get("checks")
-    if checks is not None and (not isinstance(checks, list) or any(not isinstance(c, dict) for c in checks)):
-        return False
-    return True
-
-
-def _query_branch_protection_checks(
-    endpoint: str, worktree: Path, runner: Callable[..., Any] | None
-) -> list[dict[str, Any]] | None:
-    code, out = _run_cmd(["gh", "api", endpoint], worktree, runner)
-    if code != 0:
-        if _is_branch_protection_absence(code, out):
-            return []
-        return None
-    out_str = out.strip()
-    if not out_str:
-        return None
-    try:
-        data = json.loads(out_str)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    if not _validate_protection_contexts_and_checks(data):
-        if "message" in data and _is_branch_protection_absence(1, str(data["message"])):
-            return []
-        return None
-    return _parse_dict_required_checks(data)
-
-
-def _is_ruleset_absence(code: int, out: str) -> bool:
-    if code == 0:
-        return False
-    lower = out.lower()
-    return "no rules found" in lower or "no rulesets found" in lower
-
-
-def _query_ruleset_checks(
-    endpoint: str, worktree: Path, runner: Callable[..., Any] | None
-) -> list[dict[str, Any]] | None:
-    code, out = _fetch_endpoint_output(endpoint, worktree, runner)
-    if code != 0:
-        if _is_ruleset_absence(code, out):
-            return []
-        return None
-    out_str = out.strip()
-    if not out_str:
-        return None
-    pages = _decode_concatenated_json(out_str)
-    if pages is None:
-        return None
-    return _parse_ruleset_pages(pages)
-
-
-def fetch_required_checks_from_provider(
-    repo: str | Path | None,
-    base_branch: str = "main",
-    runner: Callable[..., Any] | None = None,
-    cwd: Path | str | None = None,
-) -> list[dict[str, Any]] | None:
-    worktree = Path(cwd if cwd else ".")
-    repo_name = str(repo).strip() if repo else ""
-    bp_endpoint = (
-        f"repos/{repo_name}/branches/{base_branch}/protection/required_status_checks"
-        if repo_name
-        else f"repos/{{owner}}/{{repo}}/branches/{base_branch}/protection/required_status_checks"
-    )
-    rules_endpoint = (
-        f"repos/{repo_name}/rules/branches/{base_branch}"
-        if repo_name
-        else f"repos/{{owner}}/{{repo}}/rules/branches/{base_branch}"
-    )
-    bp_res = _query_branch_protection_checks(bp_endpoint, worktree, runner)
-    rules_res = _query_ruleset_checks(rules_endpoint, worktree, runner)
-
-    if bp_res is None or rules_res is None:
-        return None
-
-    combined: list[dict[str, Any]] = []
-    combined.extend(bp_res)
-    combined.extend(rules_res)
-    if not combined:
-        return None
-    return _merge_check_descriptors(combined)
-
-
-def _clean_string_list(items: list[Any]) -> list[str]:
-    res = []
-    for x in items:
-        s = str(x).strip()
-        if s:
-            res.append(s)
-    return res
-
-
-def _extract_repo_required_checks(req_checks: Any, repo: str) -> list[str] | None:
-    if isinstance(req_checks, list):
-        return _clean_string_list(req_checks)
-    if not isinstance(req_checks, dict):
-        return None
-    clean = repo.strip()
-    base = clean.split("/")[-1]
-    for cand in (clean, base, base.replace("-", "_")):
-        val = req_checks.get(cand)
-        if isinstance(val, list):
-            return _clean_string_list(val)
-    return None
-
-
-def _read_policy_dict(p: Path) -> dict[str, Any] | None:
-    if not p.is_file():
-        return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _match_repo_in_authoritative(repo: str, auth: Any) -> bool:
-    clean = repo.strip()
-    base = clean.split("/")[-1]
-    candidates = (clean, base, base.replace("-", "_"))
-    if isinstance(auth, list):
-        return any(c in auth for c in candidates)
-    if isinstance(auth, dict):
-        return any(auth.get(c) is True for c in candidates)
-    return False
-
-
-def is_policy_authoritative(
-    repo: str,
-    control_dir: Path | str | None = None,
-) -> bool:
-    if not control_dir:
-        return False
-    p = Path(control_dir) / "delivery-policy.json"
-    doc = _read_policy_dict(p)
-    if not doc:
-        return False
-    auth = doc.get("authoritative") or doc.get("authoritative_policy") or doc.get("authoritative_repositories")
-    if auth is True:
-        return True
-    return _match_repo_in_authoritative(repo, auth)
-
-
-def load_policy_required_checks(
-    repo: str,
-    control_dir: Path | str | None = None,
-) -> list[dict[str, Any]] | None:
-    if not control_dir:
-        return None
-    p = Path(control_dir) / "delivery-policy.json"
-    doc = _read_policy_dict(p)
-    if doc and "required_checks" in doc:
-        raw = _extract_repo_required_checks(doc["required_checks"], repo)
-        if raw is not None:
-            return [_normalize_req_check(x) for x in raw]
-    return None
-
-
-def resolve_required_checks(
-    repo: str | None,
-    base_branch: str = "main",
-    runner: Callable[..., Any] | None = None,
-    cwd: Path | str | None = None,
-    control_dir: Path | str | None = None,
-) -> list[dict[str, Any]] | None:
-    provider_checks = fetch_required_checks_from_provider(repo, base_branch, runner=runner, cwd=cwd)
-    policy_checks = load_policy_required_checks(str(repo or ""), control_dir=control_dir)
-
-    if provider_checks is None:
-        if is_policy_authoritative(str(repo or ""), control_dir=control_dir):
-            return policy_checks
-        return None
-
-    combined: list[dict[str, Any]] = []
-    if provider_checks:
-        combined.extend(provider_checks)
-    if policy_checks:
-        combined.extend(policy_checks)
-    return _merge_check_descriptors(combined)
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 def reconcile_and_push(
@@ -990,316 +353,320 @@ def reconcile_and_publish_pr(
     }
 
 
-def is_ci_check_passing(c: Any, cand_sha: str) -> bool:
-    if not isinstance(c, dict):
-        return False
-    c_sha = str(c.get("head_sha") or c.get("commit_sha") or c.get("sha") or "").strip()
-    if c_sha and c_sha != cand_sha:
-        return False
-    status = str(c.get("status") or "").upper()
-    concl = str(c.get("conclusion") or "").upper()
-    state = str(c.get("state") or "").upper()
-    if concl in {"FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "SKIPPED", "NEUTRAL"}:
-        return False
-    if state in {"FAILURE", "ERROR"}:
-        return False
-    return (status == "COMPLETED" and concl == "SUCCESS") or state == "SUCCESS"
-
-
-_is_ci_check_passing = is_ci_check_passing
-
-
-def get_commit_modified_paths(
-    worktree: Path,
-    commit_sha: str,
+def fetch_pr_base_branch(
+    repo: str,
+    pr_ref: str,
     runner: Callable[..., Any] | None = None,
-) -> list[str]:
-    cmd = ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit_sha]
-    code, out = _run_cmd(cmd, worktree, runner)
+    cwd: Path | str | None = None,
+) -> str | None:
+    cmd = ["gh", "pr", "view", str(pr_ref)]
+    if repo:
+        cmd.extend(["--repo", repo])
+    cmd.extend(["--json", "baseRefName"])
+    code, out = _run_cmd(cmd, cwd, runner)
     if code != 0 or not out.strip():
-        return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+        return None
+    try:
+        data = json.loads(out)
+        if isinstance(data, dict):
+            base = str(data.get("baseRefName") or "").strip()
+            return base if base else None
+    except json.JSONDecodeError:
+        pass
+    return None
 
 
-def _check_name_matches(item: dict[str, Any], req_name: str) -> bool:
-    name = str(item.get("name") or item.get("context") or "").strip()
-    return name == req_name
+def _clean_string_list(items: list[Any]) -> list[str]:
+    res = []
+    for x in items:
+        s = str(x).strip()
+        if s:
+            res.append(s)
+    return res
 
 
-def _check_app_matches(item: dict[str, Any], req_app_id: int | str | None) -> bool:
-    if req_app_id is None:
-        return True
-    app_val = item.get("app")
-    actual_id = None
-    if isinstance(app_val, dict):
-        actual_id = app_val.get("id")
-    elif app_val is not None:
-        actual_id = app_val
-    else:
-        actual_id = item.get("app_id") or item.get("integration_id")
+def _split_owner_repo(repo: str) -> tuple[str, str]:
+    clean = str(repo).strip()
+    if "/" in clean:
+        parts = clean.split("/", 1)
+        return parts[0].strip(), parts[1].strip()
+    return "", clean
 
-    if actual_id is None:
+
+def _find_exact_repo_match(req_checks: dict[str, Any], target_repo: str) -> list[str] | None:
+    if target_repo in req_checks and isinstance(req_checks[target_repo], list):
+        return _clean_string_list(req_checks[target_repo])
+    owner, repo_name = _split_owner_repo(target_repo)
+    if repo_name and repo_name in req_checks and isinstance(req_checks[repo_name], list):
+        return _clean_string_list(req_checks[repo_name])
+    return None
+
+
+def _extract_repo_required_checks(req_checks: Any, target_repo: str) -> list[str] | None:
+    if isinstance(req_checks, list):
+        return _clean_string_list(req_checks)
+    if isinstance(req_checks, dict):
+        match = _find_exact_repo_match(req_checks, target_repo)
+        if match is not None:
+            return match
+        _, repo_name = _split_owner_repo(target_repo)
+        dash_name = repo_name.replace("-", "_")
+        if dash_name in req_checks and isinstance(req_checks[dash_name], list):
+            return _clean_string_list(req_checks[dash_name])
+    return None
+
+
+def _read_policy_dict(policy_path: Path) -> dict[str, Any] | None:
+    if not policy_path.exists():
+        return None
+    try:
+        data = json.loads(policy_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _normalize_req_check(x: Any) -> dict[str, Any]:
+    if isinstance(x, dict):
+        ctx = str(x.get("context") or x.get("name") or "").strip()
+        return {"context": ctx, "app_id": None}
+    return {"context": str(x).strip(), "app_id": None}
+
+
+def load_policy_required_checks(
+    repo: str,
+    control_dir: Path | str | None = None,
+) -> list[dict[str, Any]] | None:
+    if not control_dir:
+        return None
+    p = Path(control_dir) / "delivery-policy.json"
+    doc = _read_policy_dict(p)
+    if doc and "required_checks" in doc:
+        raw = _extract_repo_required_checks(doc["required_checks"], repo)
+        if raw is not None:
+            return [_normalize_req_check(x) for x in raw]
+    return None
+
+
+def _match_repo_in_authoritative(repo: str, auth: Any) -> bool:
+    if not repo:
         return False
-    return str(actual_id).strip() == str(req_app_id).strip()
-
-
-def _item_matches_check(item: Any, req_name: str, req_app_id: int | str | None) -> bool:
-    if not isinstance(item, dict):
-        return False
-    return _check_name_matches(item, req_name) and _check_app_matches(item, req_app_id)
-
-
-def _check_app_pinned_match(
-    req_name: str,
-    req_app_id: Any,
-    check_runs: list[dict[str, Any]] | None,
-    commit_sha: str,
-) -> tuple[bool, str]:
-    if check_runs is None:
-        return False, "CI_CHECK_MISSING"
-    matched = False
-    for item in check_runs:
-        if _item_matches_check(item, req_name, req_app_id):
-            matched = True
-            if not _is_ci_check_passing(item, commit_sha):
-                return False, "CI_CHECK_FAILED"
-    if not matched:
-        return False, "CI_CHECK_MISSING"
-    return True, ""
-
-
-def _check_unpinned_match(
-    req_name: str,
-    rollup: list[dict[str, Any]],
-    commit_sha: str,
-) -> tuple[bool, str]:
-    matched = False
-    for item in rollup:
-        if _item_matches_check(item, req_name, None):
-            matched = True
-            if not _is_ci_check_passing(item, commit_sha):
-                return False, "CI_CHECK_FAILED"
-    if not matched:
-        return False, "CI_CHECK_MISSING"
-    return True, ""
-
-
-def _is_named_check_passing(
-    req: Any,
-    rollup: list[dict[str, Any]],
-    commit_sha: str,
-    check_runs: list[dict[str, Any]] | None = None,
-) -> tuple[bool, str]:
-    norm = _normalize_req_check(req)
-    req_name = norm["context"]
-    req_app_id = norm["app_id"]
-    if req_app_id is not None:
-        return _check_app_pinned_match(req_name, req_app_id, check_runs, commit_sha)
-    return _check_unpinned_match(req_name, rollup, commit_sha)
-
-
-def _verify_all_required_present(
-    rollup: list[dict[str, Any]],
-    commit_sha: str,
-    required_checks: list[Any],
-    check_runs: list[dict[str, Any]] | None = None,
-) -> tuple[bool, str]:
-    if not required_checks:
-        return False, "CI_CHECK_MISSING"
-    for req in required_checks:
-        ok, err = _is_named_check_passing(req, rollup, commit_sha, check_runs=check_runs)
-        if not ok:
-            return False, err
-    return True, ""
-
-
-def _is_item_failed(item: Any, commit_sha: str) -> bool:
-    if not isinstance(item, dict):
-        return True
-    c_sha = str(item.get("head_sha") or item.get("commit_sha") or item.get("sha") or "").strip()
-    if c_sha and c_sha != commit_sha:
-        return True
-    concl = str(item.get("conclusion") or "").upper()
-    state = str(item.get("state") or "").upper()
-    if concl in {"FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
-        return True
-    if state in {"FAILURE", "ERROR"}:
-        return True
+    owner, repo_name = _split_owner_repo(repo)
+    if isinstance(auth, list):
+        auth_repos = [str(x).strip() for x in auth if str(x).strip()]
+        if repo in auth_repos or repo_name in auth_repos:
+            return True
     return False
 
 
-def _verify_required_and_clean_rollup(
-    rollup: list[dict[str, Any]],
-    commit_sha: str,
-    required_checks: list[Any],
-    check_runs: list[dict[str, Any]] | None = None,
-) -> tuple[bool, str]:
-    ok, err = _verify_all_required_present(rollup, commit_sha, required_checks, check_runs=check_runs)
-    if not ok:
-        return False, err
-    for item in rollup:
-        if _is_item_failed(item, commit_sha):
-            return False, "CI_CHECK_FAILED"
-    if check_runs:
-        for item in check_runs:
-            if _is_item_failed(item, commit_sha):
-                return False, "CI_CHECK_FAILED"
-    return True, ""
+def is_policy_authoritative(
+    repo: str,
+    control_dir: Path | str | None = None,
+) -> bool:
+    if not control_dir:
+        return False
+    p = Path(control_dir) / "delivery-policy.json"
+    doc = _read_policy_dict(p)
+    if not doc:
+        return False
+    auth = doc.get("authoritative") or doc.get("authoritative_policy") or doc.get("authoritative_repositories")
+    if auth is True:
+        return True
+    return _match_repo_in_authoritative(repo, auth)
 
 
-def _verify_all_checks_passing(rollup: list[dict[str, Any]], commit_sha: str) -> tuple[bool, str]:
-    for item in rollup:
-        if not isinstance(item, dict) or not _is_ci_check_passing(item, commit_sha):
-            return False, "CI_CHECK_FAILED"
-    return True, ""
+# ==============================================================================
+# Provider PR CI Evaluation (Adopt-and-Delete: replaces bespoke derivation)
+# ==============================================================================
 
 
-def verify_live_status_rollup(
-    rollup: list[dict[str, Any]],
-    commit_sha: str,
-    required_checks: list[Any] | None = None,
-    check_runs: list[dict[str, Any]] | None = None,
-) -> tuple[bool, str]:
-    if not rollup:
-        return False, "MISSING_EXACT_HEAD_CI"
-    if required_checks is not None:
-        return _verify_required_and_clean_rollup(rollup, commit_sha, required_checks, check_runs=check_runs)
-    return _verify_all_checks_passing(rollup, commit_sha)
-
-
-def _post_merge_verify(
-    repo: str | Path | None,
-    pr_number: str | int,
-    cand_sha: str,
-    runner: Callable[..., Any] | None = None,
-    cwd: Path | str | None = None,
-) -> tuple[bool, str, dict[str, Any]]:
-    repo_name = str(repo).strip() if isinstance(repo, str) else ""
-    worktree = Path(cwd or (repo if isinstance(repo, Path) else "."))
-    cmd = ["gh", "pr", "view", str(pr_number)]
-    if repo_name:
-        cmd.extend(["--repo", repo_name])
-    cmd.extend(["--json", "state,mergedAt,mergeCommit,headRefOid"])
-    v_code, v_out = _run_cmd(cmd, worktree, runner)
-    if v_code != 0:
-        return False, "MERGE_NOT_COMPLETED", {"error": f"Failed to verify merge state: {v_out}"}
+def _parse_pr_view_payload(out: str) -> dict[str, Any] | None:
     try:
-        post_info = json.loads(v_out)
+        data = json.loads(out)
+        return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
-        post_info = {}
-    merged_post, post_oid = is_pr_already_merged(post_info)
-    if not merged_post:
-        return (
-            False,
-            "MERGE_NOT_COMPLETED",
-            {
-                "error": f"PR {pr_number} was queued or not merged",
-                "post_info": post_info,
-            },
-        )
-    post_head = str(post_info.get("headRefOid") or "").strip()
-    if not post_head or post_head != cand_sha:
-        return (
-            False,
-            "CANDIDATE_REVISION_MISMATCH",
-            {
-                "error": f"Post-merge PR headRefOid {post_head} != {cand_sha}",
-                "reason_code": "CANDIDATE_REVISION_MISMATCH",
-                "post_info": post_info,
-            },
-        )
-    return True, post_oid, post_info
+        return None
 
 
-def _verify_merge_pr_view(
-    worktree: Path,
-    pr_ref: str,
+def _parse_pr_checks_payload(out: str) -> list[dict[str, Any]] | None:
+    try:
+        data = json.loads(out)
+        if not isinstance(data, list):
+            return None
+        res: list[dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                return None
+            res.append(item)
+        return res
+    except json.JSONDecodeError:
+        return None
+
+
+def _verify_pr_view_head_and_state(
+    info: dict[str, Any],
     commit_sha: str,
-    runner: Callable[..., Any] | None = None,
-    repo: str = "",
     expected_base_branch: str = "",
-) -> tuple[bool, str, str, dict[str, Any]]:
-    cmd = ["gh", "pr", "view", pr_ref]
-    if repo:
-        cmd.extend(["--repo", repo])
-    cmd.extend(["--json", "state,mergeCommit,headRefOid,statusCheckRollup,mergedAt,baseRefName"])
-    code, out = _run_cmd(
-        cmd,
-        worktree,
-        runner,
-    )
-    if code != 0:
-        return False, "PR_VIEW_FAILED", out, {}
-    try:
-        info = json.loads(out)
-    except json.JSONDecodeError:
-        return False, "PR_VIEW_FAILED", "Failed to parse gh pr view output", {}
-    if not isinstance(info, dict):
-        return False, "PR_VIEW_FAILED", "Invalid PR view object", {}
-    head_ref = str(info.get("headRefOid") or "").strip()
-    if head_ref != commit_sha:
-        return False, "PR_HEAD_MISMATCH", f"PR head {head_ref} != {commit_sha}", {}
+    allow_merged: bool = True,
+) -> tuple[bool, str]:
+    state = str(info.get("state") or "").strip()
+    valid_states = {"OPEN", "MERGED"} if allow_merged else {"OPEN"}
+    if state not in valid_states:
+        return False, "PR_NOT_OPEN"
+    head = str(info.get("headRefOid") or "").strip()
+    if not head or head != commit_sha:
+        return False, "PR_HEAD_MISMATCH"
     if expected_base_branch:
         base_ref = str(info.get("baseRefName") or "").strip()
         if not base_ref or base_ref != expected_base_branch:
-            return False, "BASE_BRANCH_MISMATCH", f"PR baseRefName '{base_ref}' != '{expected_base_branch}'", {}
-    return True, "", "", info
+            return False, "BASE_BRANCH_MISMATCH"
+    return True, ""
 
 
-def _verify_merge_ci(
-    info: dict[str, Any],
-    commit_sha: str,
-    required_checks: list[Any] | None = None,
-    check_runs: list[dict[str, Any]] | None = None,
-) -> tuple[bool, str]:
-    stamp_rollup_head_sha(info.get("statusCheckRollup"), commit_sha)
-    rollup = info.get("statusCheckRollup")
-    if not isinstance(rollup, list):
-        return False, "MISSING_EXACT_HEAD_CI"
-    return verify_live_status_rollup(rollup, commit_sha, required_checks=required_checks, check_runs=check_runs)
-
-
-def _verify_merge_ci_with_app_checks(
-    info: dict[str, Any],
-    commit_sha: str,
-    repo: str,
+def _evaluate_provider_required_checks(
     worktree: Path,
-    runner: Callable[..., Any] | None,
-    resolved_checks: list[Any] | None,
-) -> tuple[bool, str]:
-    check_runs = None
-    if has_app_pinned_checks(resolved_checks):
-        check_runs = fetch_commit_check_runs_from_provider(repo, commit_sha, runner=runner, cwd=worktree)
-        if check_runs is None:
-            return False, "MISSING_EXACT_HEAD_CI"
-    return _verify_merge_ci(info, commit_sha, required_checks=resolved_checks, check_runs=check_runs)
-
-
-def _resolve_merge_required_checks(
-    repo: str,
     pr_ref: str,
-    expected_base_branch: str,
-    worktree: Path,
     runner: Callable[..., Any] | None,
-    required_checks: list[Any] | None,
+    repo: str = "",
+) -> tuple[bool, str, list[dict[str, Any]]]:
+    cmd = ["gh", "pr", "checks", str(pr_ref)]
+    if repo:
+        cmd.extend(["--repo", repo])
+    cmd.extend(["--required", "--json", "name,state,bucket,workflow"])
+    code, out = _run_cmd(cmd, worktree, runner)
+    if code != 0:
+        return False, "CI_CHECK_MISSING", []
+    checks = _parse_pr_checks_payload(out)
+    if checks is None or len(checks) == 0:
+        return False, "CI_CHECK_MISSING", []
+    for chk in checks:
+        bucket = str(chk.get("bucket") or "").strip().lower()
+        if bucket != "pass":
+            return False, "CI_CHECK_FAILED", []
+    return True, "", checks
+
+
+def _verify_policy_checks_passed(
+    policy_checks: list[dict[str, Any]],
+    checks_by_name: dict[str, str],
+) -> tuple[bool, str]:
+    for p in policy_checks:
+        req_name = str(p.get("context") or "").strip()
+        if not req_name or req_name not in checks_by_name:
+            return False, "CI_CHECK_MISSING"
+        if checks_by_name[req_name] != "pass":
+            return False, "CI_CHECK_FAILED"
+    return True, ""
+
+
+def _evaluate_additive_policy_checks(
+    worktree: Path,
+    pr_ref: str,
+    repo: str,
+    control_dir: Path | str | None,
+    runner: Callable[..., Any] | None,
+) -> tuple[bool, str]:
+    if not control_dir:
+        return True, ""
+    policy_checks = load_policy_required_checks(repo, control_dir=control_dir)
+    if not policy_checks:
+        return True, ""
+    cmd = ["gh", "pr", "checks", str(pr_ref)]
+    if repo:
+        cmd.extend(["--repo", repo])
+    cmd.extend(["--json", "name,bucket"])
+    code, out = _run_cmd(cmd, worktree, runner)
+    if code != 0:
+        return False, "CI_CHECK_MISSING"
+    all_checks = _parse_pr_checks_payload(out)
+    if all_checks is None:
+        return False, "CI_CHECK_MISSING"
+    checks_by_name = {str(c.get("name") or "").strip(): str(c.get("bucket") or "").strip().lower() for c in all_checks}
+    return _verify_policy_checks_passed(policy_checks, checks_by_name)
+
+
+def evaluate_pr_ci(
+    worktree: Path,
+    pr_ref: str,
+    commit_sha: str,
+    runner: Callable[..., Any] | None = None,
+    expected_base_branch: str = "",
     control_dir: Path | str | None = None,
-    info: dict[str, Any] | None = None,
-) -> tuple[bool, list[Any] | None]:
-    if required_checks is not None:
-        return True, required_checks
-    target_base = expected_base_branch
-    if not target_base and info:
-        target_base = str(info.get("baseRefName") or "").strip()
-    if not target_base:
-        target_base = fetch_pr_base_branch(repo, pr_ref, runner=runner, cwd=worktree) or ""
-    if not target_base:
-        return False, None
-    resolved = resolve_required_checks(
-        repo, base_branch=target_base, runner=runner, cwd=worktree, control_dir=control_dir
-    )
-    if not resolved:
-        return False, None
-    return True, resolved
+    repo: str = "",
+) -> tuple[bool, str, dict[str, Any]]:
+    # 1. Pre-check: gh pr view
+    cmd_view = ["gh", "pr", "view", str(pr_ref)]
+    if repo:
+        cmd_view.extend(["--repo", repo])
+    cmd_view.extend(["--json", "headRefOid,baseRefName,state"])
+    code1, out1 = _run_cmd(cmd_view, worktree, runner)
+    if code1 != 0:
+        return False, "PR_VIEW_FAILED", {}
+    info1 = _parse_pr_view_payload(out1)
+    if info1 is None:
+        return False, "PR_VIEW_FAILED", {}
+
+    pre_ok, pre_err = _verify_pr_view_head_and_state(info1, commit_sha, expected_base_branch)
+    if not pre_ok:
+        return False, pre_err, {}
+
+    # 2. Required checks: gh pr checks --required
+    req_ok, req_err, _ = _evaluate_provider_required_checks(worktree, pr_ref, runner, repo=repo)
+    if not req_ok:
+        return False, req_err, {}
+
+    # 3. Additive policy checks
+    pol_ok, pol_err = _evaluate_additive_policy_checks(worktree, pr_ref, repo, control_dir, runner)
+    if not pol_ok:
+        return False, pol_err, {}
+
+    # 4. Post-check: gh pr view
+    code2, out2 = _run_cmd(cmd_view, worktree, runner)
+    if code2 != 0:
+        return False, "PR_VIEW_FAILED", {}
+    info2 = _parse_pr_view_payload(out2)
+    if info2 is None:
+        return False, "PR_VIEW_FAILED", {}
+
+    post_head = str(info2.get("headRefOid") or "").strip()
+    if not post_head or post_head != commit_sha:
+        return False, "MISSING_EXACT_HEAD_CI", {}
+
+    return True, "", info2
+
+
+# ==============================================================================
+# PR Merge Operations
+# ==============================================================================
+
+
+def _post_merge_verify(
+    pr_ref: str,
+    commit_sha: str,
+    runner: Callable[..., Any] | None,
+    cwd: Path | str | None = None,
+    repo: str = "",
+) -> tuple[bool, str, dict[str, Any]]:
+    cmd = ["gh", "pr", "view", str(pr_ref)]
+    if repo:
+        cmd.extend(["--repo", repo])
+    cmd.extend(["--json", "state,mergedAt,mergeCommit,headRefOid"])
+    code, out = _run_cmd(cmd, cwd, runner)
+    if code != 0:
+        return False, "PR_VIEW_FAILED", {"error": "Failed to re-query merged PR view"}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return False, "PR_VIEW_FAILED", {"error": "Failed to decode post-merge PR JSON"}
+    if not isinstance(data, dict):
+        return False, "PR_VIEW_FAILED", {"error": "Post-merge view was not a dictionary"}
+    if data.get("state") != "MERGED":
+        return False, "MERGE_NOT_COMPLETED", {"error": "PR is not in MERGED state after merge execution"}
+    mc = data.get("mergeCommit")
+    m_oid = mc.get("oid", "") if isinstance(mc, dict) else ""
+    if data.get("headRefOid") != commit_sha:
+        return False, "CANDIDATE_REVISION_MISMATCH", {"error": "Post-merge candidate head mismatch"}
+    return True, m_oid, data
 
 
 def _execute_pr_merge(
@@ -1309,7 +676,7 @@ def _execute_pr_merge(
     runner: Callable[..., Any] | None,
     repo: str,
 ) -> tuple[bool, dict[str, Any]]:
-    merge_cmd = ["gh", "pr", "merge", pr_ref]
+    merge_cmd = ["gh", "pr", "merge", str(pr_ref)]
     if repo:
         merge_cmd.extend(["--repo", repo])
     merge_cmd.extend(["--squash", "--match-head-commit", commit_sha])
@@ -1317,7 +684,7 @@ def _execute_pr_merge(
     if m_code != 0:
         return False, {"error": merge_out, "reason_code": "MERGE_FAILED"}
 
-    post_ok, post_err_code, post_data = _post_merge_verify(repo or worktree, pr_ref, commit_sha, runner, cwd=worktree)
+    post_ok, post_err_code, post_data = _post_merge_verify(pr_ref, commit_sha, runner, cwd=worktree, repo=repo)
     if not post_ok:
         return False, {"error": post_data.get("error", "Merge was not completed"), "reason_code": post_err_code}
 
@@ -1331,13 +698,36 @@ def _execute_pr_merge(
     }
 
 
+def _check_merge_already_merged(
+    info: dict[str, Any],
+    commit_sha: str,
+    expected_base_branch: str = "",
+) -> tuple[bool, dict[str, Any] | None]:
+    merged, mc_oid = is_pr_already_merged(info)
+    if not merged:
+        return True, None
+    if expected_base_branch:
+        base_ref = str(info.get("baseRefName") or "").strip()
+        if not base_ref or base_ref != expected_base_branch:
+            return False, {"error": "Base branch mismatch", "reason_code": "BASE_BRANCH_MISMATCH"}
+    head_sha = str(info.get("headRefOid") or "").strip()
+    if head_sha == commit_sha:
+        return True, {
+            "reconciled_existing_effect": True,
+            "state": "MERGED",
+            "merge_commit": mc_oid,
+            "merge_commit_sha": mc_oid,
+            "merged_at": info.get("mergedAt"),
+        }
+    return False, {"error": "Head mismatch on merged PR", "reason_code": "PR_HEAD_MISMATCH"}
+
+
 def reconcile_and_merge_pr(
     worktree: Path,
     pr_ref: str,
     commit_sha: str,
     merge_identity: str = "selamy-labs-bot",
     runner: Callable[..., Any] | None = None,
-    required_checks: list[Any] | None = None,
     repo: str = "",
     expected_base_branch: str = "",
     control_dir: Path | str | None = None,
@@ -1346,42 +736,34 @@ def reconcile_and_merge_pr(
     if not id_ok:
         return False, {"error": "Provider authenticated user disallowed", "reason_code": id_err}
 
-    pr_ok, pr_reason, pr_err, info = _verify_merge_pr_view(
-        worktree, pr_ref, commit_sha, runner, repo=repo, expected_base_branch=expected_base_branch
-    )
-    if not pr_ok:
-        return False, {"error": pr_err, "reason_code": pr_reason}
+    cmd_view = ["gh", "pr", "view", str(pr_ref)]
+    if repo:
+        cmd_view.extend(["--repo", repo])
+    cmd_view.extend(["--json", "state,mergedAt,mergeCommit,headRefOid,baseRefName"])
+    code, out = _run_cmd(cmd_view, worktree, runner)
+    if code != 0:
+        return False, {"error": "PR view failed", "reason_code": "PR_VIEW_FAILED"}
+    info = _parse_pr_view_payload(out)
+    if info is None:
+        return False, {"error": "PR view failed", "reason_code": "PR_VIEW_FAILED"}
 
-    rollup = info.get("statusCheckRollup")
-    if not isinstance(rollup, list) or not rollup:
-        return False, {"error": "Missing exact head CI", "reason_code": "MISSING_EXACT_HEAD_CI"}
+    already_ok, already_res = _check_merge_already_merged(info, commit_sha, expected_base_branch)
+    if not already_ok:
+        return False, already_res or {}
+    if already_res is not None:
+        return True, already_res
 
-    res_ok, resolved_checks = _resolve_merge_required_checks(
-        repo,
-        pr_ref,
-        expected_base_branch,
+    ci_ok, ci_err, _ = evaluate_pr_ci(
         worktree,
-        runner,
-        required_checks,
+        pr_ref,
+        commit_sha,
+        runner=runner,
+        expected_base_branch=expected_base_branch,
         control_dir=control_dir,
-        info=info,
+        repo=repo,
     )
-    if not res_ok:
-        return False, {"error": "Required checks missing or could not be resolved", "reason_code": "CI_CHECK_MISSING"}
-
-    ci_ok, ci_err = _verify_merge_ci_with_app_checks(info, commit_sha, repo, worktree, runner, resolved_checks)
     if not ci_ok:
-        return False, {"error": "CI checks missing or failed", "reason_code": ci_err}
-
-    merged, mc_oid = is_pr_already_merged(info)
-    if merged:
-        return True, {
-            "reconciled_existing_effect": True,
-            "state": "MERGED",
-            "merge_commit": mc_oid,
-            "merge_commit_sha": mc_oid,
-            "merged_at": info.get("mergedAt"),
-        }
+        return False, {"error": "CI evaluation failed", "reason_code": ci_err}
 
     return _execute_pr_merge(worktree, pr_ref, commit_sha, runner, repo)
 
