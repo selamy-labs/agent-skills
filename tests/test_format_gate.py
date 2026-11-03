@@ -1082,6 +1082,52 @@ def _validate_verify_job(verify: dict[str, Any]) -> None:
     _validate_release_gate_step(gate_steps[0])
 
 
+def _validate_release_publish_step_0(s0: Any) -> None:
+    assert isinstance(s0, dict) and str(s0.get("uses", "")).startswith("actions/checkout@"), (
+        "release job step 0 must use actions/checkout"
+    )
+    _validate_checkout_step("release", s0)
+
+
+def _validate_release_publish_step_1(s1: Any) -> None:
+    assert isinstance(s1, dict) and str(s1.get("uses", "")).startswith("actions/setup-python@"), (
+        "release job step 1 must use actions/setup-python"
+    )
+    assert s1.get("with", {}).get("python-version") == "3.12", "setup-python must use python-version: 3.12"
+
+
+def _validate_release_publish_step_2(s2: Any) -> None:
+    assert isinstance(s2, dict), "release job step 2 must be mapping"
+    assert s2.get("name") == "Plan release" and s2.get("id") == "plan", "release job step 2 must be Plan release"
+    assert "scripts/semantic_release.py" in s2.get("run", ""), "release job step 2 must run semantic_release.py"
+
+
+def _validate_release_publish_step_3(s3: Any) -> None:
+    assert isinstance(s3, dict), "release job step 3 must be mapping"
+    assert s3.get("name") == "Create tag", "release job step 3 must be Create tag"
+    assert s3.get("if") == "steps.plan.outputs.release_needed == 'true'", "release job step 3 must check release_needed"
+    run_cmd = s3.get("run", "")
+    assert "git tag -a" in run_cmd and "git push origin" in run_cmd, "release job step 3 must tag and push"
+
+
+def _validate_release_publish_step_4(s4: Any) -> None:
+    expected_cmd = 'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md'
+    assert isinstance(s4, dict), "release job step 4 must be mapping"
+    assert s4.get("name") == "Create GitHub release", "release job step 4 must be Create GitHub release"
+    assert s4.get("if") == "steps.plan.outputs.release_needed == 'true'", "release job step 4 must check release_needed"
+    assert s4.get("run", "").strip() == expected_cmd, "release job step 4 must run canonical gh release create"
+    assert s4.get("env") == {"GH_TOKEN": "${{ github.token }}"}, "release job step 4 env must be exactly GH_TOKEN"
+
+
+def _validate_release_publish_steps(steps: list[Any]) -> None:
+    assert len(steps) == 5, f"expected 5 release steps, got {len(steps)}"
+    _validate_release_publish_step_0(steps[0])
+    _validate_release_publish_step_1(steps[1])
+    _validate_release_publish_step_2(steps[2])
+    _validate_release_publish_step_3(steps[3])
+    _validate_release_publish_step_4(steps[4])
+
+
 def _validate_release_job(release: dict[str, Any]) -> None:
     assert isinstance(release, dict), "'release' job must be a mapping"
     assert is_effective_job(release), "'release' job must not have if: false or continue-on-error: true"
@@ -1103,13 +1149,13 @@ def _validate_release_job(release: dict[str, Any]) -> None:
     assert "permissions" in release, "'release' job must declare permissions"
     perms = release["permissions"]
     assert isinstance(perms, dict), "'release' job must declare permissions mapping"
-    assert perms.get("contents") == "write", "'release' job must have contents: write permission"
+    assert perms == {"contents": "write"}, (
+        f"'release' job permissions must be exactly {{'contents': 'write'}}, got {perms!r}"
+    )
 
     steps = release.get("steps", [])
     assert isinstance(steps, list), "'release' job steps must be a list"
-    checkout_steps = [s for s in steps if isinstance(s, dict) and "checkout" in str(s.get("uses", ""))]
-    assert checkout_steps, "'release' job must contain a checkout step"
-    _validate_checkout_step("release", checkout_steps[0])
+    _validate_release_publish_steps(steps)
 
 
 def validate_release_workflow(doc: dict[str, Any]) -> None:
@@ -1117,6 +1163,10 @@ def validate_release_workflow(doc: dict[str, Any]) -> None:
     assert isinstance(doc, dict), "workflow must parse as a valid YAML mapping"
     validate_shell_configuration("release workflow", doc)
     validate_env_configuration("release workflow", doc, allowed_keys=frozenset())
+    wf_perms = doc.get("permissions")
+    assert wf_perms == {"contents": "read"}, (
+        f"release workflow permissions must be exactly {{'contents': 'read'}}, got {wf_perms!r}"
+    )
     raw_doc: dict[Any, Any] = doc
     triggers = raw_doc.get("on")
     if triggers is None:
@@ -2214,6 +2264,49 @@ class TestReleaseWorkflowNegativeMutants:
 
         with pytest.raises(AssertionError, match="coverage threshold"):
             validate_workflow_steps("release.yaml", doc)
+
+    def test_release_publish_extra_write_scopes_fail(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        for bad_scope in (
+            {"contents": "write", "actions": "write"},
+            {"contents": "write", "id-token": "write"},
+            {"contents": "write", "issues": "write"},
+            "write-all",
+        ):
+            doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+            doc["jobs"]["release"]["permissions"] = bad_scope
+            with pytest.raises(AssertionError, match="release.*permissions"):
+                validate_release_workflow(doc)
+            assert any("permissions" in e for e in cli_validate(doc))
+
+    def test_release_publish_extra_step_fails(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc["jobs"]["release"]["steps"].append({"name": "exfil", "run": "curl https://example.com"})
+        with pytest.raises(AssertionError, match="expected 5 release steps"):
+            validate_release_workflow(doc)
+        assert any("canonical steps" in e for e in cli_validate(doc))
+
+    def test_release_publish_modified_command_fails(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc["jobs"]["release"]["steps"][4]["run"] = "gh release create evil"
+        with pytest.raises(AssertionError, match="canonical gh release create"):
+            validate_release_workflow(doc)
+        assert any("canonical gh release create" in e for e in cli_validate(doc))
+
+    def test_release_top_level_permissions_mutant_fails(self) -> None:
+        from tools.validate_marketplace import validate_release_workflow as cli_validate
+
+        for bad_perm in ("write-all", {"contents": "write"}, {"contents": "read", "id-token": "write"}):
+            doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+            doc["permissions"] = bad_perm
+            with pytest.raises(AssertionError, match="release workflow permissions"):
+                validate_release_workflow(doc)
+            assert any("permissions" in e for e in cli_validate(doc))
 
     def test_execution_probe_failing_gate_command_exits_nonzero(self) -> None:
         """Execution probe test using bash -eo pipefail confirming failing gate command exits non-zero."""

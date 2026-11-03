@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -33,4 +34,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         except OSError:
             pass
     marker = REPO_ROOT / ".coverage_session_start"
-    marker.write_text(str(time.time()), encoding="utf-8")
+    session_id = getattr(session, "session_id", None) or f"{os.getpid()}-{int(time.time())}"
+    marker_data = {
+        "session_id": session_id,
+        "timestamp": time.time(),
+        "pytest_version": pytest.__version__,
+    }
+    marker.write_text(json.dumps(marker_data), encoding="utf-8")

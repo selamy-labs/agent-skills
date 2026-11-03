@@ -66,45 +66,46 @@ class RobustDictTransformer(DictTransformer):
         return f'"{s}"'
 
 
+TARGET_BLOCK_RULE = (
+    'block : identifier (identifier | STRING_LIT | string_with_interpolation)* new_line_or_comment? "{" body "}"'
+)
+TARGET_HEREDOC_RULE = "/<<(?P<heredoc>[a-zA-Z][a-zA-Z0-9._-]+)\\n?(?:.|\\n)*?\\n\\s*(?P=heredoc)\\n/"
+TARGET_HEREDOC_TRIM_RULE = "/<<-(?P<heredoc_trim>[a-zA-Z][a-zA-Z0-9._-]+)\\n?(?:.|\\n)*?\\n\\s*(?P=heredoc_trim)\\n/"
+TARGET_STRING_CHARS_RULE = 'STRING_CHARS : /(?:(?!\\${)([^"\\\\]|\\\\.|\\$\\$))+/'
+
+REPLACEMENT_BLOCK_RULE = (
+    'block : identifier (identifier | STRING_LIT | string_with_interpolation | new_line_or_comment)* "{" body "}"'
+)
+REPLACEMENT_HEREDOC_RULE = (
+    "/<<(?P<heredoc>[^\\s\\r\\n]+)\\r?\\n(?:(?:.|\\n)*?\\r?\\n)??[^\\S\\r\\n]*(?P=heredoc)[^\\S\\r\\n]*\\r?\\n/"
+)
+REPLACEMENT_HEREDOC_TRIM_RULE = (
+    "/<<-(?P<heredoc_trim>[^\\s\\r\\n]+)\\r?\\n"
+    "(?:(?:.|\\n)*?\\r?\\n)??[^\\S\\r\\n]*(?P=heredoc_trim)[^\\S\\r\\n]*\\r?\\n/"
+)
+REPLACEMENT_STRING_CHARS_RULE = (
+    'STRING_CHARS : /(?:(?!\\${)(?:%\\{[^"\\r\\n}]*(?:"(?:[^"\\\\]|\\\\.)*"[^"\\r\\n}]*)*\\}|[^"\\\\]|\\\\.|\\$\\$))+/'
+)
+
+
 @functools.lru_cache(maxsize=1)
 def _get_hcl2_parser() -> Lark:
     import hcl2
 
     lark_path = Path(hcl2.__file__).parent / "hcl2.lark"
     grammar = lark_path.read_text(encoding="utf-8")
+    assert TARGET_BLOCK_RULE in grammar, "hcl2 grammar missing expected block rule"
+    assert TARGET_HEREDOC_RULE in grammar, "hcl2 grammar missing expected heredoc rule"
+    assert TARGET_HEREDOC_TRIM_RULE in grammar, "hcl2 grammar missing expected heredoc_trim rule"
+    assert TARGET_STRING_CHARS_RULE in grammar, "hcl2 grammar missing expected string_chars rule"
+
     grammar = (
-        grammar.replace(
-            "NAME : /[a-zA-Z_][a-zA-Z0-9_-]*/",
-            'NAME : /[^\\s\\r\\n=(){}\\[\\],.:;"\\x27\\$#\\/]+/',
-        )
-        .replace(
-            "/<<(?P<heredoc>[a-zA-Z][a-zA-Z0-9._-]+)\\n?(?:.|\\n)*?\\n\\s*(?P=heredoc)\\n/",
-            "/<<(?P<heredoc>[^\\s\\r\\n]+)\\r?\\n(?:(?:.|\\n)*?\\r?\\n)??\\s*(?P=heredoc)[ \\t]*\\r?\\n/",
-        )
-        .replace(
-            "/<<-(?P<heredoc_trim>[a-zA-Z][a-zA-Z0-9._-]+)\\n?(?:.|\\n)*?\\n\\s*(?P=heredoc_trim)\\n/",
-            "/<<-(?P<heredoc_trim>[^\\s\\r\\n]+)\\r?\\n(?:(?:.|\\n)*?\\r?\\n)??\\s*(?P=heredoc_trim)[ \\t]*\\r?\\n/",
-        )
+        grammar.replace(TARGET_BLOCK_RULE, REPLACEMENT_BLOCK_RULE)
+        .replace(TARGET_HEREDOC_RULE, REPLACEMENT_HEREDOC_RULE)
+        .replace(TARGET_HEREDOC_TRIM_RULE, REPLACEMENT_HEREDOC_TRIM_RULE)
+        .replace(TARGET_STRING_CHARS_RULE, REPLACEMENT_STRING_CHARS_RULE)
     )
     return Lark(grammar, parser="lalr", propagate_positions=True)
-
-
-def _preprocess_interpolation_quotes(text: str) -> str:
-    """Normalize inner quotes inside unescaped ${...} interpolations without semantic character rewriting."""
-    return re.sub(r"((?<!\$)\$\{[\s\S]*?\})", lambda m: m.group(0).replace(r"\"", '"'), text)
-
-
-_preprocess_hcl2_content = _preprocess_interpolation_quotes
-_preprocess_fallback_hcl = _preprocess_interpolation_quotes
-
-
-def _fallback_scan_blocks(text: str) -> tuple[bool, bool]:
-    has_provider = bool(re.search(r'(?m)^[ \t]*provider[ \t]+("[^"]*"|[a-zA-Z0-9_-]+)[ \t]*\{', text))
-    has_backend = bool(re.search(r'(?m)^[ \t]*(backend|cloud)[ \t]+("[^"]*"|[a-zA-Z0-9_-]+)[ \t]*\{', text))
-    if not has_backend and bool(re.search(r"(?m)^[ \t]*terraform[ \t]*\{", text)):
-        if "backend" in text or "cloud" in text:
-            has_backend = True
-    return has_provider, has_backend
 
 
 def _inspect_parsed_terraform_blocks(tf_blocks: list[Any]) -> bool:
@@ -124,32 +125,30 @@ def _inspect_parsed_hcl(parsed: dict[str, Any]) -> tuple[bool, bool]:
 
 
 def _parse_hcl2_content(content: str) -> tuple[bool, bool, bool]:
-    """Parse HCL2 text using structured parser without semantic character rewriting.
+    """Parse HCL2 text using python-hcl2 parser.
 
     Returns (has_syntax_violation, has_provider, has_backend).
+    Any unparseable content fails closed as a syntax violation.
     """
-    clean_text = content.replace("\r\n", "\n").replace("\r", "\n")
+    clean_text = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
     if not clean_text.endswith("\n"):
         clean_text += "\n"
 
-    for candidate in (clean_text, _preprocess_interpolation_quotes(clean_text)):
-        try:
-            tree = _get_hcl2_parser().parse(candidate)
-            parsed = RobustDictTransformer().transform(tree)
-            if isinstance(parsed, dict):
-                p, b = _inspect_parsed_hcl(parsed)
-                return False, p, b
-        except Exception:
-            pass
+    try:
+        tree = _get_hcl2_parser().parse(clean_text)
+        parsed = RobustDictTransformer().transform(tree)
+        if isinstance(parsed, dict):
+            p, b = _inspect_parsed_hcl(parsed)
+            return False, p, b
+    except Exception:
+        pass
 
-    raw_provider, raw_backend = _fallback_scan_blocks(content)
-    return True, raw_provider, raw_backend
+    return True, False, False
 
 
-def scan_tf_file(content: str) -> tuple[bool, bool]:
-    """Scan HCL text for active provider or backend blocks."""
-    _, has_provider, has_backend = _parse_hcl2_content(content)
-    return (has_provider, has_backend)
+def scan_tf_file(content: str) -> tuple[bool, bool, bool]:
+    """Scan HCL text for syntax violations and active provider or backend blocks."""
+    return _parse_hcl2_content(content)
 
 
 def _check_required_files(module_dir: Path) -> list[str]:
@@ -207,13 +206,13 @@ def _check_files(module_dir: Path, *, is_root: bool) -> list[str]:
 
 def _check_child_tf_file(tf_path: Path, errors: list[str]) -> None:
     try:
-        content = tf_path.read_text(encoding="utf-8")
+        content = tf_path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         errors.append(f"{tf_path}: unreadable file ({exc})")
         return
     has_violation, has_provider, has_backend = _parse_hcl2_content(content)
     if has_violation:
-        errors.append(f"{tf_path}: unclosed or malformed heredoc in child module")
+        errors.append(f"{tf_path}: unparseable HCL (refused)")
     if has_provider:
         errors.append(f"{tf_path}: provider configuration in non-root module")
     if has_backend:
@@ -261,9 +260,7 @@ def lint_tree(root: Path, *, root_module: Path | None = None) -> list[str]:
     return errors
 
 
-def self_test() -> int:
-    """Run internal regression self-tests using python-hcl2 parser."""
-    hcl_test = 'provider "aws" { region = "us-east-1" }\nterraform { backend "s3" { bucket = "b" } }\n'
+def _self_test_basic(hcl_test: str) -> None:
     syntax_err1, prov1, back1 = _parse_hcl2_content(hcl_test)
     assert not syntax_err1 and prov1 and back1, "Structured HCL2 parser must detect provider and backend"
 
@@ -278,14 +275,56 @@ def self_test() -> int:
     syntax_err4, prov4, _ = _parse_hcl2_content(unicode_hcl)
     assert not syntax_err4 and not prov4, "Unicode identifier HCL2 must parse cleanly"
 
+
+def _self_test_advanced(hcl_test: str) -> None:
+    violation6, prov6, back6 = scan_tf_file(hcl_test)
+    assert not violation6 and prov6 and back6, "scan_tf_file must detect provider and backend without violation"
+
+    inline_comment = 'provider /* inline */ "aws" {}\n'
+    v_inline, p_inline, _ = scan_tf_file(inline_comment)
+    assert not v_inline and p_inline, "Inline comments in block header must parse cleanly"
+
+    bom_case = '\ufeffprovider "aws" {}\n'
+    v_bom, p_bom, _ = scan_tf_file(bom_case)
+    assert not v_bom and p_bom, "UTF-8 BOM must be stripped and detect provider"
+
+    unterminated_case = "locals {\n  x = <<EOF\n}\n"
+    v_unterminated, _, _ = scan_tf_file(unterminated_case)
+    assert v_unterminated, "Unterminated heredoc with balanced braces must fail as syntax violation"
+
+    sol_empty = 'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
+    syntax_err_sol, prov_sol, _ = _parse_hcl2_content(sol_empty)
+    assert not syntax_err_sol and prov_sol, "Empty repeated heredocs must detect provider"
+
+    sol_unicode = 'locals {\n  a = <<é\nhello\né\n  b = <<u00e9\nworld\nu00e9\n}\nprovider "aws" {}\n'
+    syntax_err_uni, prov_uni, _ = _parse_hcl2_content(sol_unicode)
+    assert not syntax_err_uni and prov_uni, "Unicode delimiters must not collide"
+
+    sol_unclosed = 'locals {\n  a = <<EOF\nprovider "aws" {}\n'
+    syntax_err_unc, _, _ = _parse_hcl2_content(sol_unclosed)
+    assert syntax_err_unc, "Unclosed heredoc must fail closed"
+
+    argon_nbsp = 'locals {\n  x = <<EOF\nhello\nEOF\u00a0\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nworld\nEOF\n}\n'
+    v_anbsp, p_anbsp, _ = scan_tf_file(argon_nbsp)
+    assert not v_anbsp and p_anbsp, "Argon NBSP heredoc delimiter must detect provider"
+
+    argon_tmpl = (
+        'locals {\n  x = "%{if var.a == \\"/*\\"}a%{endif}"\n}\n'
+        'provider "aws" {}\n'
+        'locals {\n  y = "%{if var.a == \\"*/z = \\"}b%{endif}"\n}\n'
+    )
+    v_atmpl, p_atmpl, _ = scan_tf_file(argon_tmpl)
+    assert not v_atmpl and p_atmpl, "Argon template directive with quotes must detect provider"
+
+
+def self_test() -> int:
+    """Run internal regression self-tests using python-hcl2 parser."""
+    hcl_test = 'provider "aws" { region = "us-east-1" }\nterraform { backend "s3" { bucket = "b" } }\n'
+    _self_test_basic(hcl_test)
+
     as_ts_r8_001_cases = (
         'locals {\n  x = "%{if var.env == \\"prod\\"}yes%{endif}"\n}\n',
-        (
-            'locals {\n  \u092c\u093e\u0932\u094d\u091f\u0940 = "b"\n'
-            '  x = "${local.\u092c\u093e\u0932\u094d\u091f\u0940}"\n}\n'
-        ),
         'locals {\n  x = "${<<E\u0301OF\nhello\nE\u0301OF\n}"\n}\n',
-        'locals {\n  x = "${join(\\"\\", [<<\u2118OF\n{\n\u2118OF\n])}"\n}\n',
         "locals {\n  x = <<EOF\nhello\nEOF   \n}\n",
         'locals {\r\n  x = "hello"\r\n}\r\n',
         'locals {\n  x = "${replace("hello", "\\"", "")}" \n}\n',
@@ -305,20 +344,11 @@ def self_test() -> int:
             errs = lint_module(mod_p, is_root=False)
             assert errs == [], f"AS-TS-R8-001 case must succeed under child module lint: {case!r}, got: {errs}"
 
-    prov6, back6 = scan_tf_file(hcl_test)
-    assert prov6 and back6, "scan_tf_file must detect provider and backend"
+    odd_identifier = 'locals {\n  \u092c\u093e\u0932\u094d\u091f\u0940 = "b"\n}\n'
+    syntax_err_odd, _, _ = _parse_hcl2_content(odd_identifier)
+    assert syntax_err_odd, "Odd/non-ASCII identifiers must fail closed as parse violations"
 
-    sol_empty = 'locals {\n  x = <<EOF\nEOF\n}\nprovider "aws" {}\nlocals {\n  y = <<EOF\nEOF\n}\n'
-    syntax_err_sol, prov_sol, _ = _parse_hcl2_content(sol_empty)
-    assert not syntax_err_sol and prov_sol, "Empty repeated heredocs must detect provider"
-
-    sol_unicode = 'locals {\n  a = <<é\nhello\né\n  b = <<u00e9\nworld\nu00e9\n}\nprovider "aws" {}\n'
-    syntax_err_uni, prov_uni, _ = _parse_hcl2_content(sol_unicode)
-    assert not syntax_err_uni and prov_uni, "Unicode delimiters must not collide"
-
-    sol_unclosed = 'locals {\n  a = <<EOF\nprovider "aws" {}\n'
-    syntax_err_unc, prov_unc, _ = _parse_hcl2_content(sol_unclosed)
-    assert syntax_err_unc and prov_unc, "Unclosed heredoc must fail closed"
+    _self_test_advanced(hcl_test)
 
     print("tf_module_layout: all self-tests passed.")
     return 0

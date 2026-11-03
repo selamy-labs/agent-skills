@@ -615,7 +615,7 @@ class OrderedArgvSet(list[tuple[str, ...]]):
 
 
 def is_tracked_by_git(path: Path | str) -> bool:
-    """Return True if path is tracked by git (fails closed on error)."""
+    """Return True if path is tracked by git (fails closed on fatal git errors or process errors)."""
     target = Path(path)
     try:
         proc = subprocess.run(
@@ -625,7 +625,11 @@ def is_tracked_by_git(path: Path | str) -> bool:
             check=False,
             cwd=target.parent if target.parent.is_dir() else None,
         )
-        return proc.returncode == 0
+        if proc.returncode == 0:
+            return True
+        if proc.returncode == 1:
+            return False
+        return True
     except (FileNotFoundError, OSError):
         return True
 
@@ -897,6 +901,12 @@ def _check_verify_job_permissions(job: dict[str, Any], errors: list[str]) -> Non
         errors.append(f"job 'verify' permissions must be {{'contents': 'read', 'checks': 'read'}}, got: {perms!r}")
 
 
+def _check_release_job_permissions(job: dict[str, Any], errors: list[str]) -> None:
+    perms = job.get("permissions")
+    if perms != {"contents": "write"}:
+        errors.append(f"job 'release' permissions must be {{'contents': 'write'}}, got: {perms!r}")
+
+
 def validate_job_gates(job: dict[str, Any], job_name: str) -> list[str]:
     """Verify that target job contains all gates + pins and no banned prefixes or bypasses."""
     errors: list[str] = list(validate_shell_configuration(f"job '{job_name}'", job))
@@ -905,6 +915,8 @@ def validate_job_gates(job: dict[str, Any], job_name: str) -> list[str]:
         errors.extend(validate_job_level_keys(job, job_name))
     elif job_name == "verify":
         _check_verify_job_permissions(job, errors)
+    elif job_name == "release":
+        _check_release_job_permissions(job, errors)
 
     _check_job_coe(job, job_name, errors)
 

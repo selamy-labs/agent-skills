@@ -49,6 +49,7 @@ __all__ = [
     "validate_job_level_keys",
     "validate_marketplace_files",
     "validate_quality_workflow",
+    "validate_release_publish_job",
     "validate_release_scanners",
     "validate_release_workflow",
     "main",
@@ -204,6 +205,79 @@ def _load_release_mapping(workflow_input: dict[str, Any] | str | Path) -> tuple[
         return (None, [f"Failed to parse YAML: {exc}"])
 
 
+def _check_release_step_0(s0: Any, errors: list[str]) -> None:
+    if not isinstance(s0, dict) or not str(s0.get("uses", "")).startswith("actions/checkout@"):
+        errors.append("job 'release' step 0 must use actions/checkout")
+        return
+    w0 = s0.get("with", {})
+    if w0.get("fetch-depth") != 0 or w0.get("ref") != "${{ github.event.workflow_run.head_sha || github.sha }}":
+        errors.append("job 'release' step 0 checkout must specify fetch-depth: 0 and exact ref")
+
+
+def _check_release_step_1(s1: Any, errors: list[str]) -> None:
+    if not isinstance(s1, dict) or not str(s1.get("uses", "")).startswith("actions/setup-python@"):
+        errors.append("job 'release' step 1 must use actions/setup-python")
+        return
+    if s1.get("with", {}).get("python-version") != "3.12":
+        errors.append("job 'release' step 1 must specify python-version: '3.12'")
+
+
+def _check_release_step_2(s2: Any, errors: list[str]) -> None:
+    if not isinstance(s2, dict) or s2.get("name") != "Plan release" or s2.get("id") != "plan":
+        errors.append("job 'release' step 2 must be Plan release")
+        return
+    if "scripts/semantic_release.py" not in s2.get("run", ""):
+        errors.append("job 'release' step 2 must run semantic_release.py")
+
+
+def _check_release_step_3(s3: Any, errors: list[str]) -> None:
+    if not isinstance(s3, dict) or s3.get("name") != "Create tag":
+        errors.append("job 'release' step 3 must be Create tag")
+        return
+    if s3.get("if") != "steps.plan.outputs.release_needed == 'true'" or "git tag -a" not in s3.get("run", ""):
+        errors.append("job 'release' step 3 must check release_needed and create git tag")
+
+
+def _check_release_step_4(s4: Any, errors: list[str]) -> None:
+    expected_cmd = 'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md'
+    if not isinstance(s4, dict) or s4.get("name") != "Create GitHub release":
+        errors.append("job 'release' step 4 must be Create GitHub release")
+        return
+    if s4.get("if") != "steps.plan.outputs.release_needed == 'true'":
+        errors.append("job 'release' step 4 must check release_needed")
+    elif s4.get("run", "").strip() != expected_cmd:
+        errors.append("job 'release' step 4 must run canonical gh release create")
+    elif s4.get("env") != {"GH_TOKEN": "${{ github.token }}"}:
+        errors.append("job 'release' step 4 env must be exactly GH_TOKEN")
+
+
+def _check_release_publish_steps(steps: Any, errors: list[str]) -> None:
+    if not isinstance(steps, list):
+        errors.append("job 'release' steps must be a list")
+        return
+    if len(steps) != 5:
+        errors.append(f"job 'release' must have exactly 5 canonical steps, got {len(steps)}")
+        return
+    _check_release_step_0(steps[0], errors)
+    _check_release_step_1(steps[1], errors)
+    _check_release_step_2(steps[2], errors)
+    _check_release_step_3(steps[3], errors)
+    _check_release_step_4(steps[4], errors)
+
+
+def validate_release_publish_job(job: dict[str, Any], job_name: str = "release") -> list[str]:
+    """Validate release publish job permissions, shell, env and canonical step allowlist."""
+    errors: list[str] = list(validate_shell_configuration(f"job '{job_name}'", job))
+    errors.extend(validate_env_configuration(f"job '{job_name}'", job, allowed_keys=frozenset()))
+    perms = job.get("permissions")
+    if perms != {"contents": "write"}:
+        errors.append(f"job '{job_name}' permissions must be {{'contents': 'write'}}, got: {perms!r}")
+    if job.get("continue-on-error") is not None:
+        errors.append(f"job '{job_name}' must not declare continue-on-error")
+    _check_release_publish_steps(job.get("steps", []), errors)
+    return errors
+
+
 def validate_release_workflow(workflow_input: dict[str, Any] | str | Path) -> list[str]:
     """Validate release workflow contract."""
     doc, load_errs = _load_release_mapping(workflow_input)
@@ -212,17 +286,34 @@ def validate_release_workflow(workflow_input: dict[str, Any] | str | Path) -> li
 
     errors = list(validate_shell_configuration("release workflow", doc))
     errors.extend(validate_env_configuration("release workflow", doc, allowed_keys=frozenset()))
+
+    wf_perms = doc.get("permissions")
+    if wf_perms != {"contents": "read"}:
+        errors.append(f"release workflow permissions must be {{'contents': 'read'}}, got: {wf_perms!r}")
+
     jobs = doc.get("jobs", {})
     if not isinstance(jobs, dict):
         return ["Release workflow jobs must be a mapping"]
 
-    target_job = jobs.get("verify") or jobs.get("release")
-    if target_job is None:
+    verify_job = jobs.get("verify")
+    release_job = jobs.get("release")
+
+    if verify_job is None and release_job is None:
         errors.append("release workflow missing 'verify' or 'release' target job")
-    else:
-        target_name = "verify" if "verify" in jobs else "release"
-        errors.extend(validate_job_gates(target_job, target_name))
-        errors.extend(validate_release_scanners(target_job, target_name))
+        return errors
+
+    extra_jobs = set(jobs.keys()) - {"verify", "release"}
+    if extra_jobs:
+        errors.append(
+            f"release workflow jobs must contain only 'verify' and 'release', got unexpected: {sorted(extra_jobs)}"
+        )
+
+    if verify_job is not None:
+        errors.extend(validate_job_gates(verify_job, "verify"))
+        errors.extend(validate_release_scanners(verify_job, "verify"))
+
+    if release_job is not None:
+        errors.extend(validate_release_publish_job(release_job, "release"))
 
     return errors
 

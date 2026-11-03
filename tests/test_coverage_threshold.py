@@ -20,16 +20,68 @@ except ModuleNotFoundError:
     from tools.validate_skills import is_tracked_by_git
 
 
+def _has_enclosing_git_repo(target: Path) -> bool:
+    cur = target.parent if target.is_file() else target
+    while cur != cur.parent:
+        if (cur / ".git").is_dir():
+            return True
+        cur = cur.parent
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _mock_untracked_for_synthetic_tests(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    test_name = request.node.name
+    skip_keywords = (
+        "is_tracked_by_git",
+        "refuses_git_tracked",
+        "refuses_real_git_tracked",
+        "refuses_tracked_marker",
+    )
+    if any(k in test_name for k in skip_keywords):
+        return
+
+    orig_is_tracked = is_tracked_by_git
+
+    def _safe_is_tracked(p: Path | str) -> bool:
+        target = Path(p)
+        if _has_enclosing_git_repo(target):
+            return orig_is_tracked(p)
+        return False
+
+    monkeypatch.setattr("tests.test_coverage_threshold.is_tracked_by_git", _safe_is_tracked)
+
+
+def _parse_timestamp_from_text(raw: str, marker: Path) -> float:
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "timestamp" in data:
+            return float(data["timestamp"])
+    except Exception:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        raise AssertionError(f"Corrupt session marker: {marker}")
+
+
 def _read_session_marker_timestamp(marker: Path) -> float:
     if is_tracked_by_git(marker):
         raise AssertionError(f"Refusing session marker tracked in git: {marker}")
-    try:
-        session_start = float(marker.read_text(encoding="utf-8").strip())
-    except ValueError:
-        raise AssertionError(f"Corrupt session marker: {marker}")
-    if session_start <= 0:
+    raw = marker.read_text(encoding="utf-8").strip()
+    session_start = _parse_timestamp_from_text(raw, marker)
+
+    import math
+
+    if not math.isfinite(session_start) or session_start <= 0:
         raise AssertionError(
-            f"Invalid session marker timestamp in {marker}: {session_start}. Markers must have positive timestamp."
+            f"Invalid session marker timestamp in {marker}: {session_start}. "
+            "Markers must have positive finite timestamp."
+        )
+    if session_start < 1000000000.0:
+        raise AssertionError(
+            f"Invalid session marker timestamp in {marker}: {session_start}. "
+            "Ancient or forged marker timestamps are refused."
         )
     return session_start
 
@@ -487,6 +539,45 @@ def test_verify_coverage_report_refuses_tracked_marker(tmp_path: Path, monkeypat
     monkeypatch.setattr("tests.test_coverage_threshold.is_tracked_by_git", _mock_is_tracked)
     with pytest.raises(AssertionError, match="Refusing session marker tracked in git"):
         verify_coverage_report(report)
+
+
+def test_verify_coverage_report_refuses_nonfinite_and_ancient_markers(tmp_path: Path) -> None:
+    """AS-TS-R19-SOL61-02: Non-finite timestamps (nan, inf) and ancient/forged timestamps (1, 1.0) must be refused."""
+    report = tmp_path / "coverage.json"
+    report.write_text(
+        json.dumps({"totals": {"percent_covered": 99.0, "covered_branches": 99, "num_branches": 100}}),
+        encoding="utf-8",
+    )
+    marker = tmp_path / ".coverage_session_start"
+    for bad_ts in ("nan", "NaN", "inf", "-inf"):
+        marker.write_text(bad_ts, encoding="utf-8")
+        with pytest.raises(AssertionError, match="Invalid session marker timestamp"):
+            verify_coverage_report(report)
+
+    for ancient_ts in ("1", "1.0", "1000", "999999999"):
+        marker.write_text(ancient_ts, encoding="utf-8")
+        with pytest.raises(AssertionError, match="Ancient or forged marker timestamps are refused"):
+            verify_coverage_report(report)
+
+
+def test_is_tracked_by_git_fatal_error_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AS-TS-R19-SOL61-03: When git exits with fatal error, is_tracked_by_git must fail closed."""
+
+    class MockCompletedProcess:
+        returncode = 128
+
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: MockCompletedProcess())
+    assert is_tracked_by_git("some_file.json") is True
+
+
+def test_is_tracked_by_git_unmatched_returns_untracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AS-TS-R19-SOL61-03: When git exits with 1 (unmatched), is_tracked_by_git returns False."""
+
+    class MockCompletedProcess:
+        returncode = 1
+
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: MockCompletedProcess())
+    assert is_tracked_by_git("some_file.json") is False
 
 
 if __name__ == "__main__":
