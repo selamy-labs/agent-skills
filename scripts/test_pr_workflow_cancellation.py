@@ -438,26 +438,13 @@ def _check_pip_tokens_contract(
     step_name: str,
     tokens: list[str],
 ) -> None:
-    if tokens == ["python", "-m", "pip", "install", "-r", "requirements-dev.txt"]:
-        root_dir = Path(__file__).resolve().parents[1]
-        reqs = (root_dir / "requirements-dev.txt").read_text(encoding="utf-8")
-        for _pkg_name, expected_token in PINNED_TOOL_REQUIREMENTS.items():
-            assert expected_token in reqs, f"{path_name} job {job_name} requirements-dev.txt missing {expected_token!r}"
-        return
+    assert tokens == ["python", "-m", "pip", "install", "-r", "requirements-dev.txt"], (
+        f"{path_name} job {job_name} step {step_name!r} must run canonical install: got {tokens!r}"
+    )
+    root_dir = Path(__file__).resolve().parents[1]
+    reqs = (root_dir / "requirements-dev.txt").read_text(encoding="utf-8")
     for _pkg_name, expected_token in PINNED_TOOL_REQUIREMENTS.items():
-        assert any(t == expected_token for t in tokens), (
-            f"{path_name} job {job_name} primary install missing {expected_token!r}"
-        )
-    for token in tokens:
-        pkg = re.split(r"[=<>!~]", token)[0].strip()
-        assert pkg not in DISALLOWED_PIP_PACKAGES, (
-            f"{path_name} job {job_name} step {step_name!r} contains disallowed pip package {pkg!r}"
-        )
-        if pkg in GATED_PACKAGES:
-            expected = PINNED_TOOL_REQUIREMENTS.get(pkg)
-            assert expected is not None and token == expected, (
-                f"{path_name} job {job_name} step {step_name!r} has disallowed pin for {pkg!r}: {token!r}"
-            )
+        assert expected_token in reqs, f"{path_name} job {job_name} requirements-dev.txt missing {expected_token!r}"
 
 
 def _validate_step_pip_lines(
@@ -937,16 +924,14 @@ def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:
     ]
     assert len(pip_steps) == 1, f"verify job has {len(pip_steps)} pip install steps; exactly 1 required"
     run_str = pip_steps[0].get("run", "").strip()
-    if run_str == "python -m pip install -r requirements-dev.txt":
-        root_dir = Path(__file__).resolve().parents[1]
-        reqs = (root_dir / "requirements-dev.txt").read_text(encoding="utf-8")
-        assert "pytest==8.3.4" in reqs, "verify job must pin pytest==8.3.4"
-        assert "pytest-cov==6.0.0" in reqs, "verify job must pin pytest-cov==6.0.0"
-        assert "ruff==0.15.21" in reqs, "verify job must pin ruff==0.15.21"
-    else:
-        assert "pytest==8.3.4" in run_str, "verify job must pin pytest==8.3.4"
-        assert "pytest-cov==6.0.0" in run_str, "verify job must pin pytest-cov==6.0.0"
-        assert "ruff==0.15.21" in run_str, "verify job must pin ruff==0.15.21"
+    assert run_str == "python -m pip install -r requirements-dev.txt", (
+        f"verify job pip install must be canonical, got: {run_str!r}"
+    )
+    root_dir = Path(__file__).resolve().parents[1]
+    reqs = (root_dir / "requirements-dev.txt").read_text(encoding="utf-8")
+    assert "pytest==8.3.4" in reqs, "verify job must pin pytest==8.3.4"
+    assert "pytest-cov==6.0.0" in reqs, "verify job must pin pytest-cov==6.0.0"
+    assert "ruff==0.15.21" in reqs, "verify job must pin ruff==0.15.21"
     _validate_verify_go_steps(verify_steps)
 
 
@@ -1077,24 +1062,14 @@ def _validate_release_publish_step_4(s4: Any) -> None:
     assert s4.get("env") == {"GH_TOKEN": "${{ github.token }}"}, "release job step 4 env must be exactly GH_TOKEN"
 
 
-def _validate_release_publish_step_install(s_inst: Any) -> None:
-    assert isinstance(s_inst, dict), "release job step 2 must be mapping"
-    assert s_inst.get("name") == "Install dependencies", "release job step 2 must be Install dependencies"
-    assert str(s_inst.get("run", "")).strip() == "python -m pip install -r requirements-dev.txt", (
-        "release job step 2 must run canonical install command"
-    )
-    assert "env" not in s_inst, "release job step 2 must not declare env"
-
-
 def _validate_release_publish_steps(release_steps: list[Any]) -> None:
     assert isinstance(release_steps, list), "release job steps must be a list"
-    assert len(release_steps) == 6, f"release job must have exactly 6 canonical steps, got {len(release_steps)}"
+    assert len(release_steps) == 5, f"release job must have exactly 5 canonical steps, got {len(release_steps)}"
     _validate_release_publish_step_0(release_steps[0])
     _validate_release_publish_step_1(release_steps[1])
-    _validate_release_publish_step_install(release_steps[2])
-    _validate_release_publish_step_2(release_steps[3])
-    _validate_release_publish_step_3(release_steps[4])
-    _validate_release_publish_step_4(release_steps[5])
+    _validate_release_publish_step_2(release_steps[2])
+    _validate_release_publish_step_3(release_steps[3])
+    _validate_release_publish_step_4(release_steps[4])
 
 
 def _validate_release_publish_job(release: dict[str, Any]) -> None:

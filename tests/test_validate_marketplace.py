@@ -323,10 +323,6 @@ def _make_valid_release_job() -> dict[str, Any]:
                 "with": {"python-version": "3.12"},
             },
             {
-                "name": "Install dependencies",
-                "run": "python -m pip install -r requirements-dev.txt",
-            },
-            {
                 "name": "Plan release",
                 "id": "plan",
                 "run": "python scripts/semantic_release.py --notes-file release-notes.md",
@@ -387,7 +383,7 @@ def test_validate_release_publish_job_attributes() -> None:
 
     job7 = _make_valid_release_job()
     job7["steps"] = job7["steps"][:4]
-    assert any("must have exactly 6 canonical steps" in e for e in validate_release_publish_job(job7))
+    assert any("must have exactly 5 canonical steps" in e for e in validate_release_publish_job(job7))
 
 
 def test_validate_release_step_0_and_1_errors() -> None:

@@ -216,14 +216,13 @@ def test_validate_ruff_format_command() -> None:
 
 
 def test_validate_dependency_install_step() -> None:
-    valid_step = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"}
+    valid_step = {"run": "python -m pip install -r requirements-dev.txt"}
     assert validate_dependency_install_step(valid_step) == []
     unpinned = {"run": "pip install ruff==0.15.21 pytest"}
-    assert any("Disallowed pip pin for 'pytest'" in e for e in validate_dependency_install_step(unpinned))
+    errs = validate_dependency_install_step(unpinned)
+    assert any("Primary dependency install step must be" in e or "Disallowed pip pin" in e for e in errs)
     cov_only = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0"}
-    assert any("missing 'ruff==0.15.21'" in e for e in validate_dependency_install_step(cov_only))
-    ruff_only = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21"}
-    assert validate_dependency_install_step(ruff_only) == []
+    assert any("Primary dependency install step must be" in e for e in validate_dependency_install_step(cov_only))
     hcl2_disallowed = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 python-hcl2==7.2.0"}
     errs_hcl2 = validate_dependency_install_step(hcl2_disallowed)
     assert any("Disallowed pip installation of 'python-hcl2'" in e for e in errs_hcl2)
@@ -233,11 +232,11 @@ def test_validate_dependency_install_step() -> None:
 def test_validate_dependency_install_step_rejects_suffix_pins() -> None:
     ruff_suffix = {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.210"}
     errs = validate_dependency_install_step(ruff_suffix)
-    assert any("missing 'ruff==0.15.21' pin" in e or "Disallowed pip pin" in e for e in errs)
+    assert any("Primary dependency install step must be" in e or "Disallowed pip pin" in e for e in errs)
 
     pytest_suffix = {"run": "pip install pytest==8.3.40 pytest-cov==6.0.0 ruff==0.15.21"}
     errs2 = validate_dependency_install_step(pytest_suffix)
-    assert any("missing 'pytest==8.3.4' pin" in e or "Disallowed pip pin" in e for e in errs2)
+    assert any("Primary dependency install step must be" in e or "Disallowed pip pin" in e for e in errs2)
 
 
 def test_validate_dependency_install_step_requires_actual_pip_install() -> None:
@@ -245,11 +244,12 @@ def test_validate_dependency_install_step_requires_actual_pip_install() -> None:
     errs = validate_dependency_install_step(not_real_pip)
     assert any("missing 'pip install' command" in e for e in errs)
 
-    python_m_pip = {"run": "python -m pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21"}
+    python_m_pip = {"run": "python -m pip install -r requirements-dev.txt"}
     assert validate_dependency_install_step(python_m_pip) == []
 
-    python3_m_pip = {"run": "python3 -m pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21"}
-    assert validate_dependency_install_step(python3_m_pip) == []
+    non_canonical_pip = {"run": "python3 -m pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21"}
+    errs_non_canonical = validate_dependency_install_step(non_canonical_pip)
+    assert any("Primary dependency install step must be" in e for e in errs_non_canonical)
 
 
 def test_validate_job_gates_valid() -> None:
