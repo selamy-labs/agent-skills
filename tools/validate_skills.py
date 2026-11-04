@@ -1319,7 +1319,35 @@ WORKFLOW_PACKAGE_TO_MODULES: dict[str, set[str]] = {
     "ruff": {"ruff"},
     "complexipy": {"complexipy"},
     "vulture": {"vulture"},
+    "mypy": {"mypy"},
 }
+
+SAFE_WORKFLOW_COMMANDS: frozenset[str] = frozenset(
+    {
+        "echo",
+        "mkdir",
+        "chmod",
+        "cp",
+        "rm",
+        "mv",
+        "touch",
+        "true",
+        "false",
+        "git",
+        "gh",
+        "go",
+        "cat",
+        "source",
+        "export",
+        "sleep",
+        "test",
+        "exit",
+        "printf",
+        "find",
+        "ls",
+        "pwd",
+    }
+)
 
 
 def _extract_pip_installed_modules(tokens: list[str]) -> set[str]:
@@ -1333,38 +1361,87 @@ def _extract_pip_installed_modules(tokens: list[str]) -> set[str]:
     return installed
 
 
-def _get_script_ast_imports(file_path: Path) -> set[str]:
+def _check_candidate_file(base: Path, rel: Path) -> Path | None:
+    py_file = base / f"{rel}.py"
+    if py_file.is_file():
+        return py_file
+    init_file = base / rel / "__init__.py"
+    if init_file.is_file():
+        return init_file
+    return None
+
+
+def _resolve_dotted_module_to_file(mod: str, file_path: Path, repo_root: Path) -> Path | None:
+    parts = mod.split(".")
+    for i in range(len(parts), 0, -1):
+        rel = Path(*parts[:i])
+        for base in (repo_root, file_path.parent):
+            found = _check_candidate_file(base, rel)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_relative_import_targets(node: ast.ImportFrom, file_path: Path) -> list[Path]:
+    base = file_path.parent
+    for _ in range(max(0, node.level - 1)):
+        base = base.parent
+    if node.module:
+        base = base / Path(*node.module.split("."))
+    targets: list[Path] = []
+    for alias in node.names:
+        cand = _check_candidate_file(base, Path(alias.name))
+        if cand is not None:
+            targets.append(cand)
+    if not targets:
+        direct = _check_candidate_file(base.parent, Path(base.name))
+        if direct is not None:
+            targets.append(direct)
+    return targets
+
+
+def _collect_import_node_targets(node: ast.Import, named_targets: set[str]) -> None:
+    for alias in node.names:
+        named_targets.add(alias.name)
+
+
+def _collect_import_from_targets(
+    node: ast.ImportFrom,
+    file_path: Path,
+    named_targets: set[str],
+    file_targets: set[Path],
+) -> None:
+    if node.level == 0 and node.module:
+        named_targets.add(node.module)
+        for alias in node.names:
+            named_targets.add(f"{node.module}.{alias.name}")
+    elif node.level > 0:
+        file_targets.update(_extract_relative_import_targets(node, file_path))
+
+
+def _parse_ast_imports(tree: ast.AST, file_path: Path) -> tuple[set[str], set[Path]]:
+    named_targets: set[str] = set()
+    file_targets: set[Path] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            _collect_import_node_targets(node, named_targets)
+        elif isinstance(node, ast.ImportFrom):
+            _collect_import_from_targets(node, file_path, named_targets, file_targets)
+    return named_targets, file_targets
+
+
+def _get_script_ast_imports(file_path: Path) -> tuple[set[str], set[Path]]:
     try:
         content = file_path.read_text(encoding="utf-8")
         tree = ast.parse(content, filename=str(file_path))
     except Exception:
-        return set()
-    modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                modules.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules.add(node.module.split(".")[0])
-    return modules
+        return set(), set()
+    return _parse_ast_imports(tree, file_path)
 
 
-def _find_local_module_file(mod: str, file_path: Path, repo_root: Path) -> Path | None:
-    if (repo_root / mod).is_dir() or (file_path.parent / mod).is_dir():
-        return None
-    candidates = (
-        repo_root / f"{mod}.py",
-        repo_root / mod / "__init__.py",
-        file_path.parent / f"{mod}.py",
-        file_path.parent / mod / "__init__.py",
-        repo_root / "tools" / f"{mod}.py",
-        repo_root / "scripts" / f"{mod}.py",
-        repo_root / "tests" / f"{mod}.py",
-    )
-    for c in candidates:
-        if c.is_file():
-            return c
-    return None
+def _is_local_repo_dir(mod: str, file_path: Path, repo_root: Path) -> bool:
+    rel = Path(*mod.split("."))
+    return (repo_root / rel).is_dir() or (file_path.parent / rel).is_dir()
 
 
 def _classify_module_import(
@@ -1373,15 +1450,19 @@ def _classify_module_import(
     repo_root: Path,
     visited: set[Path],
 ) -> set[str]:
+    top = mod.split(".")[0]
     stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-    if mod in stdlib or mod == "__future__":
+    if top in stdlib or top == "__future__":
         return set()
-    local = _find_local_module_file(mod, file_path, repo_root)
+
+    local = _resolve_dotted_module_to_file(mod, file_path, repo_root)
     if local is not None:
         return _get_transitive_script_third_party_imports(local, repo_root, visited)
-    if (repo_root / mod).is_dir() or (file_path.parent / mod).is_dir():
+
+    if _is_local_repo_dir(mod, file_path, repo_root) or _is_local_repo_dir(top, file_path, repo_root):
         return set()
-    return {mod}
+
+    return {top}
 
 
 def _get_transitive_script_third_party_imports(
@@ -1396,8 +1477,11 @@ def _get_transitive_script_third_party_imports(
     visited.add(file_path)
 
     third_party: set[str] = set()
-    for mod in _get_script_ast_imports(file_path):
+    named_targets, file_targets = _get_script_ast_imports(file_path)
+    for mod in named_targets:
         third_party.update(_classify_module_import(mod, file_path, repo_root, visited))
+    for f in file_targets:
+        third_party.update(_get_transitive_script_third_party_imports(f, repo_root, visited))
     return third_party
 
 
@@ -1409,61 +1493,12 @@ def _check_step_tool_execution(
     errors: list[str],
 ) -> bool:
     head = tokens[0]
-    if head == "pytest":
-        if "pytest" not in installed_modules:
-            errors.append(f"job '{job_name}' step '{step_name}': executes 'pytest' before it is installed")
-        return True
-
-    is_ruff = head == "ruff" or (
-        len(tokens) >= 3 and tokens[0] in ("python", "python3") and tokens[1] == "-m" and tokens[2] == "ruff"
-    )
-    if is_ruff:
-        if "ruff" not in installed_modules:
-            errors.append(f"job '{job_name}' step '{step_name}': executes 'ruff' before it is installed")
-        return True
+    for tool in ("pytest", "ruff", "complexipy", "vulture", "mypy"):
+        if head == tool:
+            if tool not in installed_modules:
+                errors.append(f"job '{job_name}' step '{step_name}': executes '{tool}' before it is installed")
+            return True
     return False
-
-
-def _resolve_python_module_token(
-    tokens: list[str],
-    arg_idx: int,
-    root: Path,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> str | None:
-    mod_name = tokens[arg_idx + 1].split(".")[0]
-    is_external = (
-        mod_name not in getattr(sys, "stdlib_module_names", frozenset())
-        and mod_name not in ("tools", "scripts", "tests")
-        and (root / mod_name).is_dir() is False
-    )
-    if is_external and mod_name not in installed_modules:
-        errors.append(f"job '{job_name}' step '{step_name}': runs module '{mod_name}' which is not installed")
-    mod_path = root / f"{tokens[arg_idx + 1].replace('.', '/')}.py"
-    return str(mod_path) if mod_path.is_file() else None
-
-
-def _resolve_python_script_token(
-    tokens: list[str],
-    root: Path,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> str | None:
-    head = tokens[0]
-    if head not in ("python", "python3") or len(tokens) < 2:
-        return None
-    arg_idx = 1
-    while arg_idx < len(tokens) and tokens[arg_idx].startswith("-"):
-        if tokens[arg_idx] == "-m" and arg_idx + 1 < len(tokens):
-            return _resolve_python_module_token(tokens, arg_idx, root, step_name, job_name, installed_modules, errors)
-        arg_idx += 1
-    if arg_idx < len(tokens) and not tokens[arg_idx].startswith("-"):
-        return tokens[arg_idx]
-    return None
 
 
 def _check_step_script_imports(
@@ -1486,34 +1521,185 @@ def _check_step_script_imports(
             )
 
 
-def _process_workflow_step_line(
-    raw_line: str,
+def _scan_unittest_discover_imports(
+    tokens: list[str],
+    root: Path,
+    job_name: str,
+    step_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> None:
+    start_dir = root
+    if "-s" in tokens:
+        idx = tokens.index("-s")
+        if idx + 1 < len(tokens):
+            start_dir = root / tokens[idx + 1]
+    if not start_dir.is_dir():
+        return
+    for test_file in sorted(start_dir.rglob("test*.py")):
+        needed = _get_transitive_script_third_party_imports(test_file, root)
+        for imp in sorted(needed):
+            if imp not in installed_modules:
+                errors.append(
+                    f"job '{job_name}' step '{step_name}': discovered test '{test_file.relative_to(root)}' "
+                    f"imports '{imp}', but '{imp}' is not installed by prior steps in job '{job_name}'"
+                )
+
+
+def _scan_python_c_imports(
+    code: str,
+    root: Path,
+    job_name: str,
+    step_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> None:
+    try:
+        tree = ast.parse(code)
+    except Exception as exc:
+        errors.append(f"job '{job_name}' step '{step_name}': unanalysable python -c code: {exc}")
+        return
+    named_targets, _ = _parse_ast_imports(tree, root)
+    for mod in named_targets:
+        needed = _classify_module_import(mod, root, root, set())
+        for imp in sorted(needed):
+            if imp not in installed_modules:
+                errors.append(
+                    f"job '{job_name}' step '{step_name}': inline python code imports '{imp}', "
+                    f"but '{imp}' is not installed by prior steps in job '{job_name}'"
+                )
+
+
+def _process_python_m_flag(
+    tokens: list[str],
+    arg_idx: int,
+    root: Path,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> None:
+    target_mod = tokens[arg_idx + 1]
+    if target_mod in ("pytest", "ruff", "complexipy", "vulture", "mypy"):
+        if target_mod not in installed_modules:
+            errors.append(f"job '{job_name}' step '{step_name}': executes '{target_mod}' before it is installed")
+        return
+    if target_mod == "unittest":
+        _scan_unittest_discover_imports(tokens[arg_idx + 2 :], root, job_name, step_name, installed_modules, errors)
+        return
+    local_file = _resolve_dotted_module_to_file(target_mod, root, root)
+    if local_file is not None:
+        _check_step_script_imports(str(local_file), root, step_name, job_name, installed_modules, errors)
+        return
+    top_mod = target_mod.split(".")[0]
+    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
+    if top_mod not in stdlib and top_mod not in installed_modules:
+        errors.append(f"job '{job_name}' step '{step_name}': runs module '{top_mod}' which is not installed")
+
+
+def _process_python_command(
+    tokens: list[str],
+    root: Path,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> None:
+    arg_idx = 1
+    while arg_idx < len(tokens) and tokens[arg_idx].startswith("-"):
+        flag = tokens[arg_idx]
+        if flag == "-m" and arg_idx + 1 < len(tokens):
+            _process_python_m_flag(tokens, arg_idx, root, step_name, job_name, installed_modules, errors)
+            return
+        if flag == "-c" and arg_idx + 1 < len(tokens):
+            _scan_python_c_imports(tokens[arg_idx + 1], root, job_name, step_name, installed_modules, errors)
+            return
+        arg_idx += 1
+    if arg_idx < len(tokens):
+        script_token = tokens[arg_idx]
+        _check_step_script_imports(script_token, root, step_name, job_name, installed_modules, errors)
+
+
+def _is_env_or_var_prefix(tok: str) -> bool:
+    if tok in ("env", "/usr/bin/env") or tok.startswith("-"):
+        return True
+    return "=" in tok and tok.split("=")[0].isidentifier()
+
+
+def _strip_command_prefixes(tokens: list[str]) -> list[str]:
+    cleaned = tokens[2:] if len(tokens) >= 2 and tokens[0] == "cd" else tokens
+    idx = 0
+    while idx < len(cleaned) and _is_env_or_var_prefix(cleaned[idx]):
+        idx += 1
+    return cleaned[idx:]
+
+
+def _split_chained_tokens(tokens: list[str]) -> list[list[str]]:
+    commands: list[list[str]] = []
+    current: list[str] = []
+    for tok in tokens:
+        if tok in ("&&", "||", ";"):
+            if current:
+                commands.append(current)
+                current = []
+        else:
+            current.append(tok)
+    if current:
+        commands.append(current)
+    return commands
+
+
+def _join_line_continuations(raw_text: str) -> list[str]:
+    joined = re.sub(r"\\\s*\n\s*", " ", raw_text)
+    lines: list[str] = []
+    for raw_line in joined.splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#"):
+            lines.append(line)
+    return lines
+
+
+def _process_sub_command_tokens(
+    tokens: list[str],
     step_name: str,
     job_name: str,
     installed_modules: set[str],
     root: Path,
     errors: list[str],
 ) -> None:
-    line = raw_line.strip()
-    if not line or line.startswith("#"):
+    cleaned = _strip_command_prefixes(tokens)
+    if not cleaned:
         return
-    try:
-        tokens = shlex.split(line, comments=True)
-    except ValueError:
+    if is_pip_install_tokens(cleaned):
+        installed_modules.update(_extract_pip_installed_modules(cleaned))
         return
-    if not tokens:
+    if _check_step_tool_execution(cleaned, step_name, job_name, installed_modules, errors):
         return
+    head = cleaned[0]
+    if head in ("python", "python3"):
+        _process_python_command(cleaned, root, step_name, job_name, installed_modules, errors)
+        return
+    if head not in SAFE_WORKFLOW_COMMANDS:
+        errors.append(f"job '{job_name}' step '{step_name}': unanalysable command: {head!r}")
 
-    if is_pip_install_tokens(tokens):
-        installed_modules.update(_extract_pip_installed_modules(tokens))
-        return
 
-    if _check_step_tool_execution(tokens, step_name, job_name, installed_modules, errors):
-        return
-
-    script_token = _resolve_python_script_token(tokens, root, step_name, job_name, installed_modules, errors)
-    if script_token:
-        _check_step_script_imports(script_token, root, step_name, job_name, installed_modules, errors)
+def _process_workflow_step_run(
+    run_cmd: str,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    root: Path,
+    errors: list[str],
+) -> None:
+    lines = _join_line_continuations(run_cmd)
+    for line in lines:
+        try:
+            tokens = shlex.split(line, comments=True)
+        except ValueError as exc:
+            errors.append(f"job '{job_name}' step '{step_name}': unanalysable syntax in line {line!r}: {exc}")
+            continue
+        for sub_cmd in _split_chained_tokens(tokens):
+            _process_sub_command_tokens(sub_cmd, step_name, job_name, installed_modules, root, errors)
 
 
 def _validate_job_step_imports(
@@ -1535,9 +1721,7 @@ def _validate_job_step_imports(
         run_cmd = step.get("run")
         if not isinstance(run_cmd, str):
             continue
-
-        for raw_line in run_cmd.splitlines():
-            _process_workflow_step_line(raw_line, step_name, job_name, installed_modules, root, errors)
+        _process_workflow_step_run(run_cmd, step_name, job_name, installed_modules, root, errors)
 
 
 def validate_workflow_step_imports(

@@ -663,7 +663,9 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
     child_script = (
         "import os, pathlib, signal, sys, time; "
         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "tmp = sys.argv[1] + '.tmp'; "
+        "pathlib.Path(tmp).write_text(str(os.getpid())); "
+        "os.replace(tmp, sys.argv[1]); "
         "time.sleep(60)"
     )
     parent_script = (
@@ -684,7 +686,7 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
 
     def sync_snapshot(_timeout_seconds: float = 2) -> runner.ProcessInventory | None:
         nonlocal timed_out_triggered
-        if child_pid_path.exists() and not timed_out_triggered:
+        if child_pid_path.exists() and child_pid_path.stat().st_size > 0 and not timed_out_triggered:
             timed_out_triggered = True
             return None
         return runner.ProcessInventory(unrelated_snapshot, False)

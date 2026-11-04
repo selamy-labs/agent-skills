@@ -2668,3 +2668,61 @@ def test_workflow_step_imports_rejects_uninstalled_tool_execution() -> None:
     assert any("executes 'ruff' before it is installed" in e for e in errs_ruff), (
         f"Expected ruff error, got: {errs_ruff}"
     )
+
+
+def test_workflow_step_imports_rejects_transitive_local_package_imports(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    test_script = tmp_path / "scripts" / "repro_transitive.py"
+    test_script.parent.mkdir(parents=True, exist_ok=True)
+    test_script.write_text("from tests.test_format_gate import validate_release_workflow\n")
+
+    wf = {
+        "jobs": {
+            "quality": {
+                "steps": [
+                    {"run": "pip install pyyaml==6.0.1"},
+                    {"run": f"python {test_script}"},
+                ]
+            }
+        }
+    }
+    errs = validate_workflow_step_imports(wf, REPO_ROOT)
+    assert any("imports 'pytest'" in e for e in errs), f"Expected transitive pytest rejection, got: {errs}"
+
+
+def test_workflow_step_imports_handles_wrapped_chained_and_python_c() -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    wf = {
+        "jobs": {
+            "tests": {
+                "steps": [
+                    {"run": "env X=1 pytest"},
+                    {"run": "cd . && pytest"},
+                    {"run": 'python -c "import pytest"'},
+                    {"run": "python \\\n scripts/lint_skills.py"},
+                ]
+            }
+        }
+    }
+    errs = validate_workflow_step_imports(wf, REPO_ROOT)
+    assert any("executes 'pytest' before it is installed" in e for e in errs)
+    assert any("inline python code imports 'pytest'" in e for e in errs)
+    assert any("imports 'yaml'" in e for e in errs)
+
+
+def test_workflow_step_imports_rejects_unanalysable_command() -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    wf = {
+        "jobs": {
+            "quality": {
+                "steps": [
+                    {"run": "unknown_tool_xyz --flag"},
+                ]
+            }
+        }
+    }
+    errs = validate_workflow_step_imports(wf, REPO_ROOT)
+    assert any("unanalysable command: 'unknown_tool_xyz'" in e for e in errs)
