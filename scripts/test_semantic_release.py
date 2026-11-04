@@ -3,17 +3,16 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-try:
-    from scripts import public_api_stability, validate_pr_title
-    from scripts import semantic_release as release
-except ImportError:
-    import public_api_stability  # type: ignore[no-redef,import-not-found]
-    import semantic_release as release  # type: ignore[no-redef,import-not-found]
-    import validate_pr_title  # type: ignore[no-redef,import-not-found]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts import public_api_stability, validate_pr_title
+from scripts import semantic_release as release
 
 
 class SemanticReleasePolicyTest(unittest.TestCase):

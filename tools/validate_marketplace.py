@@ -16,6 +16,7 @@ try:
     from tools.validate_skills import (
         ALLOWED_JOB_LEVEL_KEYS,
         ALLOWED_USES_ACTIONS,
+        CANONICAL_INSTALL_CMD,
         CANONICAL_QUALITY_RUN_ARGVS,
         CANONICAL_TESTS_RUN_ARGVS,
         check_banned_prefixes_and_operators,
@@ -24,7 +25,7 @@ try:
         validate_job_level_keys,
         validate_quality_workflow,
         validate_shell_configuration,
-        validate_workflow_step_imports,
+        validate_workflow_install_steps,
     )
 except ModuleNotFoundError:
     _root = Path(__file__).resolve().parents[1]
@@ -33,6 +34,7 @@ except ModuleNotFoundError:
     from tools.validate_skills import (
         ALLOWED_JOB_LEVEL_KEYS,
         ALLOWED_USES_ACTIONS,
+        CANONICAL_INSTALL_CMD,
         CANONICAL_QUALITY_RUN_ARGVS,
         CANONICAL_TESTS_RUN_ARGVS,
         check_banned_prefixes_and_operators,
@@ -41,7 +43,7 @@ except ModuleNotFoundError:
         validate_job_level_keys,
         validate_quality_workflow,
         validate_shell_configuration,
-        validate_workflow_step_imports,
+        validate_workflow_install_steps,
     )
 
 __all__ = [
@@ -55,7 +57,7 @@ __all__ = [
     "validate_release_publish_job",
     "validate_release_scanners",
     "validate_release_workflow",
-    "validate_workflow_step_imports",
+    "validate_workflow_install_steps",
     "main",
 ]
 
@@ -253,53 +255,64 @@ def _check_release_step_1(s1: Any, errors: list[str]) -> None:
         errors.append("job 'release' step 1 must not declare env")
 
 
+def _check_release_step_install(s_inst: Any, errors: list[str]) -> None:
+    if not isinstance(s_inst, dict) or s_inst.get("name") != "Install dependencies":
+        errors.append("job 'release' step 2 must be Install dependencies")
+        return
+    if str(s_inst.get("run", "")).strip() != CANONICAL_INSTALL_CMD:
+        errors.append(f"job 'release' step 2 must run canonical install command: {CANONICAL_INSTALL_CMD!r}")
+    if "env" in s_inst:
+        errors.append("job 'release' step 2 must not declare env")
+
+
 def _check_release_step_2(s2: Any, errors: list[str]) -> None:
     if not isinstance(s2, dict) or s2.get("name") != "Plan release" or s2.get("id") != "plan":
-        errors.append("job 'release' step 2 must be Plan release")
+        errors.append("job 'release' step 3 must be Plan release")
         return
     if str(s2.get("run", "")).strip() != CANONICAL_PLAN_CMD:
-        errors.append("job 'release' step 2 must run exact canonical semantic_release.py command")
+        errors.append("job 'release' step 3 must run exact canonical semantic_release.py command")
     if "env" in s2:
-        errors.append("job 'release' step 2 must not declare env")
+        errors.append("job 'release' step 3 must not declare env")
 
 
 def _check_release_step_3(s3: Any, errors: list[str]) -> None:
     if not isinstance(s3, dict) or s3.get("name") != "Create tag":
-        errors.append("job 'release' step 3 must be Create tag")
+        errors.append("job 'release' step 4 must be Create tag")
         return
     if s3.get("if") != "steps.plan.outputs.release_needed == 'true'":
-        errors.append("job 'release' step 3 must check release_needed")
+        errors.append("job 'release' step 4 must check release_needed")
     lines = tuple(line.strip() for line in str(s3.get("run", "")).strip().splitlines() if line.strip())
     if lines != CANONICAL_TAG_CMD_LINES:
-        errors.append("job 'release' step 3 must run exact canonical git tag and push commands")
+        errors.append("job 'release' step 4 must run exact canonical git tag and push commands")
     if "env" in s3:
-        errors.append("job 'release' step 3 must not declare env")
+        errors.append("job 'release' step 4 must not declare env")
 
 
 def _check_release_step_4(s4: Any, errors: list[str]) -> None:
     if not isinstance(s4, dict) or s4.get("name") != "Create GitHub release":
-        errors.append("job 'release' step 4 must be Create GitHub release")
+        errors.append("job 'release' step 5 must be Create GitHub release")
         return
     if s4.get("if") != "steps.plan.outputs.release_needed == 'true'":
-        errors.append("job 'release' step 4 must check release_needed")
+        errors.append("job 'release' step 5 must check release_needed")
     if str(s4.get("run", "")).strip() != CANONICAL_RELEASE_CMD:
-        errors.append("job 'release' step 4 must run canonical gh release create")
+        errors.append("job 'release' step 5 must run canonical gh release create")
     if s4.get("env") != {"GH_TOKEN": "${{ github.token }}"}:
-        errors.append("job 'release' step 4 env must be exactly GH_TOKEN")
+        errors.append("job 'release' step 5 env must be exactly GH_TOKEN")
 
 
 def _check_release_publish_steps(steps: Any, errors: list[str]) -> None:
     if not isinstance(steps, list):
         errors.append("job 'release' steps must be a list")
         return
-    if len(steps) != 5:
-        errors.append(f"job 'release' must have exactly 5 canonical steps, got {len(steps)}")
+    if len(steps) != 6:
+        errors.append(f"job 'release' must have exactly 6 canonical steps, got {len(steps)}")
         return
     _check_release_step_0(steps[0], errors)
     _check_release_step_1(steps[1], errors)
-    _check_release_step_2(steps[2], errors)
-    _check_release_step_3(steps[3], errors)
-    _check_release_step_4(steps[4], errors)
+    _check_release_step_install(steps[2], errors)
+    _check_release_step_2(steps[3], errors)
+    _check_release_step_3(steps[4], errors)
+    _check_release_step_4(steps[5], errors)
 
 
 def validate_release_publish_job(job: dict[str, Any], job_name: str = "release") -> list[str]:
@@ -374,7 +387,7 @@ def validate_release_workflow(workflow_input: dict[str, Any] | str | Path) -> li
     on_triggers = doc.get("on") if "on" in doc else cast(dict[Any, Any], doc).get(True)
     _validate_release_workflow_triggers(on_triggers, errors)
     _validate_release_workflow_jobs(doc.get("jobs"), errors)
-    errors.extend(validate_workflow_step_imports(doc))
+    errors.extend(validate_workflow_install_steps(doc))
 
     return errors
 

@@ -33,20 +33,16 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
-      - name: Verify commit is reachable from origin/main
-        run: git merge-base --is-ancestor "${{ github.event.workflow_run.head_sha || github.sha }}" origin/main
       - uses: actions/setup-python@v6.3.0
         with:
           python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Verify commit is reachable from origin/main
+        run: git merge-base --is-ancestor "${{ github.event.workflow_run.head_sha || github.sha }}" origin/main
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
         with:
           go-version: "1.26.10"
-      - name: Install dependencies
-        # ruff is pinned (issue #101): `ruff format` output is version-dependent, so an
-        # unpinned formatter would let a future release turn main red with no
-        # code change — defeating the "formatter output is the source of truth"
-        # goal of the format gate (#101).
-        run: pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1
       - name: Verify Go helper
         working-directory: tools/hclblocks
         env:
@@ -101,6 +97,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
       - name: Plan release
         id: plan
         run: python scripts/semantic_release.py --notes-file release-notes.md

@@ -438,6 +438,12 @@ def _check_pip_tokens_contract(
     step_name: str,
     tokens: list[str],
 ) -> None:
+    if tokens == ["python", "-m", "pip", "install", "-r", "requirements-dev.txt"]:
+        root_dir = Path(__file__).resolve().parents[1]
+        reqs = (root_dir / "requirements-dev.txt").read_text(encoding="utf-8")
+        for _pkg_name, expected_token in PINNED_TOOL_REQUIREMENTS.items():
+            assert expected_token in reqs, f"{path_name} job {job_name} requirements-dev.txt missing {expected_token!r}"
+        return
     for _pkg_name, expected_token in PINNED_TOOL_REQUIREMENTS.items():
         assert any(t == expected_token for t in tokens), (
             f"{path_name} job {job_name} primary install missing {expected_token!r}"
@@ -930,9 +936,17 @@ def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:
         )
     ]
     assert len(pip_steps) == 1, f"verify job has {len(pip_steps)} pip install steps; exactly 1 required"
-    assert "pytest==8.3.4" in pip_steps[0].get("run", ""), "verify job must pin pytest==8.3.4"
-    assert "pytest-cov==6.0.0" in pip_steps[0].get("run", ""), "verify job must pin pytest-cov==6.0.0"
-    assert "ruff==0.15.21" in pip_steps[0].get("run", ""), "verify job must pin ruff==0.15.21"
+    run_str = pip_steps[0].get("run", "").strip()
+    if run_str == "python -m pip install -r requirements-dev.txt":
+        root_dir = Path(__file__).resolve().parents[1]
+        reqs = (root_dir / "requirements-dev.txt").read_text(encoding="utf-8")
+        assert "pytest==8.3.4" in reqs, "verify job must pin pytest==8.3.4"
+        assert "pytest-cov==6.0.0" in reqs, "verify job must pin pytest-cov==6.0.0"
+        assert "ruff==0.15.21" in reqs, "verify job must pin ruff==0.15.21"
+    else:
+        assert "pytest==8.3.4" in run_str, "verify job must pin pytest==8.3.4"
+        assert "pytest-cov==6.0.0" in run_str, "verify job must pin pytest-cov==6.0.0"
+        assert "ruff==0.15.21" in run_str, "verify job must pin ruff==0.15.21"
     _validate_verify_go_steps(verify_steps)
 
 
@@ -1063,14 +1077,24 @@ def _validate_release_publish_step_4(s4: Any) -> None:
     assert s4.get("env") == {"GH_TOKEN": "${{ github.token }}"}, "release job step 4 env must be exactly GH_TOKEN"
 
 
+def _validate_release_publish_step_install(s_inst: Any) -> None:
+    assert isinstance(s_inst, dict), "release job step 2 must be mapping"
+    assert s_inst.get("name") == "Install dependencies", "release job step 2 must be Install dependencies"
+    assert str(s_inst.get("run", "")).strip() == "python -m pip install -r requirements-dev.txt", (
+        "release job step 2 must run canonical install command"
+    )
+    assert "env" not in s_inst, "release job step 2 must not declare env"
+
+
 def _validate_release_publish_steps(release_steps: list[Any]) -> None:
     assert isinstance(release_steps, list), "release job steps must be a list"
-    assert len(release_steps) == 5, f"release job must have exactly 5 canonical steps, got {len(release_steps)}"
+    assert len(release_steps) == 6, f"release job must have exactly 6 canonical steps, got {len(release_steps)}"
     _validate_release_publish_step_0(release_steps[0])
     _validate_release_publish_step_1(release_steps[1])
-    _validate_release_publish_step_2(release_steps[2])
-    _validate_release_publish_step_3(release_steps[3])
-    _validate_release_publish_step_4(release_steps[4])
+    _validate_release_publish_step_install(release_steps[2])
+    _validate_release_publish_step_2(release_steps[3])
+    _validate_release_publish_step_3(release_steps[4])
+    _validate_release_publish_step_4(release_steps[5])
 
 
 def _validate_release_publish_job(release: dict[str, Any]) -> None:
@@ -1099,9 +1123,16 @@ def _validate_release_publish_job(release: dict[str, Any]) -> None:
 
 
 def _validate_pinned_ruff() -> None:
+    reqs = (REPO_ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+    assert "ruff==0.15.21" in reqs, "requirements-dev.txt must pin ruff==0.15.21"
+
     quality_doc = yaml.safe_load((WORKFLOWS_DIR / "quality.yaml").read_text(encoding="utf-8"))
     test_steps = quality_doc["jobs"]["tests"]["steps"]
-    assert any("ruff==0.15.21" in s.get("run", "") for s in test_steps if isinstance(s, dict))
+    assert any(
+        "ruff==0.15.21" in s.get("run", "") or "requirements-dev.txt" in s.get("run", "")
+        for s in test_steps
+        if isinstance(s, dict)
+    )
 
     pre_commit = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     ruff_repo = next(r for r in pre_commit.get("repos", []) if "ruff-pre-commit" in r.get("repo", ""))

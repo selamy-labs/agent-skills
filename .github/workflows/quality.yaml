@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install pyyaml==6.0.1
+        run: python -m pip install -r requirements-dev.txt
       - name: Validate skill frontmatter and naming
         run: python scripts/lint_skills.py
       - name: Block public information leaks
@@ -58,11 +58,7 @@ jobs:
         with:
           go-version: "1.26.10"
       - name: Install dependencies
-        # ruff is pinned (issue #101): `ruff format` output is version-dependent, so an
-        # unpinned formatter would let a future release turn main red with no
-        # code change — defeating the "formatter output is the source of truth"
-        # goal of the format gate (#101).
-        run: pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1
+        run: python -m pip install -r requirements-dev.txt
       - name: Verify Go helper
         working-directory: tools/hclblocks
         env:

@@ -38,7 +38,7 @@ def _make_valid_job() -> dict[str, Any]:
                 "uses": "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
                 "with": {"go-version": "1.26.10"},
             },
-            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
+            {"run": "python -m pip install -r requirements-dev.txt"},
             {
                 "name": "Verify Go helper",
                 "working-directory": "tools/hclblocks",
@@ -797,7 +797,7 @@ def test_validate_job_gates_verify_permissions() -> None:
     job = {
         "permissions": {"contents": "read", "checks": "read"},
         "steps": [
-            {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
+            {"run": "python -m pip install -r requirements-dev.txt"},
             {
                 "name": "Verify Go helper",
                 "working-directory": "tools/hclblocks",

@@ -8,7 +8,6 @@ import re
 import shlex
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -348,7 +347,9 @@ def check_pip_install_tokens(tokens: list[str], is_primary_install_step: bool) -
 
 
 def validate_primary_pip_install_step(tokens: list[str]) -> list[str]:
-    """Verify that the primary pip install step pins all required tools."""
+    """Verify that the primary pip install step installs requirements-dev.txt or pins all required tools."""
+    if tokens == ["python", "-m", "pip", "install", "-r", "requirements-dev.txt"]:
+        return []
     errors: list[str] = []
     for _pkg_name, expected_token in PINNED_TOOL_REQUIREMENTS.items():
         if not any(t == expected_token for t in tokens):
@@ -636,7 +637,7 @@ ALLOWED_USES_ACTIONS: frozenset[str] = frozenset(
 
 CANONICAL_QUALITY_RUN_ARGVS: frozenset[tuple[str, ...]] = frozenset(
     {
-        ("pip", "install", "pyyaml==6.0.1"),
+        ("python", "-m", "pip", "install", "-r", "requirements-dev.txt"),
         ("python", "scripts/lint_skills.py"),
         ("python", "scripts/privacy_scan.py"),
         ("python", "scripts/test_privacy_scan.py"),
@@ -650,14 +651,7 @@ CANONICAL_QUALITY_RUN_ARGVS: frozenset[tuple[str, ...]] = frozenset(
 )
 
 CANONICAL_TESTS_RUN_SEQUENCE: tuple[tuple[str, ...], ...] = (
-    (
-        "pip",
-        "install",
-        "pytest==8.3.4",
-        "pytest-cov==6.0.0",
-        "ruff==0.15.21",
-        "pyyaml==6.0.1",
-    ),
+    ("python", "-m", "pip", "install", "-r", "requirements-dev.txt"),
     ("go", "vet", "./..."),
     ("python", "-m", "ruff", "check", "."),
     ("python", "-m", "ruff", "format", "--check", "--diff", "."),
@@ -1324,1075 +1318,178 @@ def _validate_quality_workflow_jobs(jobs: dict[str, Any]) -> list[str]:
     return errors
 
 
-WORKFLOW_PACKAGE_TO_MODULES: dict[str, set[str]] = {
-    "pyyaml": {"yaml"},
-    "pytest": {"pytest", "_pytest"},
-    "pytest-cov": {"pytest_cov"},
-    "ruff": {"ruff"},
-    "complexipy": {"complexipy"},
-    "vulture": {"vulture"},
-    "mypy": {"mypy"},
+CANONICAL_INSTALL_CMD = "python -m pip install -r requirements-dev.txt"
+
+LOCAL_TOP_LEVEL: frozenset[str] = frozenset({"scripts", "skills", "tests", "tools"})
+
+MODULE_TO_DIST: dict[str, str] = {
+    "yaml": "pyyaml",
+    "pyyaml": "pyyaml",
+    "pytest": "pytest",
+    "_pytest": "pytest",
+    "pytest_cov": "pytest-cov",
+    "ruff": "ruff",
 }
 
-ACCEPTED_COMMAND_SEGMENTS: frozenset[str] = frozenset(
-    {
-        'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md',
-        'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
-        'git config user.name "github-actions[bot]"',
-        'git merge-base --is-ancestor "${{ github.event.workflow_run.head_sha || github.sha }}" origin/main',
-        'git push origin "${{ steps.plan.outputs.next_tag }}"',
-        'git tag -a "${{ steps.plan.outputs.next_tag }}" -F release-notes.md',
-        "go vet ./...",
-        "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1",
-        "pip install pyyaml==6.0.1",
-        "pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90",
-        "python -m ruff check .",
-        "python -m ruff format --check --diff .",
-        "python -m tests.test_coverage_threshold coverage.json",
-        "python -m unittest discover -s skills/portfolio-delivery-control/tests -v",
-        "python scripts/lint_skills.py",
-        "python scripts/privacy_scan.py",
-        "python scripts/public_api_stability.py",
-        "python scripts/security_scan.py",
-        "python scripts/semantic_release.py --notes-file release-notes.md",
-        "python scripts/test_pr_workflow_cancellation.py",
-        "python scripts/test_privacy_scan.py",
-        "python scripts/test_security_scan.py",
-        "python scripts/test_semantic_release.py",
-        'python scripts/validate_pr_title.py --title "$PR_TITLE" --body "$PR_BODY"',
-        "python tools/tf_module_layout.py --self-test",
-        "python tools/validate_marketplace.py",
-        "python tools/validate_skills.py",
-        "python3 -B scripts/lint_skills.py",
-        "python3 -B scripts/privacy_scan.py",
-        "python3 -B scripts/public_api_stability.py",
-        "python3 -B scripts/security_scan.py",
-        "python3 -B scripts/test_pr_workflow_cancellation.py",
-        "python3 -B scripts/test_privacy_scan.py",
-        "python3 -B scripts/test_security_scan.py",
-        "python3 -B scripts/test_semantic_release.py",
-        (
-            'python3 -B tools/release_gate.py --repo "${{ github.repository }}" '
-            '--sha "${{ github.event.workflow_run.head_sha || github.sha }}" '
-            '--expected-app-slug "github-actions" '
-            '--check-suite-id "${{ github.event.workflow_run.check_suite_id }}" '
-            "--wait-seconds 600 --poll-interval-seconds 10"
-        ),
-    }
-)
 
-
-def _extract_segments_from_step(step: Any) -> list[str]:
-    if not isinstance(step, dict) or not isinstance(step.get("run"), str):
-        return []
-    lines = []
-    for line in step["run"].splitlines():
+def _has_pip_install(cmd_str: str) -> bool:
+    """Return True if cmd_str invokes pip install."""
+    for line in cmd_str.splitlines():
         trimmed = line.strip()
-        if trimmed and not trimmed.startswith("#"):
-            lines.append(" ".join(trimmed.split()))
-    return lines
+        if not trimmed or trimmed.startswith("#"):
+            continue
+        try:
+            tokens = shlex.split(trimmed, comments=True)
+        except ValueError:
+            tokens = trimmed.split()
+        if is_pip_install_tokens(tokens):
+            return True
+    return False
 
 
-def _extract_segments_from_job(job: Any) -> list[str]:
+def _check_job_install_rule(job_name: str, job: dict[str, Any]) -> list[str]:
+    """Validate Rule B for a single workflow job."""
     if not isinstance(job, dict):
         return []
-    segs: list[str] = []
-    for step in job.get("steps", []):
-        segs.extend(_extract_segments_from_step(step))
-    return segs
-
-
-def _extract_segments_from_workflow_file(wf_file: Path) -> list[str]:
-    content = yaml.safe_load(wf_file.read_text(encoding="utf-8"))
-    if not isinstance(content, dict):
+    steps = job.get("steps")
+    if not isinstance(steps, list):
         return []
-    segs: list[str] = []
-    for job in content.get("jobs", {}).values():
-        segs.extend(_extract_segments_from_job(job))
-    return segs
+
+    run_steps: list[dict[str, Any]] = [
+        s for s in steps if isinstance(s, dict) and s.get("run") is not None and str(s.get("run", "")).strip()
+    ]
+    if not run_steps:
+        return []
+
+    errors: list[str] = []
+    first_run = str(run_steps[0].get("run", "")).strip()
+    if first_run != CANONICAL_INSTALL_CMD:
+        errors.append(f"job '{job_name}' first run step must be exactly {CANONICAL_INSTALL_CMD!r}, got: {first_run!r}")
+
+    for idx, step in enumerate(run_steps[1:], start=2):
+        step_cmd = str(step.get("run", ""))
+        if _has_pip_install(step_cmd):
+            step_name = step.get("name") or step.get("id") or f"step {idx}"
+            errors.append(f"job '{job_name}' step {step_name!r} has disallowed secondary pip install: {step_cmd!r}")
+
+    return errors
 
 
-def extract_workflow_command_segments(repo_root: Path) -> set[str]:
-    wf_dir = repo_root / ".github" / "workflows"
-    segments: set[str] = set()
-    for wf_file in sorted(wf_dir.glob("*.y*ml")):
-        segments.update(_extract_segments_from_workflow_file(wf_file))
-    return segments
+def validate_workflow_install_steps(doc: dict[str, Any]) -> list[str]:
+    """Validate Rule B: first run step in every job is canonical pip install, no others."""
+    if not isinstance(doc, dict):
+        return ["workflow document must be a mapping"]
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return []
+
+    errors: list[str] = []
+    for job_name, job in jobs.items():
+        errors.extend(_check_job_install_rule(str(job_name), job))
+    return errors
 
 
-def _get_enclosing_package_inits(file_path: Path, repo_root: Path) -> list[Path]:
-    inits: list[Path] = []
-    curr = file_path.parent
-    while curr != repo_root:
-        try:
-            curr.relative_to(repo_root)
-        except ValueError:
-            break
-        init = curr / "__init__.py"
-        if init.is_file():
-            inits.append(init)
-        curr = curr.parent
-    return inits
+def _read_pinned_distributions(requirements_path: Path) -> set[str]:
+    """Read distribution names from requirements-dev.txt."""
+    if not requirements_path.is_file():
+        return set()
+    dists: set[str] = set()
+    for line in requirements_path.read_text(encoding="utf-8").splitlines():
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#"):
+            continue
+        dist_name = re.split(r"[=<>!~]", trimmed)[0].strip().lower()
+        if dist_name:
+            dists.add(dist_name)
+    return dists
 
 
-def _check_candidate_file(base: Path, rel: Path) -> Path | None:
-    init_file = base / rel / "__init__.py"
-    if init_file.is_file():
-        return init_file
-    py_file = base / f"{rel}.py"
-    if py_file.is_file():
-        return py_file
-    return None
-
-
-def _resolve_leaf_in_base(base: Path, curr: Path, parts: list[str]) -> list[Path]:
-    init_file = curr / "__init__.py"
-    if init_file.is_file():
-        return [init_file]
-    py_file = base / f"{Path(*parts)}.py"
-    if py_file.is_file():
-        return [py_file]
-    return []
-
-
-def _resolve_chain_in_base(base: Path, parts: list[str]) -> list[Path]:
-    chain: list[Path] = []
-    curr = base
-    for i, part in enumerate(parts):
-        curr = curr / part
-        if i == len(parts) - 1:
-            leaf = _resolve_leaf_in_base(base, curr, parts)
-            return chain + leaf if leaf else []
-        init_file = curr / "__init__.py"
-        if init_file.is_file():
-            chain.append(init_file)
-        elif not curr.is_dir():
-            return []
-    return chain
-
-
-def _collect_ancestor_bases(file_path: Path, repo_root: Path) -> list[Path]:
-    bases: list[Path] = []
-    if file_path == repo_root:
-        return bases
-    curr = file_path.parent
-    while curr != repo_root:
-        try:
-            curr.relative_to(repo_root)
-        except ValueError:
-            break
-        if curr not in bases:
-            bases.append(curr)
-        curr = curr.parent
-    return bases
-
-
-def _get_search_bases(
-    file_path: Path,
-    repo_root: Path,
-    entry_roots: list[Path] | None = None,
-) -> list[Path]:
-    bases: list[Path] = []
-    if entry_roots:
-        for r in entry_roots:
-            if r not in bases:
-                bases.append(r)
-    for b in _collect_ancestor_bases(file_path, repo_root):
-        if b not in bases:
-            bases.append(b)
-    if repo_root not in bases:
-        bases.append(repo_root)
-    return bases
-
-
-def _resolve_dotted_module_to_files(
-    mod: str,
-    search_bases: list[Path],
-) -> list[Path]:
-    parts = mod.split(".")
-    candidates: list[Path] = []
-    for base in search_bases:
-        chain = _resolve_chain_in_base(base, parts)
-        for c in chain:
-            if c not in candidates:
-                candidates.append(c)
-    return candidates
-
-
-def _has_local_candidate(top: str, search_bases: list[Path]) -> bool:
-    for base in search_bases:
-        if (base / top / "__init__.py").is_file():
-            return True
-        if (base / f"{top}.py").is_file():
-            return True
-        if (base / top).is_dir():
-            return True
+def _is_allowed_import(name: str, pinned_dists: set[str]) -> bool:
+    """Return True if top-level import name satisfies Rule C."""
+    if name in sys.stdlib_module_names:
+        return True
+    if name in LOCAL_TOP_LEVEL:
+        return True
+    dist = MODULE_TO_DIST.get(name)
+    if dist is not None and dist.lower() in pinned_dists:
+        return True
     return False
 
 
-def _scan_resolved_local_files(
-    locals_: list[Path],
-    repo_root: Path,
-    visited: set[Path],
-    entry_roots: list[Path],
-) -> tuple[set[str], str | None]:
-    all_third_party: set[str] = set()
-    for local in locals_:
-        tp, err = _get_transitive_script_third_party_imports(local, repo_root, visited, entry_roots)
-        if err is not None:
-            return set(), err
-        all_third_party.update(tp)
-    return all_third_party, None
-
-
-def _resolve_relative_base(
-    file_path: Path,
-    level: int,
-    module: str | None,
-) -> tuple[Path, list[Path], str | None]:
-    base = file_path.parent
-    for _ in range(max(0, level - 1)):
-        base = base.parent
-    intermediates: list[Path] = []
-    if module:
-        for part in module.split("."):
-            base = base / part
-            init_file = base / "__init__.py"
-            if init_file.is_file():
-                intermediates.append(init_file)
-            elif not base.is_dir() and not base.with_suffix(".py").is_file():
-                return base, [], f"cannot resolve relative import chain in '{file_path}': module '{module}' not found"
-    return base, intermediates, None
-
-
-def _find_alias_candidates(base: Path, names: list[ast.alias]) -> list[Path]:
-    targets: list[Path] = []
-    for alias in names:
-        cand = _check_candidate_file(base, Path(alias.name))
-        if cand is not None:
-            targets.append(cand)
-    return targets
-
-
-def _find_fallback_base_candidate(base: Path) -> Path | None:
-    direct = _check_candidate_file(base.parent, Path(base.name))
-    if direct is not None:
-        return direct
-    py_file = base.with_suffix(".py")
-    if py_file.is_file():
-        return py_file
-    init_file = base / "__init__.py"
-    if init_file.is_file():
-        return init_file
-    return None
-
-
-def _resolve_relative_leaf(base: Path, names: list[ast.alias]) -> list[Path]:
-    targets = _find_alias_candidates(base, names)
-    if targets:
-        return targets
-    fallback = _find_fallback_base_candidate(base)
-    if fallback is not None:
-        return [fallback]
-    return []
-
-
-def _extract_relative_import_targets(
-    node: ast.ImportFrom,
-    file_path: Path,
-    repo_root: Path,
-) -> tuple[list[Path], str | None]:
-    base, intermediates, err = _resolve_relative_base(file_path, node.level, node.module)
-    if err is not None:
-        return [], err
-    targets = _resolve_relative_leaf(base, node.names)
-    if not targets:
-        return [], f"cannot resolve relative import chain in '{file_path}': level={node.level}, module={node.module}"
-    targets.extend(intermediates)
-    targets.extend(_get_enclosing_package_inits(file_path, repo_root))
-    return targets, None
-
-
-def _collect_import_node_targets(node: ast.Import, named_targets: set[str]) -> None:
-    for alias in node.names:
-        named_targets.add(alias.name)
-
-
-def _collect_import_from_targets(
-    node: ast.ImportFrom,
-    file_path: Path,
-    repo_root: Path,
-    named_targets: set[str],
-    file_targets: set[Path],
-    search_bases: list[Path],
-) -> str | None:
-    if node.level == 0 and node.module:
-        mod_files = _resolve_dotted_module_to_files(node.module, search_bases)
-        if mod_files:
-            file_targets.update(mod_files)
-        elif not (repo_root / node.module).is_dir():
-            named_targets.add(node.module)
-
-        for alias in node.names:
-            full = f"{node.module}.{alias.name}"
-            cands = _resolve_dotted_module_to_files(full, search_bases)
-            if cands:
-                file_targets.update(cands)
-            elif not mod_files and not (repo_root / node.module).is_dir():
-                named_targets.add(full)
-    elif node.level > 0:
-        rel_files, err = _extract_relative_import_targets(node, file_path, repo_root)
-        if err is not None:
-            return err
-        file_targets.update(rel_files)
-    return None
-
-
-def _parse_ast_imports(
-    tree: ast.AST,
-    file_path: Path,
-    repo_root: Path,
-    search_bases: list[Path],
-) -> tuple[set[str], set[Path], str | None]:
-    named_targets: set[str] = set()
-    file_targets: set[Path] = set()
+def _scan_ast_imports(tree: ast.AST) -> list[str]:
+    """Extract top-level imported module names from AST (ignoring relative imports)."""
+    names: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            _collect_import_node_targets(node, named_targets)
+            for alias in node.names:
+                names.append(alias.name.split(".")[0])
         elif isinstance(node, ast.ImportFrom):
-            err = _collect_import_from_targets(node, file_path, repo_root, named_targets, file_targets, search_bases)
-            if err is not None:
-                return set(), set(), err
-    return named_targets, file_targets, None
+            if node.level == 0 and node.module:
+                names.append(node.module.split(".")[0])
+    return names
 
 
-def _get_script_ast_imports(
-    file_path: Path,
+def _validate_single_python_file(
+    py_path: Path,
     repo_root: Path,
-    search_bases: list[Path],
-) -> tuple[set[str], set[Path], str | None]:
-    try:
-        content = file_path.read_text(encoding="utf-8")
-        tree = ast.parse(content, filename=str(file_path))
-    except Exception as exc:
-        return set(), set(), f"unparseable script '{file_path}': {exc}"
-    return _parse_ast_imports(tree, file_path, repo_root, search_bases)
-
-
-KNOWN_THIRD_PARTY_MODULES: frozenset[str] = frozenset(
-    {
-        "yaml",
-        "pyyaml",
-        "pytest",
-        "_pytest",
-        "pytest_cov",
-        "ruff",
-        "complexipy",
-        "vulture",
-        "mypy",
-    }
-)
-
-
-def _classify_module_import(
-    mod: str,
-    file_path: Path,
-    repo_root: Path,
-    visited: set[Path],
-    entry_roots: list[Path],
-) -> tuple[set[str], str | None]:
-    top = mod.split(".")[0]
-    search_bases = _get_search_bases(file_path, repo_root, entry_roots)
-    has_local = _has_local_candidate(top, search_bases)
-    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-    if not has_local and (top in stdlib or top == "__future__"):
-        return set(), None
-
-    locals_ = _resolve_dotted_module_to_files(mod, search_bases)
-    third_party: set[str] = set()
-    if top in KNOWN_THIRD_PARTY_MODULES:
-        third_party.add(top)
-
-    if locals_:
-        local_tp, err = _scan_resolved_local_files(locals_, repo_root, visited, entry_roots)
-        if err is not None:
-            return set(), err
-        third_party.update(local_tp)
-        return third_party, None
-
-    if has_local and "." in mod:
-        return set(), f"cannot resolve local import chain '{mod}'"
-
-    if top not in stdlib and top != "__future__":
-        third_party.add(top)
-
-    return third_party, None
-
-
-def _get_transitive_script_third_party_imports(
-    file_path: Path,
-    repo_root: Path,
-    visited: set[Path] | None = None,
-    entry_roots: list[Path] | None = None,
-) -> tuple[set[str], str | None]:
-    if visited is None:
-        visited = set()
-    if file_path in visited or not file_path.is_file():
-        return set(), None
-    visited.add(file_path)
-
-    if entry_roots is None:
-        entry_roots = [file_path.parent, repo_root]
-
-    search_bases = _get_search_bases(file_path, repo_root, entry_roots)
-    named_targets, file_targets, err = _get_script_ast_imports(file_path, repo_root, search_bases)
-    if err is not None:
-        return set(), err
-
-    all_third_party: set[str] = set()
-    for mod in sorted(named_targets):
-        third_party, c_err = _classify_module_import(mod, file_path, repo_root, visited, entry_roots)
-        if c_err is not None:
-            return set(), c_err
-        all_third_party.update(third_party)
-
-    for ft in sorted(file_targets):
-        tp, f_err = _get_transitive_script_third_party_imports(ft, repo_root, visited, entry_roots)
-        if f_err is not None:
-            return set(), f_err
-        all_third_party.update(tp)
-
-    return all_third_party, None
-
-
-def _is_print_call_allowed(call_node: ast.Call) -> bool:
-    if not isinstance(call_node.func, ast.Name) or call_node.func.id != "print":
-        return False
-    if call_node.keywords:
-        return False
-    for a in call_node.args:
-        if not isinstance(a, ast.Constant):
-            return False
-    return True
-
-
-def _is_allowed_c_expr(expr_val: ast.expr) -> bool:
-    if isinstance(expr_val, ast.Constant):
-        return True
-    if isinstance(expr_val, ast.Call):
-        return _is_print_call_allowed(expr_val)
-    return False
-
-
-def _is_print_rebound(names: list[ast.alias]) -> bool:
-    for alias in names:
-        if alias.asname == "print" or alias.name == "print":
-            return True
-    return False
-
-
-def _check_python_c_import(stmt: ast.Import | ast.ImportFrom) -> str | None:
-    if isinstance(stmt, ast.ImportFrom) and stmt.level > 0:
-        return "relative imports in python -c are not allowed"
-    if _is_print_rebound(stmt.names):
-        return "rebinding of print builtin in python -c is forbidden"
-    return None
-
-
-def _check_python_c_stmt(stmt: ast.stmt) -> str | None:
-    if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-        return _check_python_c_import(stmt)
-    if isinstance(stmt, ast.Pass):
-        return None
-    if isinstance(stmt, ast.Expr) and _is_allowed_c_expr(stmt.value):
-        return None
-    return "unanalysable statement or call in python -c"
-
-
-def _check_python_c_ast_allowlist(tree: ast.AST) -> str | None:
-    if not isinstance(tree, ast.Module):
-        return "python -c AST must be a Module"
-    for stmt in tree.body:
-        err = _check_python_c_stmt(stmt)
-        if err is not None:
-            return err
-    return None
-
-
-def _check_c_named_targets(
-    named_targets: set[str],
-    inline_path: Path,
-    root: Path,
-    job_name: str,
-    step_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> bool:
-    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-    for mod in sorted(named_targets):
-        needed, err = _classify_module_import(mod, inline_path, root, set(), [root])
-        if err is not None:
-            errors.append(f"job '{job_name}' step '{step_name}': unanalysable import in python -c code: {err}")
-            return False
-        for req in sorted(needed):
-            if req not in installed_modules and req not in stdlib:
-                errors.append(
-                    f"job '{job_name}' step '{step_name}': inline python code imports '{req}' before it is installed"
-                )
-    return True
-
-
-def _check_c_file_targets(
-    file_targets: set[Path],
-    root: Path,
-    job_name: str,
-    step_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> bool:
-    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-    for ft in sorted(file_targets):
-        tp, f_err = _get_transitive_script_third_party_imports(ft, root)
-        if f_err is not None:
-            errors.append(f"job '{job_name}' step '{step_name}': {f_err}")
-            return False
-        for req in sorted(tp):
-            if req not in installed_modules and req not in stdlib:
-                errors.append(
-                    f"job '{job_name}' step '{step_name}': inline python code imports '{req}' before it is installed"
-                )
-    return True
-
-
-def _scan_python_c_imports(
-    code: str,
-    root: Path,
-    job_name: str,
-    step_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> None:
-    try:
-        tree = ast.parse(code)
-    except Exception as exc:
-        errors.append(f"job '{job_name}' step '{step_name}': unanalysable python -c code: {exc}")
-        return
-
-    ast_err = _check_python_c_ast_allowlist(tree)
-    if ast_err is not None:
-        errors.append(f"job '{job_name}' step '{step_name}': {ast_err}")
-        return
-
-    inline_path = root / "__inline__.py"
-    search_bases = _get_search_bases(inline_path, root)
-    named_targets, file_targets, p_err = _parse_ast_imports(tree, inline_path, root, search_bases)
-    if p_err is not None:
-        errors.append(f"job '{job_name}' step '{step_name}': {p_err}")
-        return
-
-    if not _check_c_named_targets(named_targets, inline_path, root, job_name, step_name, installed_modules, errors):
-        return
-    _check_c_file_targets(file_targets, root, job_name, step_name, installed_modules, errors)
-
-
-def _validate_discovered_test_file(
-    test_file: Path,
-    root: Path,
-    job_name: str,
-    step_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> bool:
-    third_party, err = _get_transitive_script_third_party_imports(test_file, root)
-    if err is not None:
-        errors.append(f"job '{job_name}' step '{step_name}': {err}")
-        return False
-    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-    for req in sorted(third_party):
-        if req not in installed_modules and req not in stdlib:
-            errors.append(
-                f"job '{job_name}' step '{step_name}': unittest discovery imports '{req}' before it is installed"
-            )
-    return True
-
-
-def _scan_unittest_discover_imports(
-    root: Path,
-    start_dir: str,
-    pattern: str,
-    job_name: str,
-    step_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> None:
-    target_dir = root / start_dir if not Path(start_dir).is_absolute() else Path(start_dir)
-    if not target_dir.is_dir():
-        errors.append(
-            f"job '{job_name}' step '{step_name}': cannot resolve unittest discover start directory '{start_dir}'"
-        )
-        return
-    for test_file in sorted(target_dir.rglob(pattern)):
-        if test_file.is_file() and test_file.suffix == ".py":
-            if not _validate_discovered_test_file(test_file, root, job_name, step_name, installed_modules, errors):
-                return
-
-
-def _get_configured_testpaths(root: Path) -> list[str]:
-    pyproject = root / "pyproject.toml"
-    if pyproject.is_file():
-        try:
-            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-            testpaths = data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("testpaths")
-            if isinstance(testpaths, list) and all(isinstance(p, str) for p in testpaths):
-                return testpaths
-        except Exception:
-            pass
-    return ["tests", "scripts", "skills/portfolio-delivery-control/tests"]
-
-
-def _get_target_ancestor_dirs(target: Path, root: Path) -> list[Path]:
-    curr = target if target.is_dir() else target.parent
-    dirs: list[Path] = []
-    while True:
-        dirs.append(curr)
-        if curr == root:
-            break
-        try:
-            curr.relative_to(root)
-            curr = curr.parent
-        except ValueError:
-            break
-    if root not in dirs:
-        dirs.append(root)
-    return dirs
-
-
-def _collect_ancestor_conftests(target: Path, root: Path) -> list[Path]:
-    conftests: list[Path] = []
-    for d in _get_target_ancestor_dirs(target, root):
-        cand = d / "conftest.py"
-        if cand.is_file() and cand not in conftests:
-            conftests.append(cand)
-    return conftests
-
-
-def _extract_plugin_names_from_expr(expr_val: ast.expr) -> list[str] | None:
-    if isinstance(expr_val, (ast.List, ast.Tuple)):
-        names: list[str] = []
-        for elt in expr_val.elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                names.append(elt.value)
-            else:
-                return None
-        return names
-    if isinstance(expr_val, ast.Constant) and isinstance(expr_val.value, str):
-        return [expr_val.value]
-    return None
-
-
-def _extract_plugins_from_assign(node: ast.Assign) -> tuple[list[str], bool]:
-    if any(isinstance(t, ast.Name) and t.id == "pytest_plugins" for t in node.targets):
-        val = _extract_plugin_names_from_expr(node.value)
-        return (val if val is not None else []), (val is not None)
-    return [], True
-
-
-def _extract_plugins_from_ann_assign(node: ast.AnnAssign) -> tuple[list[str], bool]:
-    if isinstance(node.target, ast.Name) and node.target.id == "pytest_plugins":
-        if node.value is None:
-            return [], True
-        val = _extract_plugin_names_from_expr(node.value)
-        return (val if val is not None else []), (val is not None)
-    return [], True
-
-
-def _extract_plugins_from_node(node: ast.AST) -> tuple[list[str], bool]:
-    if isinstance(node, ast.Assign):
-        return _extract_plugins_from_assign(node)
-    if isinstance(node, ast.AnnAssign):
-        return _extract_plugins_from_ann_assign(node)
-    return [], True
-
-
-def _extract_pytest_plugins(f: Path) -> tuple[list[str], bool]:
-    try:
-        tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
-    except Exception:
-        return [], True
-    plugins: list[str] = []
-    for node in ast.walk(tree):
-        names, ok = _extract_plugins_from_node(node)
-        if not ok:
-            return [], False
-        plugins.extend(names)
-    return plugins, True
-
-
-def _collect_all_py_files_under(target: Path, root: Path) -> list[Path]:
-    files: list[Path] = []
-    if target.is_file() and target.suffix == ".py":
-        return [target]
-    if target.is_dir():
-        for f in sorted(target.rglob("*.py")):
-            try:
-                rel = f.relative_to(root)
-                if "fixtures" in rel.parts:
-                    continue
-            except ValueError:
-                pass
-            files.append(f)
-    return files
-
-
-def _check_pytest_plugin(
-    plugin: str,
-    conftest_file: Path,
-    root: Path,
-    installed_modules: set[str],
-    errors: list[str],
-    job_name: str,
-    step_name: str,
-) -> None:
-    top = plugin.split(".")[0]
-    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-    if top not in stdlib and top not in installed_modules:
-        errors.append(f"job '{job_name}' step '{step_name}': pytest plugin '{plugin}' is not installed")
-        return
-    search_bases = _get_search_bases(conftest_file, root)
-    locals_ = _resolve_dotted_module_to_files(plugin, search_bases)
-    for lf in locals_:
-        tp, err = _get_transitive_script_third_party_imports(lf, root)
-        if err is not None:
-            errors.append(f"job '{job_name}' step '{step_name}': {err}")
-        for req in tp:
-            if req not in installed_modules and req not in stdlib:
-                errors.append(
-                    f"job '{job_name}' step '{step_name}': pytest plugin '{plugin}' "
-                    f"transitively requires '{req}' before it is installed"
-                )
-
-
-def _check_pytest_prerequisites(
-    cmd: str,
-    installed_modules: set[str],
-    errors: list[str],
-    job_name: str,
-    step_name: str,
-) -> bool:
-    if "pytest" not in installed_modules:
-        errors.append(f"job '{job_name}' step '{step_name}': executes 'pytest' before it is installed")
-        return False
-    if "--cov" in cmd and "pytest_cov" not in installed_modules:
-        errors.append(f"job '{job_name}' step '{step_name}': pytest --cov requires 'pytest-cov' to be installed")
-        return False
-    return True
-
-
-def _collect_all_test_and_conftest_files(root: Path) -> tuple[list[Path], set[Path]]:
-    testpaths = _get_configured_testpaths(root)
-    collected_files: list[Path] = []
-    conftests: set[Path] = set()
-
-    root_conftest = root / "conftest.py"
-    if root_conftest.is_file():
-        conftests.add(root_conftest)
-
-    for tp_str in testpaths:
-        tp_path = root / tp_str
-        for cf in _collect_ancestor_conftests(tp_path, root):
-            conftests.add(cf)
-        for f in _collect_all_py_files_under(tp_path, root):
-            collected_files.append(f)
-            for cf in _collect_ancestor_conftests(f, root):
-                conftests.add(cf)
-    return collected_files, conftests
-
-
-def _validate_conftests_plugins(
-    files: list[Path],
-    root: Path,
-    installed_modules: set[str],
-    errors: list[str],
-    job_name: str,
-    step_name: str,
-) -> bool:
-    for cf in sorted(files):
-        plugins, ok = _extract_pytest_plugins(cf)
-        if not ok:
-            errors.append(f"job '{job_name}' step '{step_name}': unanalysable pytest_plugins in '{cf}'")
-            return False
-        for pl in plugins:
-            _check_pytest_plugin(pl, cf, root, installed_modules, errors, job_name, step_name)
-    return True
-
-
-def _validate_single_test_file_imports(
-    tf: Path,
-    root: Path,
-    installed_modules: set[str],
-    errors: list[str],
-    job_name: str,
-    step_name: str,
-) -> bool:
-    tp, err = _get_transitive_script_third_party_imports(tf, root)
-    if err is not None:
-        errors.append(f"job '{job_name}' step '{step_name}': {err}")
-        return False
-    for req in sorted(tp):
-        stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-        if req not in installed_modules and req not in stdlib:
-            errors.append(
-                f"job '{job_name}' step '{step_name}': test file '{tf.relative_to(root)}' "
-                f"imports '{req}' before it is installed"
-            )
-    return True
-
-
-def _validate_test_file_imports(
-    all_files: list[Path],
-    root: Path,
-    installed_modules: set[str],
-    errors: list[str],
-    job_name: str,
-    step_name: str,
-) -> None:
-    for tf in all_files:
-        if not _validate_single_test_file_imports(tf, root, installed_modules, errors, job_name, step_name):
-            return
-
-
-def _validate_pytest_execution(
-    cmd: str,
-    root: Path,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> None:
-    if not _check_pytest_prerequisites(cmd, installed_modules, errors, job_name, step_name):
-        return
-    collected_files, conftests = _collect_all_test_and_conftest_files(root)
-    all_files = sorted(set(collected_files) | conftests)
-    if not _validate_conftests_plugins(all_files, root, installed_modules, errors, job_name, step_name):
-        return
-    _validate_test_file_imports(all_files, root, installed_modules, errors, job_name, step_name)
-
-
-def _check_step_script_imports(
-    script_token: str,
-    root: Path,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> None:
-    script_path = Path(script_token) if Path(script_token).is_absolute() else (root / script_token)
-    if not script_path.exists():
-        errors.append(f"job '{job_name}' step '{step_name}': cannot resolve script '{script_token}'")
-        return
-    third_party, err = _get_transitive_script_third_party_imports(script_path, root)
-    if err is not None:
-        errors.append(f"job '{job_name}' step '{step_name}': {err}")
-        return
-    for req in sorted(third_party):
-        stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-        if req not in installed_modules and req not in stdlib:
-            errors.append(
-                f"job '{job_name}' step '{step_name}': script '{script_token}' imports '{req}' before it is installed"
-            )
-
-
-def _check_ruff_execution(
-    root: Path,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> None:
-    if "ruff" not in installed_modules:
-        errors.append(f"job '{job_name}' step '{step_name}': executes 'ruff' before it is installed")
-        return
-    for cand in (root / "ruff.py", root / "ruff" / "__init__.py", root / "ruff" / "__main__.py"):
-        if cand.is_file():
-            _check_step_script_imports(str(cand), root, step_name, job_name, installed_modules, errors)
-
-
-def _check_unittest_execution(
-    root: Path,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    errors: list[str],
-) -> None:
-    for cand in (root / "unittest.py", root / "unittest" / "__init__.py", root / "unittest" / "__main__.py"):
-        if cand.is_file():
-            _check_step_script_imports(str(cand), root, step_name, job_name, installed_modules, errors)
-    _scan_unittest_discover_imports(
-        root,
-        "skills/portfolio-delivery-control/tests",
-        "*.py",
-        job_name,
-        step_name,
-        installed_modules,
-        errors,
-    )
-
-
-def _dispatch_pip_command(cmd: str, installed_modules: set[str]) -> None:
-    if cmd == "pip install pyyaml==6.0.1":
-        installed_modules.update({"yaml", "pyyaml"})
-    elif cmd == "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1":
-        installed_modules.update({"pytest", "pytest_cov", "ruff", "yaml", "pyyaml"})
-
-
-def _dispatch_accepted_script(
-    cmd: str,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    root: Path,
-    errors: list[str],
-) -> None:
-    parts = cmd.split()
-    script_token = parts[2] if parts[0] == "python3" else parts[1]
-    _check_step_script_imports(script_token, root, step_name, job_name, installed_modules, errors)
-
-
-def _dispatch_accepted_command(
-    cmd: str,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    root: Path,
-    errors: list[str],
-) -> None:
-    if cmd.startswith("pip install"):
-        _dispatch_pip_command(cmd, installed_modules)
-    elif cmd.startswith("python -m ruff"):
-        _check_ruff_execution(root, step_name, job_name, installed_modules, errors)
-    elif cmd.startswith("python -m unittest"):
-        _check_unittest_execution(root, step_name, job_name, installed_modules, errors)
-    elif cmd.startswith("python -m tests.test_coverage_threshold"):
-        _check_step_script_imports(
-            "tests/test_coverage_threshold.py", root, step_name, job_name, installed_modules, errors
-        )
-    elif cmd.startswith("pytest"):
-        _validate_pytest_execution(cmd, root, step_name, job_name, installed_modules, errors)
-    elif cmd.startswith(("python ", "python3 ")):
-        _dispatch_accepted_script(cmd, step_name, job_name, installed_modules, root, errors)
-
-
-def _check_raw_line_operators(raw_line: str) -> str | None:
-    clean_line = strip_github_expressions(raw_line)
-    unquoted = re.sub(r"'[^']*'", "''", clean_line)
-    unquoted = re.sub(r'"[^"]*"', '""', unquoted)
-    for op in ("||", "&&", "|", "&", ";", "<", ">"):
-        if op in unquoted:
-            return f"unanalysable shell operator {op!r}"
-    return None
-
-
-def _check_raw_line_shell_constructs(raw_line: str) -> str | None:
-    if "\\" in raw_line:
-        return "unanalysable shell construct: line continuation '\\' is not permitted"
-    if "#" in raw_line:
-        return "unanalysable shell construct: '#' in line"
-    op_err = _check_raw_line_operators(raw_line)
-    if op_err is not None:
-        return op_err
-    if "$(" in raw_line or "`" in raw_line:
-        return "unanalysable shell construct: command substitution"
-    stripped = raw_line.strip()
-    if stripped.startswith(("export ", "env ")) or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", stripped):
-        return "unanalysable shell construct: environment prefix or command 'export'/'env' is not permitted"
-    return None
-
-
-def _process_single_raw_run_line(
-    raw_line: str,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    root: Path,
-    errors: list[str],
-) -> bool:
-    stripped = raw_line.strip()
-    if not stripped:
-        return True
-    if stripped.startswith("#"):
-        if raw_line.rstrip().endswith("\\"):
-            errors.append(
-                f"job '{job_name}' step '{step_name}': unanalysable shell construct: "
-                f"line continuation '\\' is not permitted"
-            )
-            return False
-        return True
-
-    shell_err = _check_raw_line_shell_constructs(raw_line)
-    if shell_err is not None:
-        errors.append(f"job '{job_name}' step '{step_name}': {shell_err}")
-        return False
-
-    norm_line = " ".join(stripped.split())
-    if norm_line not in ACCEPTED_COMMAND_SEGMENTS:
-        errors.append(
-            f"job '{job_name}' step '{step_name}': unanalysable step: command segment not in allowlist: {norm_line!r}"
-        )
-        return False
-
-    _dispatch_accepted_command(norm_line, step_name, job_name, installed_modules, root, errors)
-    return True
-
-
-def _process_workflow_step_run(
-    run_cmd: str,
-    step_name: str,
-    job_name: str,
-    installed_modules: set[str],
-    root: Path,
-    errors: list[str],
-) -> None:
-    for raw_line in run_cmd.splitlines():
-        if not _process_single_raw_run_line(raw_line, step_name, job_name, installed_modules, root, errors):
-            return
-
-
-def _validate_job_step_imports(
-    job_name: str,
-    job: dict[str, Any],
-    root: Path,
-    errors: list[str],
-) -> None:
-    installed_modules: set[str] = set()
-    steps = job.get("steps", [])
-    if not isinstance(steps, list):
-        return
-    for i, step in enumerate(steps):
-        if isinstance(step, dict):
-            step_name = step.get("name", f"step_{i}")
-            run_cmd = step.get("run")
-            if isinstance(run_cmd, str):
-                _process_workflow_step_run(run_cmd, step_name, job_name, installed_modules, root, errors)
-
-
-def validate_workflow_step_imports(
-    workflow_yaml: dict[str, Any],
-    repo_root: Path | None = None,
+    pinned_dists: set[str],
 ) -> list[str]:
-    """Validate that all step commands and imported modules in workflow jobs are pre-installed.
+    """Validate imports in a single python file under Rule C."""
+    try:
+        source = py_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(py_path))
+    except Exception as exc:
+        return [f"{py_path.name}: syntax or read error: {exc}"]
 
-    Known limitation: Dynamic module loading (e.g. importlib.import_module with non-literal
-    variables, sys.modules manipulation, __import__ with dynamic arguments) inside accepted
-    scripts cannot be resolved statically and is not supported.
-    """
-    root = repo_root or Path(__file__).resolve().parents[1]
+    imported_names = _scan_ast_imports(tree)
     errors: list[str] = []
-    jobs = workflow_yaml.get("jobs", {})
-    if not isinstance(jobs, dict):
-        return errors
-    for job_name, job in jobs.items():
-        if isinstance(job, dict):
-            _validate_job_step_imports(job_name, job, root, errors)
+    try:
+        rel_path = py_path.relative_to(repo_root).as_posix()
+    except ValueError:
+        rel_path = py_path.as_posix()
+    for name in imported_names:
+        if not _is_allowed_import(name, pinned_dists):
+            errors.append(
+                f"{rel_path}: disallowed top-level import {name!r} "
+                "(not in stdlib, LOCAL_TOP_LEVEL, or mapped in requirements-dev.txt)"
+            )
+    return errors
+
+
+def get_tracked_python_files(repo_root: Path) -> list[Path]:
+    """Collect tracked python files under repo_root excluding tests/fixtures/**."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "*.py"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            raw_paths = proc.stdout.strip().splitlines()
+            return [repo_root / p for p in raw_paths if not p.startswith("tests/fixtures/") and "fixtures/" not in p]
+    except Exception:
+        pass
+
+    return [
+        p
+        for p in repo_root.rglob("*.py")
+        if not p.relative_to(repo_root).as_posix().startswith("tests/fixtures/")
+        and "fixtures" not in p.relative_to(repo_root).parts
+    ]
+
+
+def validate_tracked_python_imports(repo_root: Path | None = None) -> list[str]:
+    """Rule C: AST-scan tracked python files to ensure imports are stdlib, local, or mapped."""
+    root = (repo_root or Path(__file__).resolve().parents[1]).resolve()
+    req_file = root / "requirements-dev.txt"
+    pinned_dists = _read_pinned_distributions(req_file)
+
+    files = get_tracked_python_files(root)
+    errors: list[str] = []
+    for f in sorted(files):
+        errors.extend(_validate_single_python_file(f, root, pinned_dists))
     return errors
 
 
@@ -2423,7 +1520,7 @@ def validate_quality_workflow(workflow_input: dict[str, Any] | str | Path) -> li
 
     errors.extend(_check_quality_job_ifs(jobs))
     errors.extend(_validate_quality_workflow_jobs(jobs))
-    errors.extend(validate_workflow_step_imports(doc))
+    errors.extend(validate_workflow_install_steps(doc))
     return errors
 
 
@@ -2443,8 +1540,9 @@ def main(argv: list[str] | None = None) -> int:
     skill_errors, count = validate_skills_directory(root)
     workflow_path = root / ".github" / "workflows" / "quality.yaml"
     wf_errors = validate_quality_workflow(workflow_path) if workflow_path.is_file() else ["quality.yaml not found"]
+    import_errors = validate_tracked_python_imports(root)
 
-    all_errors = list(skill_errors) + wf_errors + check_no_tracked_coverage_json(root)
+    all_errors = list(skill_errors) + wf_errors + import_errors + check_no_tracked_coverage_json(root)
     if all_errors:
         for err in all_errors:
             print(f"ERROR: {err}", file=sys.stderr)
