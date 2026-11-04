@@ -193,26 +193,7 @@ def _check_report_age(path: Path, session_start: float, max_age_seconds: float) 
         )
 
 
-def _handle_missing_marker(path: Path, min_mtime: float | None, marker: Path) -> None:
-    if path.name == "coverage.json":
-        raise AssertionError(
-            f"Coverage report {path} was not produced by a pytest run in the current session "
-            f"(missing session marker {marker}). Pre-existing or unbound reports are refused."
-        )
-    if min_mtime is not None and path.stat().st_mtime < min_mtime - 0.05:
-        raise AssertionError(
-            f"Coverage report {path} is older than required run start time "
-            f"({path.stat().st_mtime:.2f} < {min_mtime:.2f}). Pre-existing reports are refused."
-        )
-
-
 CANONICAL_MARKER_PATH: Path = REPO_ROOT / ".coverage_session_start"
-
-
-def _is_explicit_session_id(session_id: str | None) -> bool:
-    if not session_id:
-        return False
-    return not (session_id.startswith("cli-nonce-") or session_id.startswith("untrusted-nonce-"))
 
 
 def _resolve_coverage_marker(path: Path, expected_session_id: str | None) -> Path:
@@ -246,8 +227,10 @@ def check_report_freshness(
     """Verify that coverage report is not older than the current test run and matches session marker."""
     marker = _resolve_coverage_marker(path, expected_session_id)
     if not marker.is_file():
-        _handle_missing_marker(path, min_mtime, marker)
-        return
+        raise AssertionError(
+            f"Coverage report {path} was not produced by a pytest run in the current session "
+            f"(missing session marker {marker}). Pre-existing or unbound reports are refused."
+        )
 
     marker_data = _read_session_marker(marker, max_age_seconds=max_age_seconds)
     session_start = float(marker_data["timestamp"])
@@ -369,7 +352,7 @@ def test_verify_coverage_report_rejects_high_combined_low_raw_branch(tmp_path: P
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match=r"Raw branch coverage 50\.00% < 90\.0%"):
-        verify_coverage_report(report)
+        verify_coverage_report(report, check_run=False)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -429,7 +412,7 @@ def test_verify_coverage_report_fixtures(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    combined, raw_b = verify_coverage_report(valid_report)
+    combined, raw_b = verify_coverage_report(valid_report, check_run=False)
     assert combined == 96.04
     assert pytest.approx(raw_b, 0.01) == 94.46
 
@@ -447,7 +430,7 @@ def test_verify_coverage_report_fixtures(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match="Combined coverage 0.00% < 90.0%"):
-        verify_coverage_report(zero_report)
+        verify_coverage_report(zero_report, check_run=False)
 
     low_branch_report = tmp_path / "low_branch_cov.json"
     low_branch_report.write_text(
@@ -463,7 +446,7 @@ def test_verify_coverage_report_fixtures(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match=r"Raw branch coverage 80.00% < 90.0%"):
-        verify_coverage_report(low_branch_report)
+        verify_coverage_report(low_branch_report, check_run=False)
 
     no_branches_report = tmp_path / "no_branches_cov.json"
     no_branches_report.write_text(
@@ -479,10 +462,10 @@ def test_verify_coverage_report_fixtures(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(AssertionError, match="Coverage report contains no branches"):
-        verify_coverage_report(no_branches_report)
+        verify_coverage_report(no_branches_report, check_run=False)
 
     with pytest.raises(FileNotFoundError):
-        verify_coverage_report(tmp_path / "nonexistent.json")
+        verify_coverage_report(tmp_path / "nonexistent.json", check_run=False)
 
 
 def test_verify_coverage_json_thresholds_synthetic(tmp_path: Path) -> None:
@@ -550,15 +533,37 @@ def test_coverage_threshold_fails_when_env_path_missing(
 
 
 def test_main_cli_success_and_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import hashlib
+    import time
+
+    session_id = "cli-test-session"
+    monkeypatch.setenv("COVERAGE_SESSION_ID", session_id)
+    now = time.time()
+
     valid_report = tmp_path / "valid.json"
-    valid_report.write_text(
+    content = json.dumps(
+        {
+            "session_id": session_id,
+            "totals": {
+                "percent_covered": 95.0,
+                "covered_branches": 95,
+                "num_branches": 100,
+            },
+        }
+    )
+    valid_report.write_text(content, encoding="utf-8")
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    # Missing marker fails closed
+    assert main([str(valid_report)]) == 1
+
+    marker = tmp_path / ".coverage_session_start"
+    marker.write_text(
         json.dumps(
             {
-                "totals": {
-                    "percent_covered": 95.0,
-                    "covered_branches": 95,
-                    "num_branches": 100,
-                }
+                "session_id": session_id,
+                "timestamp": now - 1.0,
+                "report_digest": digest,
             }
         ),
         encoding="utf-8",
@@ -568,6 +573,17 @@ def test_main_cli_success_and_failure(tmp_path: Path, monkeypatch: pytest.Monkey
     missing = tmp_path / "nonexistent.json"
     assert main([str(missing)]) == 1
 
+    # Marker is consumed; re-create for COVERAGE_JSON_PATH test
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "timestamp": now - 1.0,
+                "report_digest": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("COVERAGE_JSON_PATH", str(valid_report))
     assert main([]) == 0
 
@@ -575,14 +591,24 @@ def test_main_cli_success_and_failure(tmp_path: Path, monkeypatch: pytest.Monkey
     assert main([]) == 1
 
     low_report = tmp_path / "low.json"
-    low_report.write_text(
+    low_content = json.dumps(
+        {
+            "session_id": session_id,
+            "totals": {
+                "percent_covered": 95.0,
+                "covered_branches": 10,
+                "num_branches": 20,
+            },
+        }
+    )
+    low_report.write_text(low_content, encoding="utf-8")
+    low_digest = hashlib.sha256(low_content.encode("utf-8")).hexdigest()
+    marker.write_text(
         json.dumps(
             {
-                "totals": {
-                    "percent_covered": 95.0,
-                    "covered_branches": 10,
-                    "num_branches": 20,
-                }
+                "session_id": session_id,
+                "timestamp": now - 1.0,
+                "report_digest": low_digest,
             }
         ),
         encoding="utf-8",
@@ -1351,6 +1377,81 @@ def test_argon_ts_r24_003_malformed_run_start_fails_closed(monkeypatch: pytest.M
     """ARGON-TS-R24-003: Malformed COVERAGE_RUN_START fails closed."""
     monkeypatch.setenv("COVERAGE_RUN_START", "not-a-number")
     assert main(["coverage.json"]) == 1
+
+
+def test_ts27_01_opus_markerless_renamed_report_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """TS27-01: Renamed report without session marker must be refused in default and CI mode."""
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("COVERAGE_SESSION_ID", raising=False)
+
+    report = tmp_path / "stale-report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "session_id": "previous-pytest-session",
+                "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="missing session marker"):
+        verify_coverage_report(report)
+    assert main([str(report)]) == 1
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("COVERAGE_SESSION_ID", "999-1")
+    with pytest.raises(AssertionError, match="missing session marker"):
+        verify_coverage_report(report)
+    assert main([str(report)]) == 1
+
+
+def test_as_ts_r27_sol61_01_markerless_renamed_report_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AS-TS-R27-SOL61-01: Markerless report with another basename must be refused in default and CI mode."""
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("COVERAGE_SESSION_ID", raising=False)
+
+    sub = tmp_path / ".complexipy_cache"
+    sub.mkdir(parents=True, exist_ok=True)
+    report = sub / "renamed-coverage.json"
+    report.write_text(
+        json.dumps(
+            {
+                "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="missing session marker"):
+        verify_coverage_report(report)
+    assert main([str(report)]) == 1
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("COVERAGE_SESSION_ID", "current-independent-session")
+    with pytest.raises(AssertionError, match="missing session marker"):
+        verify_coverage_report(report)
+    assert main([str(report)]) == 1
+
+
+def test_markerless_reports_with_arbitrary_basenames_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """TS27-01 / AS-TS-R27-SOL61-01: Reports with arbitrary basenames (report.json, cov/x.json) without markers fail."""
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("COVERAGE_SESSION_ID", raising=False)
+
+    basenames = ["report.json", "cov/x.json", "custom_cov.json", "out.json"]
+    for rel_name in basenames:
+        rep = tmp_path / rel_name
+        rep.parent.mkdir(parents=True, exist_ok=True)
+        rep.write_text(
+            json.dumps(
+                {
+                    "totals": {"percent_covered": 95.0, "covered_branches": 95, "num_branches": 100},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(AssertionError, match="missing session marker"):
+            verify_coverage_report(rep)
+        assert main([str(rep)]) == 1
 
 
 if __name__ == "__main__":

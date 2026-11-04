@@ -125,9 +125,10 @@ both commands, or invoke the automated wrapper script:
 # Automated wrapper (generates a shared session ID and runs both commands):
 python scripts/run_coverage_gate.py
 
-# Or manually via two steps:
-COVERAGE_SESSION_ID="local-run-$(date +%s)" pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
-COVERAGE_SESSION_ID="local-run-$(date +%s)" python -m tests.test_coverage_threshold coverage.json
+# Or manually via two steps sharing one session ID:
+export COVERAGE_SESSION_ID="local-run-$(date +%s)"
+pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
+python -m tests.test_coverage_threshold coverage.json
 ```
 
 ## Versioning

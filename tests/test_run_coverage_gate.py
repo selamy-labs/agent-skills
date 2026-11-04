@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -72,3 +73,29 @@ def test_run_coverage_gate_propagates_verify_failure() -> None:
 def test_run_coverage_gate_main_wrapper() -> None:
     with patch("scripts.run_coverage_gate.run_coverage_gate", return_value=0):
         assert main() == 0
+
+
+def test_readme_documents_shared_session_id_for_manual_commands() -> None:
+    readme_path = Path(__file__).resolve().parents[1] / "README.md"
+    content = readme_path.read_text(encoding="utf-8")
+    assert 'export COVERAGE_SESSION_ID="local-run-$(date +%s)"' in content
+    assert '$(date +%s)" pytest' not in content
+    assert '$(date +%s)" python' not in content
+
+
+def test_documented_manual_sequence_shares_single_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    session_id = "local-run-1700000000"
+    monkeypatch.setenv("COVERAGE_SESSION_ID", session_id)
+    captured_envs: list[dict[str, str]] = []
+
+    def mock_run(cmd: list[str], cwd: str, env: dict[str, str]) -> MagicMock:
+        captured_envs.append(dict(env))
+        return MagicMock(returncode=0)
+
+    with patch("subprocess.run", side_effect=mock_run):
+        rc = run_coverage_gate()
+
+    assert rc == 0
+    assert len(captured_envs) == 2
+    assert captured_envs[0]["COVERAGE_SESSION_ID"] == session_id
+    assert captured_envs[1]["COVERAGE_SESSION_ID"] == session_id
