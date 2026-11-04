@@ -1346,25 +1346,32 @@ PRIVILEGED_JOB_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-PRIVILEGED_REUSABLE_JOB_ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
-    {
-        (
-            ".github/workflows/diagram-freshness.yml",
-            "diagram-freshness",
-            "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
-        ),
-        (
-            ".github/workflows/secret-scan.yml",
-            "secret-scan",
-            "selamy-labs/.github/.github/workflows/secret-scan.yml@main",
-        ),
-        (
-            ".github/workflows/vulture-check.yml",
-            "vulture-check",
-            "selamy-labs/.github/.github/workflows/vulture-check.yml@main",
-        ),
-    }
-)
+REUSABLE_JOB_REQUIRED_PERMISSIONS: dict[tuple[str, str, str], dict[str, str]] = {
+    (
+        ".github/workflows/diagram-freshness.yml",
+        "diagram-freshness",
+        "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+    ): {
+        "contents": "read",
+        "pull-requests": "write",
+    },
+    (
+        ".github/workflows/secret-scan.yml",
+        "secret-scan",
+        "selamy-labs/.github/.github/workflows/secret-scan.yml@main",
+    ): {
+        "contents": "read",
+    },
+    (
+        ".github/workflows/vulture-check.yml",
+        "vulture-check",
+        "selamy-labs/.github/.github/workflows/vulture-check.yml@main",
+    ): {
+        "contents": "read",
+    },
+}
+
+PRIVILEGED_REUSABLE_JOB_ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(REUSABLE_JOB_REQUIRED_PERMISSIONS.keys())
 
 PRIVILEGED_JOB_ALLOWED_SCRIPTS: frozenset[str] = frozenset({"scripts/semantic_release.py"})
 
@@ -1997,6 +2004,67 @@ def _check_allowlisted_job(
     return _check_privileged_job(wf_name, job_name, steps, repo_root)
 
 
+def _check_reusable_job_required_perms(
+    job_name: str,
+    workflow_rel: str,
+    req_perms: dict[str, str],
+    eff_perms: dict[str, Any],
+) -> list[str]:
+    """Verify all required permissions are granted at the expected level."""
+    errors: list[str] = []
+    for scope, level in sorted(req_perms.items()):
+        actual = eff_perms.get(scope)
+        if actual is None:
+            errors.append(
+                f"reusable workflow job '{job_name}' in '{workflow_rel}' missing required permission '{scope}: {level}'"
+            )
+        elif actual != level:
+            errors.append(
+                f"reusable workflow job '{job_name}' in '{workflow_rel}' has permission '{scope}: {actual}', "
+                f"expected '{scope}: {level}'"
+            )
+    return errors
+
+
+def _check_reusable_job_extra_perms(
+    job_name: str,
+    workflow_rel: str,
+    req_perms: dict[str, str],
+    eff_perms: dict[str, Any],
+) -> list[str]:
+    """Verify no extra permissions beyond the pinned set are granted."""
+    errors: list[str] = []
+    for scope, actual in sorted(eff_perms.items()):
+        if scope not in req_perms:
+            errors.append(
+                f"reusable workflow job '{job_name}' in '{workflow_rel}' has extra permission beyond pinned set: "
+                f"'{scope}: {actual}'"
+            )
+    return errors
+
+
+def _check_reusable_job_permissions(
+    job_name: str,
+    workflow_rel: str,
+    triple: tuple[str, str, str],
+    eff_perms: Any,
+) -> list[str]:
+    """Validate reusable workflow job permissions against exact pinned requirements."""
+    req_perms = REUSABLE_JOB_REQUIRED_PERMISSIONS.get(triple)
+    if req_perms is None:
+        return [
+            f"job '{job_name}' in '{workflow_rel}' invokes unallowlisted reusable workflow; no pinned permissions found"
+        ]
+    if not isinstance(eff_perms, dict):
+        return [
+            f"reusable workflow job '{job_name}' in '{workflow_rel}' effective permissions "
+            f"must be a mapping matching pinned permissions {req_perms!r}, got: {eff_perms!r}"
+        ]
+    errors = _check_reusable_job_required_perms(job_name, workflow_rel, req_perms, eff_perms)
+    errors.extend(_check_reusable_job_extra_perms(job_name, workflow_rel, req_perms, eff_perms))
+    return errors
+
+
 def _check_reusable_workflow_job(
     job_name: str,
     job: dict[str, Any],
@@ -2018,12 +2086,7 @@ def _check_reusable_workflow_job(
             f"reusable workflow job '{job_name}' in '{workflow_rel}' declares disallowed 'secrets' key: {sec_val!r}"
         ]
     eff_perms = _effective_job_permissions(job, workflow_doc)
-    if _is_privileged_permissions(eff_perms):
-        return [
-            f"reusable workflow job '{job_name}' in '{workflow_rel}' has write permissions "
-            f"but is not in PRIVILEGED_JOB_ALLOWLIST"
-        ]
-    return []
+    return _check_reusable_job_permissions(job_name, workflow_rel, triple, eff_perms)
 
 
 def _check_job_install_rule(

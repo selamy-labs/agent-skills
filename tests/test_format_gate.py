@@ -3915,17 +3915,20 @@ class TestR40Hygiene:
     """
 
     def test_reusable_workflow_triple_allowlist_and_substitutions(self) -> None:
-        from tools.validate_skills import PRIVILEGED_REUSABLE_JOB_ALLOWLIST, validate_workflow_install_steps
+        from tools.validate_skills import (
+            REUSABLE_JOB_REQUIRED_PERMISSIONS,
+            validate_workflow_install_steps,
+        )
 
-        # 1. Existing 3 org-owned callers pass when read-only
-        for wf_file, job_id, uses_str in sorted(PRIVILEGED_REUSABLE_JOB_ALLOWLIST):
+        # 1. Existing 3 org-owned callers pass when matching pinned permissions
+        for (wf_file, job_id, uses_str), req_perms in sorted(REUSABLE_JOB_REQUIRED_PERMISSIONS.items()):
             doc = {
-                "permissions": {"contents": "read"},
                 "jobs": {
                     job_id: {
+                        "permissions": dict(req_perms),
                         "uses": uses_str,
                     }
-                },
+                }
             }
             errs = validate_workflow_install_steps(doc, workflow_rel=wf_file)
             assert errs == [], f"Expected allowlisted triple ({wf_file}, {job_id}, {uses_str}) to pass, got: {errs}"
@@ -3976,7 +3979,7 @@ class TestR40Hygiene:
             }
         }
         errs = validate_workflow_install_steps(job_write_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
-        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errs)
+        assert any("effective permissions must be a mapping" in e for e in errs)
 
         # 6. Write permission variant: job-level contents: write fails
         job_contents_write_doc = {
@@ -3990,7 +3993,7 @@ class TestR40Hygiene:
         errs = validate_workflow_install_steps(
             job_contents_write_doc, workflow_rel=".github/workflows/diagram-freshness.yml"
         )
-        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errs)
+        assert any("missing required permission 'pull-requests: write'" in e for e in errs)
 
         # 7. Write permission variant: workflow-level contents: write fails
         wf_write_doc = {
@@ -4002,7 +4005,7 @@ class TestR40Hygiene:
             },
         }
         errs = validate_workflow_install_steps(wf_write_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
-        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errs)
+        assert any("missing required permission 'pull-requests: write'" in e for e in errs)
 
     def test_actions_only_non_privileged_jobs_fail_closed(self) -> None:
         from tools.validate_skills import validate_workflow_install_steps
@@ -4226,14 +4229,14 @@ class TestR41Hygiene:
 
         # 3. Clean allowlisted call without secrets passes
         clean_doc = {
-            "permissions": {"contents": "read"},
             "jobs": {
-                "diagram-freshness": {
-                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                "secret-scan": {
+                    "permissions": {"contents": "read"},
+                    "uses": "selamy-labs/.github/.github/workflows/secret-scan.yml@main",
                 }
             },
         }
-        assert validate_workflow_install_steps(clean_doc, workflow_rel=".github/workflows/diagram-freshness.yml") == []
+        assert validate_workflow_install_steps(clean_doc, workflow_rel=".github/workflows/secret-scan.yml") == []
 
 
 class TestR42Hygiene:
@@ -4332,7 +4335,7 @@ class TestR42Hygiene:
         # TS41-02: workflow_doc is None should not raise AttributeError or typing error
         job = {
             "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
-            "permissions": {"contents": "read"},
+            "permissions": {"contents": "read", "pull-requests": "write"},
         }
         errs = _check_reusable_workflow_job("diagram-freshness", job, ".github/workflows/diagram-freshness.yml", None)
         assert errs == []
@@ -4441,3 +4444,90 @@ class TestR43Hygiene:
         # Discovered and passes Rule C
         errs = val_skills.validate_tracked_python_imports(repo_dir)
         assert errs == []
+
+
+class TestR44Hygiene:
+    """Table-stakes R44: pinned required permissions for allowlisted reusable workflow jobs."""
+
+    def test_r43_diagram_freshness_without_pull_requests_write_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        # (a) R43's diagram-freshness.yml (workflow permissions contents: read,
+        # no job-level pull-requests: write) must FAIL
+        r43_doc = {
+            "name": "Diagram Freshness",
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "diagram-freshness": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(r43_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert any("missing required permission 'pull-requests: write'" in e for e in errs)
+
+    def test_restored_diagram_freshness_passes(self) -> None:
+        import scripts.test_pr_workflow_cancellation as test_pr
+        import tools.validate_marketplace as val_mp
+        import tools.validate_skills as val_skills
+        from tools.validate_skills import validate_workflow_install_steps
+
+        # (b) Restored file passes
+        df_path = REPO_ROOT / ".github" / "workflows" / "diagram-freshness.yml"
+        doc = yaml.safe_load(df_path.read_text(encoding="utf-8"))
+        errs = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert errs == []
+
+        # All 3 validator entrypoints pass
+        assert val_skills.validate_all_workflows_install_steps(REPO_ROOT) == []
+        assert val_mp.validate_all_workflows_install_steps(REPO_ROOT) == []
+        assert test_pr.test_all_workflows_install_steps_and_requirements() is None
+
+    def test_reusable_workflow_extra_permission_fails(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        # (c) Granting an extra permission beyond the pinned set is reported (fail) unless it is in the pinned set
+        # Case 1: diagram-freshness granted extra permission 'issues: write'
+        extra_df_doc = {
+            "jobs": {
+                "diagram-freshness": {
+                    "permissions": {
+                        "contents": "read",
+                        "pull-requests": "write",
+                        "issues": "write",
+                    },
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            },
+        }
+        errs_df = validate_workflow_install_steps(extra_df_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert any("extra permission beyond pinned set: 'issues: write'" in e for e in errs_df)
+
+        # Case 2: secret-scan granted extra permission 'pull-requests: write'
+        extra_ss_doc = {
+            "jobs": {
+                "secret-scan": {
+                    "permissions": {
+                        "contents": "read",
+                        "pull-requests": "write",
+                    },
+                    "uses": "selamy-labs/.github/.github/workflows/secret-scan.yml@main",
+                }
+            },
+        }
+        errs_ss = validate_workflow_install_steps(extra_ss_doc, workflow_rel=".github/workflows/secret-scan.yml")
+        assert any("extra permission beyond pinned set: 'pull-requests: write'" in e for e in errs_ss)
+
+        # Case 3: vulture-check granted extra permission 'contents: write' (disallowed level)
+        extra_vc_doc = {
+            "jobs": {
+                "vulture-check": {
+                    "permissions": {
+                        "contents": "write",
+                    },
+                    "uses": "selamy-labs/.github/.github/workflows/vulture-check.yml@main",
+                }
+            },
+        }
+        errs_vc = validate_workflow_install_steps(extra_vc_doc, workflow_rel=".github/workflows/vulture-check.yml")
+        assert any("has permission 'contents: write', expected 'contents: read'" in e for e in errs_vc)
