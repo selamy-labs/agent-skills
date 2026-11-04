@@ -15,8 +15,10 @@ import yaml
 
 from tools.validate_skills import (
     is_coverage_check_tokens,
+    validate_all_workflows_install_steps,
     validate_job_gates,
     validate_quality_job,
+    validate_requirements_dev_file,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -442,9 +444,7 @@ def _check_pip_tokens_contract(
         f"{path_name} job {job_name} step {step_name!r} must run canonical install: got {tokens!r}"
     )
     root_dir = Path(__file__).resolve().parents[1]
-    reqs = (root_dir / "requirements-dev.txt").read_text(encoding="utf-8")
-    for _pkg_name, expected_token in PINNED_TOOL_REQUIREMENTS.items():
-        assert expected_token in reqs, f"{path_name} job {job_name} requirements-dev.txt missing {expected_token!r}"
+    assert validate_requirements_dev_file(root_dir / "requirements-dev.txt") == []
 
 
 def _validate_step_pip_lines(
@@ -928,10 +928,7 @@ def _validate_verify_pip_steps(verify_steps: list[Any]) -> None:
         f"verify job pip install must be canonical, got: {run_str!r}"
     )
     root_dir = Path(__file__).resolve().parents[1]
-    reqs = (root_dir / "requirements-dev.txt").read_text(encoding="utf-8")
-    assert "pytest==8.3.4" in reqs, "verify job must pin pytest==8.3.4"
-    assert "pytest-cov==6.0.0" in reqs, "verify job must pin pytest-cov==6.0.0"
-    assert "ruff==0.15.21" in reqs, "verify job must pin ruff==0.15.21"
+    assert validate_requirements_dev_file(root_dir / "requirements-dev.txt") == []
     _validate_verify_go_steps(verify_steps)
 
 
@@ -1098,8 +1095,7 @@ def _validate_release_publish_job(release: dict[str, Any]) -> None:
 
 
 def _validate_pinned_ruff() -> None:
-    reqs = (REPO_ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
-    assert "ruff==0.15.21" in reqs, "requirements-dev.txt must pin ruff==0.15.21"
+    assert validate_requirements_dev_file(REPO_ROOT / "requirements-dev.txt") == []
 
     quality_doc = yaml.safe_load((WORKFLOWS_DIR / "quality.yaml").read_text(encoding="utf-8"))
     test_steps = quality_doc["jobs"]["tests"]["steps"]
@@ -1829,9 +1825,15 @@ echo "SHOULD_NOT_EXECUTE"
     assert "SHOULD_NOT_EXECUTE" not in proc.stdout
 
 
+def test_all_workflows_install_steps_and_requirements() -> None:
+    assert validate_all_workflows_install_steps(REPO_ROOT) == []
+    assert validate_requirements_dev_file(REPO_ROOT / "requirements-dev.txt") == []
+
+
 def main() -> int:
     test_pull_request_workflows_cancel_obsolete_runs()
     test_release_workflow_keeps_non_cancelling_serialisation()
+    test_all_workflows_install_steps_and_requirements()
     test_negative_mutants_rejected()
     test_execution_probe_failing_gate_command_exits_nonzero()
     print("PR workflow cancellation tests passed")

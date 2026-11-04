@@ -19,10 +19,12 @@ try:
         CANONICAL_QUALITY_RUN_ARGVS,
         CANONICAL_TESTS_RUN_ARGVS,
         check_banned_prefixes_and_operators,
+        validate_all_workflows_install_steps,
         validate_env_configuration,
         validate_job_gates,
         validate_job_level_keys,
         validate_quality_workflow,
+        validate_requirements_dev_file,
         validate_shell_configuration,
         validate_workflow_install_steps,
     )
@@ -36,10 +38,12 @@ except ModuleNotFoundError:
         CANONICAL_QUALITY_RUN_ARGVS,
         CANONICAL_TESTS_RUN_ARGVS,
         check_banned_prefixes_and_operators,
+        validate_all_workflows_install_steps,
         validate_env_configuration,
         validate_job_gates,
         validate_job_level_keys,
         validate_quality_workflow,
+        validate_requirements_dev_file,
         validate_shell_configuration,
         validate_workflow_install_steps,
     )
@@ -387,8 +391,10 @@ def main(argv: list[str] | None = None) -> int:
     wf_errors = validate_release_workflow(workflow_path) if workflow_path.is_file() else ["release.yaml not found"]
     quality_path = root / ".github" / "workflows" / "quality.yaml"
     q_errors = validate_quality_workflow(quality_path) if quality_path.is_file() else ["quality.yaml not found"]
+    req_errors = validate_requirements_dev_file(root / "requirements-dev.txt")
+    wf_install_errors = validate_all_workflows_install_steps(root)
 
-    all_errors = mp_errors + wf_errors + q_errors
+    all_errors = mp_errors + wf_errors + q_errors + req_errors + wf_install_errors
     if all_errors:
         for err in all_errors:
             print(f"ERROR: {err}", file=sys.stderr)

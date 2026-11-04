@@ -10,24 +10,16 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 # Add repository root to sys.path so tools can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-
-def __getattr__(name: str) -> Any:
-    if name in ("evaluate_check_runs", "verify_exact_commit_gate"):
-        import tools.release_gate as _rg
-
-        return getattr(_rg, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
+from tools.release_gate import evaluate_check_runs, verify_exact_commit_gate
 
 __all__ = [
     "Commit",
-    "evaluate_check_runs",  # noqa: F822
-    "verify_exact_commit_gate",  # noqa: F822
+    "evaluate_check_runs",
+    "verify_exact_commit_gate",
     "bump_for",
     "next_version",
     "release_notes",
@@ -150,8 +142,6 @@ def write_github_output(values: dict[str, str]) -> None:
 
 
 def _verify_release_ci(sha: str) -> bool:
-    from tools.release_gate import verify_exact_commit_gate
-
     passed, reasons = verify_exact_commit_gate(
         sha,
         token=os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"),
