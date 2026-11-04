@@ -1342,9 +1342,26 @@ EXPECTED_DEV_REQUIREMENTS: frozenset[str] = frozenset(
 PRIVILEGED_JOB_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
         (".github/workflows/release.yaml", "release"),
-        (".github/workflows/diagram-freshness.yml", "diagram-freshness"),
-        (".github/workflows/secret-scan.yml", "secret-scan"),
-        (".github/workflows/vulture-check.yml", "vulture-check"),
+    }
+)
+
+PRIVILEGED_REUSABLE_JOB_ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        (
+            ".github/workflows/diagram-freshness.yml",
+            "diagram-freshness",
+            "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+        ),
+        (
+            ".github/workflows/secret-scan.yml",
+            "secret-scan",
+            "selamy-labs/.github/.github/workflows/secret-scan.yml@main",
+        ),
+        (
+            ".github/workflows/vulture-check.yml",
+            "vulture-check",
+            "selamy-labs/.github/.github/workflows/vulture-check.yml@main",
+        ),
     }
 )
 
@@ -1583,6 +1600,51 @@ def _check_single_import_node(node: ast.AST, script_rel: str, repo_root: Path) -
     return []
 
 
+def _item_shadowed_stdlib_name(item: Path) -> str | None:
+    """Return stdlib module name if item is a .py file or package matching stdlib."""
+    if item.is_file() and item.name.endswith(".py"):
+        return item.stem if item.stem in sys.stdlib_module_names else None
+    if item.is_dir() and (item / "__init__.py").is_file():
+        return item.name if item.name in sys.stdlib_module_names else None
+    return None
+
+
+def _check_single_item_shadow(item: Path, rel_loc: str, repo_root: Path) -> str | None:
+    """Return error message if item shadows a stdlib module or package."""
+    name = _item_shadowed_stdlib_name(item)
+    if name:
+        kind = "package" if item.is_dir() else "file"
+        rel_path = item.relative_to(repo_root).as_posix()
+        return (
+            f"tracked {kind} '{rel_path}' in '{rel_loc}' "
+            f"shadows standard library module {name!r} (is shadowed by tracked file '{name}.py')"
+        )
+    return None
+
+
+def _check_directory_shadowing(loc: Path, repo_root: Path) -> list[str]:
+    """Check a single directory for files or packages shadowing stdlib."""
+    if not loc.is_dir():
+        return []
+    rel_loc = loc.relative_to(repo_root).as_posix() if loc != repo_root else "."
+    errors: list[str] = []
+    for item in sorted(loc.iterdir()):
+        err = _check_single_item_shadow(item, rel_loc, repo_root)
+        if err:
+            errors.append(err)
+    return errors
+
+
+def _check_stdlib_shadowing(repo_root: Path) -> list[str]:
+    """Reject any top-level module (X.py) or package (X/__init__.py) in repo root, scripts/, or tools/
+    whose name matches a Python standard library module.
+    """
+    errors: list[str] = []
+    for loc in (repo_root, repo_root / "scripts", repo_root / "tools"):
+        errors.extend(_check_directory_shadowing(loc, repo_root))
+    return errors
+
+
 def _check_script_top_level_stdlib_only(script_rel: str, repo_root: Path) -> list[str]:
     """Ensure all AST imports in script (at any scope) are in sys.stdlib_module_names or approved local modules."""
     script_path = repo_root / script_rel
@@ -1593,12 +1655,9 @@ def _check_script_top_level_stdlib_only(script_rel: str, repo_root: Path) -> lis
         tree = ast.parse(source, filename=str(script_path))
     except Exception as exc:
         return [f"{script_rel}: syntax or read error: {exc}"]
-    errors: list[str] = []
+    errors: list[str] = _check_stdlib_shadowing(repo_root)
     for node in ast.walk(tree):
         errors.extend(_check_single_import_node(node, script_rel, repo_root))
-        for name in _imported_roots_from_node(node):
-            if name in sys.stdlib_module_names and (repo_root / f"{name}.py").is_file():
-                errors.append(f"privileged script stdlib module {name!r} is shadowed by tracked file '{name}.py'")
     return errors
 
 
@@ -1644,7 +1703,7 @@ def _check_privileged_job(
 ) -> list[str]:
     """Validate privileged job runs no installers and only allowed stdlib-only scripts."""
     root = repo_root or Path(__file__).resolve().parents[1]
-    errors: list[str] = []
+    errors: list[str] = _check_stdlib_shadowing(root)
     for step in steps:
         if isinstance(step, dict) and step.get("run"):
             cmd_str = str(step["run"]).strip()
@@ -1652,18 +1711,27 @@ def _check_privileged_job(
     return errors
 
 
+def _is_valid_permission_entry(key: Any, val: Any) -> bool:
+    """Return True if a single permission key-value pair is a known scope with read or none."""
+    if not isinstance(key, str) or not isinstance(val, str):
+        return False
+    if key not in KNOWN_GITHUB_PERMISSION_SCOPES:
+        return False
+    return val in ("read", "none")
+
+
+def _is_read_only_permissions_map(perms: Any) -> bool:
+    """Return True if perms is a non-empty mapping where all entries are valid read-only scopes."""
+    if not isinstance(perms, dict) or not perms:
+        return False
+    return all(_is_valid_permission_entry(k, v) for k, v in perms.items())
+
+
 def _is_privileged_permissions(perms: Any) -> bool:
     """Check if permissions object grants any write permission or fails closed on unknown/omitted permissions."""
     if perms == "read-all":
         return False
-    if isinstance(perms, dict) and perms:
-        for k, v in perms.items():
-            if not isinstance(k, str) or not isinstance(v, str):
-                return True
-            if k not in KNOWN_GITHUB_PERMISSION_SCOPES:
-                return True
-            if v not in ("read", "none"):
-                return True
+    if _is_read_only_permissions_map(perms):
         return False
     return True
 
@@ -1723,6 +1791,28 @@ def _check_job_and_workflow_context(
     return errors
 
 
+def _check_all_steps_env(steps: list[Any], job_name: str) -> list[str]:
+    """Check restricted environment variables across all steps in a job."""
+    errors: list[str] = []
+    for s in steps:
+        if isinstance(s, dict) and "env" in s:
+            errors.extend(_check_job_env(s.get("env"), "step", job_name))
+    return errors
+
+
+def _check_actions_only_job(steps: list[Any], job_name: str) -> list[str]:
+    """Validate an actions-only job (non-privileged job with no run steps)."""
+    errors: list[str] = []
+    for s in steps:
+        if isinstance(s, dict):
+            errors.extend(_check_pre_install_step(s, job_name))
+    errors.append(
+        f"job '{job_name}' has no run steps; "
+        f"non-privileged jobs require canonical install step {CANONICAL_INSTALL_CMD!r}"
+    )
+    return errors
+
+
 def _check_regular_job_install_rule(
     job_name: str,
     steps: list[Any],
@@ -1730,18 +1820,17 @@ def _check_regular_job_install_rule(
     workflow_doc: dict[str, Any] | None = None,
 ) -> list[str]:
     """Validate Rule B for a regular (non-privileged) workflow job."""
+    errors: list[str] = _check_job_and_workflow_context(job_name, job, workflow_doc)
+    errors.extend(_check_all_steps_env(steps, job_name))
+
     run_steps = [
         (idx, s)
         for idx, s in enumerate(steps)
         if isinstance(s, dict) and s.get("run") is not None and str(s.get("run", "")).strip()
     ]
     if not run_steps:
-        return []
-
-    errors: list[str] = _check_job_and_workflow_context(job_name, job, workflow_doc)
-    for s in steps:
-        if isinstance(s, dict) and "env" in s:
-            errors.extend(_check_job_env(s.get("env"), "step", job_name))
+        errors.extend(_check_actions_only_job(steps, job_name))
+        return errors
 
     first_run_idx, first_step = run_steps[0]
     first_run = str(first_step.get("run", "")).strip()
@@ -1768,13 +1857,34 @@ def _check_allowlisted_job(
     repo_root: Path | None,
 ) -> list[str]:
     """Validate an allowlisted privileged job."""
-    if "uses" in job:
-        return []
     steps = job.get("steps")
     if not isinstance(steps, list):
         return [f"privileged job '{job_name}' in '{workflow_rel}' must define steps"]
     wf_name = workflow_rel or ".github/workflows/release.yaml"
     return _check_privileged_job(wf_name, job_name, steps, repo_root)
+
+
+def _check_reusable_workflow_job(
+    job_name: str,
+    job: dict[str, Any],
+    workflow_rel: str,
+    workflow_doc: dict[str, Any] | None,
+) -> list[str]:
+    """Validate a reusable workflow job against exact triple allowlist."""
+    uses_target = str(job.get("uses", "")).strip()
+    triple = (workflow_rel, job_name, uses_target)
+    if triple not in PRIVILEGED_REUSABLE_JOB_ALLOWLIST:
+        return [
+            f"job '{job_name}' in '{workflow_rel}' invokes unallowlisted reusable workflow '{uses_target}'; "
+            f"is not in PRIVILEGED_REUSABLE_JOB_ALLOWLIST and is not in PRIVILEGED_JOB_ALLOWLIST"
+        ]
+    eff_perms = _effective_job_permissions(job, workflow_doc)
+    if _is_privileged_permissions(eff_perms):
+        return [
+            f"reusable workflow job '{job_name}' in '{workflow_rel}' has write permissions "
+            f"but is not in PRIVILEGED_JOB_ALLOWLIST"
+        ]
+    return []
 
 
 def _check_job_install_rule(
@@ -1788,7 +1898,10 @@ def _check_job_install_rule(
     if not isinstance(job, dict):
         return []
 
-    is_privileged = _is_job_privileged(job, workflow_doc) or ("uses" in job)
+    if "uses" in job:
+        return _check_reusable_workflow_job(job_name, job, workflow_rel, workflow_doc)
+
+    is_privileged = _is_job_privileged(job, workflow_doc)
     is_allowlisted = _is_allowlisted_job(workflow_rel, job_name, is_privileged)
 
     if is_privileged and not is_allowlisted:

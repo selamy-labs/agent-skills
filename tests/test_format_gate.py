@@ -2659,7 +2659,7 @@ def test_go_vet_env_mutant_rejected() -> None:
             "is not in PRIVILEGED_JOB_ALLOWLIST",
         ),
         (
-            "actions_only_steps_exempt",
+            "actions_only_steps_fail",
             {
                 "actions_job": {
                     "steps": [
@@ -2668,7 +2668,34 @@ def test_go_vet_env_mutant_rejected() -> None:
                     ]
                 }
             },
-            None,
+            "no run steps; non-privileged jobs require canonical install step",
+        ),
+        (
+            "actions_only_with_pythonpath_fails",
+            {
+                "actions_job": {
+                    "steps": [
+                        {
+                            "uses": "actions/checkout@v7.0.0",
+                            "env": {"PYTHONPATH": "/tmp/custom"},
+                        },
+                        {"uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"},
+                    ]
+                }
+            },
+            "disallowed environment variable: 'PYTHONPATH'",
+        ),
+        (
+            "actions_only_unpinned_action_fails",
+            {
+                "actions_job": {
+                    "steps": [
+                        {"uses": "actions/checkout@v7.0.0"},
+                        {"uses": "other-org/unchecked-action@main"},
+                    ]
+                }
+            },
+            "has disallowed pre-install action: other-org/unchecked-action@main",
         ),
     ],
 )
@@ -3423,15 +3450,32 @@ class TestR38Hygiene:
             ALLOWED_POST_INSTALL_USES,
             PRIVILEGED_JOB_ALLOWED_SCRIPTS,
             PRIVILEGED_JOB_ALLOWLIST,
+            PRIVILEGED_REUSABLE_JOB_ALLOWLIST,
             PRIVILEGED_SCRIPT_ALLOWED_LOCAL_MODULES,
         )
 
         assert PRIVILEGED_JOB_ALLOWLIST == frozenset(
             {
                 (".github/workflows/release.yaml", "release"),
-                (".github/workflows/diagram-freshness.yml", "diagram-freshness"),
-                (".github/workflows/secret-scan.yml", "secret-scan"),
-                (".github/workflows/vulture-check.yml", "vulture-check"),
+            }
+        )
+        assert PRIVILEGED_REUSABLE_JOB_ALLOWLIST == frozenset(
+            {
+                (
+                    ".github/workflows/diagram-freshness.yml",
+                    "diagram-freshness",
+                    "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                ),
+                (
+                    ".github/workflows/secret-scan.yml",
+                    "secret-scan",
+                    "selamy-labs/.github/.github/workflows/secret-scan.yml@main",
+                ),
+                (
+                    ".github/workflows/vulture-check.yml",
+                    "vulture-check",
+                    "selamy-labs/.github/.github/workflows/vulture-check.yml@main",
+                ),
             }
         )
         assert PRIVILEGED_JOB_ALLOWED_SCRIPTS == frozenset({"scripts/semantic_release.py"})
@@ -3859,3 +3903,212 @@ class TestR39Hygiene:
         assert hasattr(val_skills, "_is_relative_import_from")
         assert hasattr(val_skills, "_is_allowlisted_job")
         assert hasattr(val_skills, "_check_allowlisted_job")
+
+
+class TestR40Hygiene:
+    """Table-stakes R40: reusable workflow triple allowlist, actions-only jobs fail closed,
+    structural stdlib shadowing, complexity <= 10.
+    """
+
+    def test_reusable_workflow_triple_allowlist_and_substitutions(self) -> None:
+        from tools.validate_skills import PRIVILEGED_REUSABLE_JOB_ALLOWLIST, validate_workflow_install_steps
+
+        # 1. Existing 3 org-owned callers pass when read-only
+        for wf_file, job_id, uses_str in sorted(PRIVILEGED_REUSABLE_JOB_ALLOWLIST):
+            doc = {
+                "permissions": {"contents": "read"},
+                "jobs": {
+                    job_id: {
+                        "uses": uses_str,
+                    }
+                },
+            }
+            errs = validate_workflow_install_steps(doc, workflow_rel=wf_file)
+            assert errs == [], f"Expected allowlisted triple ({wf_file}, {job_id}, {uses_str}) to pass, got: {errs}"
+
+        # 2. Target substitution: other org fails
+        other_org_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "diagram-freshness": {
+                    "uses": "other-org/unchecked/.github/workflows/deps.yml@main",
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(other_org_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert any("is not in PRIVILEGED_REUSABLE_JOB_ALLOWLIST" in e for e in errs)
+
+        # 3. Target substitution: same repo but different file fails
+        diff_file_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "diagram-freshness": {
+                    "uses": "selamy-labs/.github/.github/workflows/other.yml@main",
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(diff_file_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert any("is not in PRIVILEGED_REUSABLE_JOB_ALLOWLIST" in e for e in errs)
+
+        # 4. Target substitution: different ref (@v1 instead of @main) fails
+        diff_ref_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "diagram-freshness": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@v1",
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(diff_ref_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert any("is not in PRIVILEGED_REUSABLE_JOB_ALLOWLIST" in e for e in errs)
+
+        # 5. Write permission variant: job-level permissions write-all fails
+        job_write_doc = {
+            "jobs": {
+                "diagram-freshness": {
+                    "permissions": "write-all",
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            }
+        }
+        errs = validate_workflow_install_steps(job_write_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errs)
+
+        # 6. Write permission variant: job-level contents: write fails
+        job_contents_write_doc = {
+            "jobs": {
+                "diagram-freshness": {
+                    "permissions": {"contents": "write"},
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            }
+        }
+        errs = validate_workflow_install_steps(
+            job_contents_write_doc, workflow_rel=".github/workflows/diagram-freshness.yml"
+        )
+        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errs)
+
+        # 7. Write permission variant: workflow-level contents: write fails
+        wf_write_doc = {
+            "permissions": {"contents": "write"},
+            "jobs": {
+                "diagram-freshness": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(wf_write_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errs)
+
+    def test_actions_only_non_privileged_jobs_fail_closed(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        # 1. Non-privileged job with only actions (no run step) fails
+        actions_job_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "actions_only": {
+                    "steps": [
+                        {"uses": "actions/checkout@v7.0.0"},
+                        {"uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"},
+                    ]
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(actions_job_doc, workflow_rel=".github/workflows/test.yaml")
+        assert any("no run steps; non-privileged jobs require canonical install step" in e for e in errs)
+
+        # 2. Actions-only job with PYTHONPATH in step env fails env check
+        actions_pythonpath_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "actions_only": {
+                    "steps": [
+                        {
+                            "uses": "actions/checkout@v7.0.0",
+                            "env": {"PYTHONPATH": "/tmp/malicious"},
+                        },
+                        {"uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"},
+                    ]
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(actions_pythonpath_doc, workflow_rel=".github/workflows/test.yaml")
+        assert any("disallowed environment variable: 'PYTHONPATH'" in e for e in errs)
+
+        # 3. Actions-only job with unpinned / disallowed action fails
+        actions_unpinned_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "actions_only": {
+                    "steps": [
+                        {"uses": "actions/checkout@v7.0.0"},
+                        {"uses": "other-org/unchecked-action@main"},
+                    ]
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(actions_unpinned_doc, workflow_rel=".github/workflows/test.yaml")
+        assert any("has disallowed pre-install action: other-org/unchecked-action@main" in e for e in errs)
+
+    def test_stdlib_shadowing_structural_check(self, tmp_path: Path) -> None:
+        from tools.validate_skills import _check_stdlib_shadowing
+
+        # 1. Clean repo root produces no errors
+        assert _check_stdlib_shadowing(REPO_ROOT) == []
+
+        # 2. Root json.py (Sol's helper-only case) fails
+        json_file = tmp_path / "json.py"
+        json_file.write_text("import yaml\n", encoding="utf-8")
+        errs = _check_stdlib_shadowing(tmp_path)
+        assert any("shadows standard library module 'json'" in e for e in errs)
+        json_file.unlink()
+
+        # 3. scripts/sys.py fails
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        sys_file = scripts_dir / "sys.py"
+        sys_file.write_text("# shadow sys\n", encoding="utf-8")
+        errs = _check_stdlib_shadowing(tmp_path)
+        assert any("shadows standard library module 'sys'" in e for e in errs)
+        sys_file.unlink()
+
+        # 4. tools/re/__init__.py package fails
+        tools_re_dir = tmp_path / "tools" / "re"
+        tools_re_dir.mkdir(parents=True, exist_ok=True)
+        init_file = tools_re_dir / "__init__.py"
+        init_file.write_text("# shadow re package\n", encoding="utf-8")
+        errs = _check_stdlib_shadowing(tmp_path)
+        assert any("shadows standard library module 're'" in e for e in errs)
+        init_file.unlink()
+        tools_re_dir.rmdir()
+
+    def test_privileged_permissions_complexity_and_contract(self) -> None:
+        from tools.validate_skills import (
+            _is_privileged_permissions,
+            _is_read_only_permissions_map,
+            _is_valid_permission_entry,
+        )
+
+        # Single entry helper
+        assert _is_valid_permission_entry("contents", "read") is True
+        assert _is_valid_permission_entry("contents", "none") is True
+        assert _is_valid_permission_entry("contents", "write") is False
+        assert _is_valid_permission_entry("unknown-scope", "read") is False
+        assert _is_valid_permission_entry("contents", 123) is False
+
+        # Read-only map helper
+        assert _is_read_only_permissions_map({"contents": "read"}) is True
+        assert _is_read_only_permissions_map({"contents": "read", "issues": "none"}) is True
+        assert _is_read_only_permissions_map({}) is False
+        assert _is_read_only_permissions_map({"contents": "write"}) is False
+        assert _is_read_only_permissions_map("read-all") is False
+
+        # Privileged classifier
+        assert _is_privileged_permissions(None) is True
+        assert _is_privileged_permissions({}) is True
+        assert _is_privileged_permissions("read-all") is False
+        assert _is_privileged_permissions("write-all") is True
+        assert _is_privileged_permissions({"contents": "read"}) is False
+        assert _is_privileged_permissions({"contents": "write"}) is True
+        assert _is_privileged_permissions({"unknown-scope": "read"}) is True
