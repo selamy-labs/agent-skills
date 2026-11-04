@@ -24,6 +24,7 @@ try:
         validate_job_level_keys,
         validate_quality_workflow,
         validate_shell_configuration,
+        validate_workflow_step_imports,
     )
 except ModuleNotFoundError:
     _root = Path(__file__).resolve().parents[1]
@@ -40,6 +41,7 @@ except ModuleNotFoundError:
         validate_job_level_keys,
         validate_quality_workflow,
         validate_shell_configuration,
+        validate_workflow_step_imports,
     )
 
 __all__ = [
@@ -53,6 +55,7 @@ __all__ = [
     "validate_release_publish_job",
     "validate_release_scanners",
     "validate_release_workflow",
+    "validate_workflow_step_imports",
     "main",
 ]
 
@@ -371,6 +374,7 @@ def validate_release_workflow(workflow_input: dict[str, Any] | str | Path) -> li
     on_triggers = doc.get("on") if "on" in doc else cast(dict[Any, Any], doc).get(True)
     _validate_release_workflow_triggers(on_triggers, errors)
     _validate_release_workflow_jobs(doc.get("jobs"), errors)
+    errors.extend(validate_workflow_step_imports(doc))
 
     return errors
 

@@ -660,12 +660,16 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
     runner = _load_runner_module()
     child_pid_path = tmp_path / "child.pid"
     known_pids: set[int] = set()
-    child_script = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
-    parent_script = (
-        "import pathlib, signal, subprocess, sys, time; "
+    child_script = (
+        "import os, pathlib, signal, sys, time; "
         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}]); "
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    parent_script = (
+        "import signal, subprocess, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"subprocess.Popen([sys.executable, '-c', {child_script!r}, sys.argv[1]]); "
         "time.sleep(60)"
     )
     unrelated_snapshot = {
@@ -676,7 +680,16 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
             started_at="Mon Jan  1 00:00:00 2024",
         )
     }
-    runner.process_snapshot = lambda _timeout_seconds=2: runner.ProcessInventory(unrelated_snapshot, False)
+    timed_out_triggered = False
+
+    def sync_snapshot(_timeout_seconds: float = 2) -> runner.ProcessInventory | None:
+        nonlocal timed_out_triggered
+        if child_pid_path.exists() and not timed_out_triggered:
+            timed_out_triggered = True
+            return None
+        return runner.ProcessInventory(unrelated_snapshot, False)
+
+    runner.process_snapshot = sync_snapshot
 
     try:
         result = runner.run_process(
@@ -684,7 +697,7 @@ def test_run_process_escalates_group_cleanup_with_partial_process_listing(tmp_pa
             tmp_path,
             tmp_path / "stdout.log",
             tmp_path / "stderr.log",
-            0.2,
+            5,
         )
         assert result.timed_out is True
         assert result.process_group_state_after_harvest in {"absent", "unknown"}

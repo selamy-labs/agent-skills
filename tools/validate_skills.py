@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import subprocess
@@ -1311,6 +1312,253 @@ def _validate_quality_workflow_jobs(jobs: dict[str, Any]) -> list[str]:
     return errors
 
 
+WORKFLOW_PACKAGE_TO_MODULES: dict[str, set[str]] = {
+    "pyyaml": {"yaml"},
+    "pytest": {"pytest", "_pytest"},
+    "pytest-cov": {"pytest_cov"},
+    "ruff": {"ruff"},
+    "complexipy": {"complexipy"},
+    "vulture": {"vulture"},
+}
+
+
+def _extract_pip_installed_modules(tokens: list[str]) -> set[str]:
+    installed: set[str] = set()
+    for token in tokens:
+        clean = re.split(r"[=<>!~]", token)[0].strip().lower()
+        if clean in WORKFLOW_PACKAGE_TO_MODULES:
+            installed.update(WORKFLOW_PACKAGE_TO_MODULES[clean])
+        elif clean and not clean.startswith("-") and clean not in ("pip", "pip3", "install"):
+            installed.add(clean.replace("-", "_"))
+    return installed
+
+
+def _get_script_ast_imports(file_path: Path) -> set[str]:
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        tree = ast.parse(content, filename=str(file_path))
+    except Exception:
+        return set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                modules.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module.split(".")[0])
+    return modules
+
+
+def _find_local_module_file(mod: str, file_path: Path, repo_root: Path) -> Path | None:
+    if (repo_root / mod).is_dir() or (file_path.parent / mod).is_dir():
+        return None
+    candidates = (
+        repo_root / f"{mod}.py",
+        repo_root / mod / "__init__.py",
+        file_path.parent / f"{mod}.py",
+        file_path.parent / mod / "__init__.py",
+        repo_root / "tools" / f"{mod}.py",
+        repo_root / "scripts" / f"{mod}.py",
+        repo_root / "tests" / f"{mod}.py",
+    )
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def _classify_module_import(
+    mod: str,
+    file_path: Path,
+    repo_root: Path,
+    visited: set[Path],
+) -> set[str]:
+    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
+    if mod in stdlib or mod == "__future__":
+        return set()
+    local = _find_local_module_file(mod, file_path, repo_root)
+    if local is not None:
+        return _get_transitive_script_third_party_imports(local, repo_root, visited)
+    if (repo_root / mod).is_dir() or (file_path.parent / mod).is_dir():
+        return set()
+    return {mod}
+
+
+def _get_transitive_script_third_party_imports(
+    file_path: Path,
+    repo_root: Path,
+    visited: set[Path] | None = None,
+) -> set[str]:
+    if visited is None:
+        visited = set()
+    if file_path in visited or not file_path.is_file():
+        return set()
+    visited.add(file_path)
+
+    third_party: set[str] = set()
+    for mod in _get_script_ast_imports(file_path):
+        third_party.update(_classify_module_import(mod, file_path, repo_root, visited))
+    return third_party
+
+
+def _check_step_tool_execution(
+    tokens: list[str],
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> bool:
+    head = tokens[0]
+    if head == "pytest":
+        if "pytest" not in installed_modules:
+            errors.append(f"job '{job_name}' step '{step_name}': executes 'pytest' before it is installed")
+        return True
+
+    is_ruff = head == "ruff" or (
+        len(tokens) >= 3 and tokens[0] in ("python", "python3") and tokens[1] == "-m" and tokens[2] == "ruff"
+    )
+    if is_ruff:
+        if "ruff" not in installed_modules:
+            errors.append(f"job '{job_name}' step '{step_name}': executes 'ruff' before it is installed")
+        return True
+    return False
+
+
+def _resolve_python_module_token(
+    tokens: list[str],
+    arg_idx: int,
+    root: Path,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> str | None:
+    mod_name = tokens[arg_idx + 1].split(".")[0]
+    is_external = (
+        mod_name not in getattr(sys, "stdlib_module_names", frozenset())
+        and mod_name not in ("tools", "scripts", "tests")
+        and (root / mod_name).is_dir() is False
+    )
+    if is_external and mod_name not in installed_modules:
+        errors.append(f"job '{job_name}' step '{step_name}': runs module '{mod_name}' which is not installed")
+    mod_path = root / f"{tokens[arg_idx + 1].replace('.', '/')}.py"
+    return str(mod_path) if mod_path.is_file() else None
+
+
+def _resolve_python_script_token(
+    tokens: list[str],
+    root: Path,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> str | None:
+    head = tokens[0]
+    if head not in ("python", "python3") or len(tokens) < 2:
+        return None
+    arg_idx = 1
+    while arg_idx < len(tokens) and tokens[arg_idx].startswith("-"):
+        if tokens[arg_idx] == "-m" and arg_idx + 1 < len(tokens):
+            return _resolve_python_module_token(tokens, arg_idx, root, step_name, job_name, installed_modules, errors)
+        arg_idx += 1
+    if arg_idx < len(tokens) and not tokens[arg_idx].startswith("-"):
+        return tokens[arg_idx]
+    return None
+
+
+def _check_step_script_imports(
+    script_token: str,
+    root: Path,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> None:
+    script_path = root / script_token if not Path(script_token).is_absolute() else Path(script_token)
+    if not script_path.is_file():
+        return
+    needed_imports = _get_transitive_script_third_party_imports(script_path, root)
+    for imp in sorted(needed_imports):
+        if imp not in installed_modules:
+            errors.append(
+                f"job '{job_name}' step '{step_name}': script '{script_token}' imports '{imp}', "
+                f"but '{imp}' is not installed by prior steps in job '{job_name}'"
+            )
+
+
+def _process_workflow_step_line(
+    raw_line: str,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    root: Path,
+    errors: list[str],
+) -> None:
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        return
+    try:
+        tokens = shlex.split(line, comments=True)
+    except ValueError:
+        return
+    if not tokens:
+        return
+
+    if is_pip_install_tokens(tokens):
+        installed_modules.update(_extract_pip_installed_modules(tokens))
+        return
+
+    if _check_step_tool_execution(tokens, step_name, job_name, installed_modules, errors):
+        return
+
+    script_token = _resolve_python_script_token(tokens, root, step_name, job_name, installed_modules, errors)
+    if script_token:
+        _check_step_script_imports(script_token, root, step_name, job_name, installed_modules, errors)
+
+
+def _validate_job_step_imports(
+    job_name: str,
+    job: dict[str, Any],
+    root: Path,
+    errors: list[str],
+) -> None:
+    installed_modules: set[str] = set()
+    steps = job.get("steps", [])
+    if not isinstance(steps, list):
+        return
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        raw_name = step.get("name") or step.get("id") or "unnamed step"
+        step_name = str(raw_name)
+        run_cmd = step.get("run")
+        if not isinstance(run_cmd, str):
+            continue
+
+        for raw_line in run_cmd.splitlines():
+            _process_workflow_step_line(raw_line, step_name, job_name, installed_modules, root, errors)
+
+
+def validate_workflow_step_imports(
+    workflow_doc: dict[str, Any],
+    repo_root: Path | None = None,
+) -> list[str]:
+    """Validate that every step's imports and executed tools are installed by prior steps."""
+    root = repo_root or Path(__file__).resolve().parents[1]
+    errors: list[str] = []
+
+    jobs = workflow_doc.get("jobs", {})
+    if not isinstance(jobs, dict):
+        return errors
+
+    for job_name, job in jobs.items():
+        if isinstance(job, dict):
+            _validate_job_step_imports(job_name, job, root, errors)
+
+    return errors
+
+
 def validate_quality_workflow(workflow_input: dict[str, Any] | str | Path) -> list[str]:
     """Validate quality workflow contract."""
     doc, load_errs = _load_workflow_mapping(workflow_input)
@@ -1322,7 +1570,7 @@ def validate_quality_workflow(workflow_input: dict[str, Any] | str | Path) -> li
     wf_perms = doc.get("permissions")
     if wf_perms != {"contents": "read"}:
         errors.append(f"quality workflow permissions must be {{'contents': 'read'}}, got: {wf_perms!r}")
-    if isinstance(workflow_input, (str, Path)):
+    if isinstance(workflow_input, str | Path):
         p = Path(workflow_input)
         if p.is_file():
             errors.extend(check_no_tracked_coverage_json(p.resolve().parents[2]))
@@ -1338,6 +1586,7 @@ def validate_quality_workflow(workflow_input: dict[str, Any] | str | Path) -> li
 
     errors.extend(_check_quality_job_ifs(jobs))
     errors.extend(_validate_quality_workflow_jobs(jobs))
+    errors.extend(validate_workflow_step_imports(doc))
     return errors
 
 

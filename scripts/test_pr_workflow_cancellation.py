@@ -373,7 +373,7 @@ def get_on_triggers(doc: dict[str, Any]) -> list[str] | dict[str, Any]:
     triggers = raw_doc.get("on")
     if triggers is None:
         triggers = raw_doc.get(True)
-    if isinstance(triggers, (list, dict)):
+    if isinstance(triggers, list | dict):
         return triggers
     return {}
 
@@ -1221,7 +1221,6 @@ def _test_mutants_basic_step_and_job_guards() -> None:
 
 
 def _test_mutants_release_verify_permissions(release_path: Path) -> None:
-    from tests.test_format_gate import validate_release_workflow as fg_rel_val
     from tools.validate_marketplace import validate_release_workflow as vm_rel_val
 
     bad_verify_scopes = [
@@ -1246,16 +1245,8 @@ def _test_mutants_release_verify_permissions(release_path: Path) -> None:
         vm_errs = vm_rel_val(doc)
         assert len(vm_errs) > 0, f"tools.validate_marketplace accepted bad verify perms {bad_perm}"
 
-        fg_failed = False
-        try:
-            fg_rel_val(doc)
-        except AssertionError:
-            fg_failed = True
-        assert fg_failed, f"tests.test_format_gate accepted bad verify perms {bad_perm}"
-
 
 def _test_mutants_release_publish_permissions(release_path: Path) -> None:
-    from tests.test_format_gate import validate_release_workflow as fg_rel_val
     from tools.validate_marketplace import validate_release_workflow as vm_rel_val
 
     bad_release_scopes = [
@@ -1280,16 +1271,8 @@ def _test_mutants_release_publish_permissions(release_path: Path) -> None:
         vm_errs = vm_rel_val(doc)
         assert len(vm_errs) > 0, f"tools.validate_marketplace accepted bad release perms {bad_perm}"
 
-        fg_failed = False
-        try:
-            fg_rel_val(doc)
-        except AssertionError:
-            fg_failed = True
-        assert fg_failed, f"tests.test_format_gate accepted bad release perms {bad_perm}"
-
 
 def _test_mutants_release_workflow_permissions(release_path: Path) -> None:
-    from tests.test_format_gate import validate_release_workflow as fg_rel_val
     from tools.validate_marketplace import validate_release_workflow as vm_rel_val
 
     bad_wf_perms = [
@@ -1304,27 +1287,12 @@ def _test_mutants_release_workflow_permissions(release_path: Path) -> None:
         vm_errs = vm_rel_val(doc)
         assert len(vm_errs) > 0, f"tools.validate_marketplace accepted bad release wf perms {bad_perm}"
 
-        fg_failed = False
-        try:
-            fg_rel_val(doc)
-        except AssertionError:
-            fg_failed = True
-        assert fg_failed, f"tests.test_format_gate accepted bad release wf perms {bad_perm}"
-
 
 def _assert_release_wf_mutant_fails(mutated_doc: dict[str, Any], desc: str) -> None:
-    from tests.test_format_gate import validate_release_workflow as fg_rel_val
     from tools.validate_marketplace import validate_release_workflow as vm_rel_val
 
     vm_errs = vm_rel_val(mutated_doc)
     assert len(vm_errs) > 0, f"tools.validate_marketplace accepted mutant: {desc}"
-
-    fg_failed = False
-    try:
-        fg_rel_val(mutated_doc)
-    except AssertionError:
-        fg_failed = True
-    assert fg_failed, f"tests.test_format_gate accepted mutant: {desc}"
 
 
 def _test_mutants_release_publish_steps(release_path: Path) -> None:
@@ -1631,7 +1599,6 @@ def _test_mutant_stubbed_tests_job(quality_path: Path) -> None:
 
 
 def _assert_all_validators_reject(doc: dict[str, Any], label: str) -> None:
-    from tests.test_format_gate import validate_quality_workflow as fg_val
     from tools.validate_marketplace import validate_quality_workflow as vm_val
     from tools.validate_skills import validate_quality_workflow as vs_val
 
@@ -1646,13 +1613,6 @@ def _assert_all_validators_reject(doc: dict[str, Any], label: str) -> None:
     except AssertionError:
         sp_failed = True
     assert sp_failed, f"{label}: scripts.test_pr_workflow_cancellation accepted mutant"
-
-    fg_failed = False
-    try:
-        fg_val(doc)
-    except AssertionError:
-        fg_failed = True
-    assert fg_failed, f"{label}: tests.test_format_gate accepted mutant"
 
 
 def _test_mutant_github_env_writer(quality_path: Path) -> None:

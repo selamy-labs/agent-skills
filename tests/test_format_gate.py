@@ -15,6 +15,7 @@ Guarantees:
 
 from __future__ import annotations
 
+import copy
 import re
 import shlex
 import shutil
@@ -2623,3 +2624,47 @@ def test_go_vet_env_mutant_rejected() -> None:
         if "go vet" in str(s.get("run", "")):
             s.pop("env", None)
     assert any("go vet env must be exactly" in e for e in vs_validate(mutant_vet_env))
+
+
+def test_workflow_step_imports_installed_before_execution() -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    quality_doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    release_doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+
+    q_errs = validate_workflow_step_imports(quality_doc, REPO_ROOT)
+    assert not q_errs, f"quality.yaml has uninstalled step dependencies: {q_errs}"
+
+    r_errs = validate_workflow_step_imports(release_doc, REPO_ROOT)
+    assert not r_errs, f"release.yaml has uninstalled step dependencies: {r_errs}"
+
+
+def test_workflow_step_imports_rejects_missing_pip_install() -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    quality_doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    mutant = copy.deepcopy(quality_doc)
+    mutant["jobs"]["quality"]["steps"] = [
+        s for s in mutant["jobs"]["quality"]["steps"] if "pip install" not in s.get("run", "")
+    ]
+    errs = validate_workflow_step_imports(mutant, REPO_ROOT)
+    assert any("imports 'yaml'" in e for e in errs), f"Expected missing yaml error, got: {errs}"
+
+
+def test_workflow_step_imports_rejects_uninstalled_tool_execution() -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    quality_doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    mutant_pytest = copy.deepcopy(quality_doc)
+    mutant_pytest["jobs"]["quality"]["steps"].append(
+        {"name": "early pytest", "run": "pytest tests/test_format_gate.py"}
+    )
+    errs = validate_workflow_step_imports(mutant_pytest, REPO_ROOT)
+    assert any("executes 'pytest' before it is installed" in e for e in errs), f"Expected pytest error, got: {errs}"
+
+    mutant_ruff = copy.deepcopy(quality_doc)
+    mutant_ruff["jobs"]["tests"]["steps"].insert(0, {"name": "early ruff", "run": "python -m ruff check ."})
+    errs_ruff = validate_workflow_step_imports(mutant_ruff, REPO_ROOT)
+    assert any("executes 'ruff' before it is installed" in e for e in errs_ruff), (
+        f"Expected ruff error, got: {errs_ruff}"
+    )
