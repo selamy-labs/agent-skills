@@ -2726,3 +2726,236 @@ def test_workflow_step_imports_rejects_unanalysable_command() -> None:
     }
     errs = validate_workflow_step_imports(wf, REPO_ROOT)
     assert any("unanalysable command: 'unknown_tool_xyz'" in e for e in errs)
+
+
+def test_workflow_step_imports_opus_15_fail_closed_forms(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    temp_script = tmp_path / "scripts" / "temp_script.py"
+    temp_script.parent.mkdir(parents=True, exist_ok=True)
+    temp_script.write_text("import pytest\n")
+
+    bad_syntax = tmp_path / "scripts" / "bad_syntax.py"
+    bad_syntax.write_text("def broken(\n")
+
+    custom_disc = tmp_path / "skills" / "zzdisc"
+    custom_disc.mkdir(parents=True, exist_ok=True)
+    (custom_disc / "check_zz.py").write_text("import pytest\n")
+
+    # 1. Pipe operator
+    wf1 = {"jobs": {"tests": {"steps": [{"run": "echo start | pytest -q"}]}}}
+    assert any("operator '|'" in e for e in validate_workflow_step_imports(wf1, tmp_path))
+
+    # 2. Glued operator / cd
+    wf2 = {"jobs": {"tests": {"steps": [{"run": "cd .&&pytest"}]}}}
+    errs2 = validate_workflow_step_imports(wf2, tmp_path)
+    assert any("unanalysable command: 'cd'" in e for e in errs2)
+    assert any("executes 'pytest' before it is installed" in e for e in errs2)
+
+    # 3. Python -X with operand
+    wf3 = {"jobs": {"tests": {"steps": [{"run": "python -X dev -m pytest"}]}}}
+    assert any("executes 'pytest' before it is installed" in e for e in validate_workflow_step_imports(wf3, tmp_path))
+
+    # 4. Python -W with operand running -m pytest
+    wf4 = {"jobs": {"tests": {"steps": [{"run": "python -W error -m pytest"}]}}}
+    assert any("executes 'pytest' before it is installed" in e for e in validate_workflow_step_imports(wf4, tmp_path))
+
+    # 5. Python -W with operand running script importing uninstalled tool
+    wf5 = {"jobs": {"tests": {"steps": [{"run": f"python -W ignore {temp_script.relative_to(tmp_path)}"}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf5, tmp_path))
+
+    # 6. Command substitution $(...)
+    wf6 = {"jobs": {"tests": {"steps": [{"run": "echo $(pytest -q)"}]}}}
+    assert any("command substitution" in e for e in validate_workflow_step_imports(wf6, tmp_path))
+
+    # 7. Backtick command substitution
+    wf7 = {"jobs": {"tests": {"steps": [{"run": "echo `pytest -q`"}]}}}
+    assert any("command substitution" in e for e in validate_workflow_step_imports(wf7, tmp_path))
+
+    # 8. find with -exec
+    wf8 = {"jobs": {"tests": {"steps": [{"run": "find . -name x -exec pytest {} +"}]}}}
+    assert any("unanalysable find execution flag '-exec'" in e for e in validate_workflow_step_imports(wf8, tmp_path))
+
+    # 9. source
+    wf9 = {"jobs": {"tests": {"steps": [{"run": "source ./run.sh"}]}}}
+    assert any("unanalysable command: 'source'" in e for e in validate_workflow_step_imports(wf9, tmp_path))
+
+    # 10. git with -c
+    wf10 = {"jobs": {"tests": {"steps": [{"run": "git -c core.pager=pytest log"}]}}}
+    assert any("unanalysable git configuration flag '-c'" in e for e in validate_workflow_step_imports(wf10, tmp_path))
+
+    # 11. Dynamic import __import__ in -c
+    wf11 = {"jobs": {"tests": {"steps": [{"run": "python -c '__import__(\"pytest\")'"}]}}}
+    assert any("unanalysable dynamic import" in e for e in validate_workflow_step_imports(wf11, tmp_path))
+
+    # 12. Dynamic import importlib.import_module in -c
+    wf12 = {
+        "jobs": {"tests": {"steps": [{"run": "python -c 'import importlib; importlib.import_module(\"pytest\")'"}]}}
+    }
+    assert any("unanalysable dynamic import" in e for e in validate_workflow_step_imports(wf12, tmp_path))
+
+    # 13. unittest discover -s and -p
+    wf13 = {
+        "jobs": {
+            "tests": {
+                "steps": [{"run": f"python -m unittest discover -s {custom_disc.relative_to(tmp_path)} -p check_*.py"}]
+            }
+        }
+    }
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf13, tmp_path))
+
+    # 14. Missing script
+    wf14 = {"jobs": {"tests": {"steps": [{"run": "python scripts/does_not_exist_ts30.py"}]}}}
+    assert any("cannot resolve execution target" in e for e in validate_workflow_step_imports(wf14, tmp_path))
+
+    # 15. Unparseable script (syntax error)
+    wf15 = {"jobs": {"tests": {"steps": [{"run": f"python {bad_syntax.relative_to(tmp_path)}"}]}}}
+    assert any("unparseable script" in e for e in validate_workflow_step_imports(wf15, tmp_path))
+
+
+def test_workflow_step_imports_sol_findings(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    # SOL-R30-01: package initializers along import path
+    pkg = tmp_path / "pkg_init_test"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("import pytest\n")
+    (pkg / "helper.py").write_text("x = 1\n")
+    entry = tmp_path / "scripts" / "entry_sol.py"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("from pkg_init_test import helper\n")
+
+    wf1 = {"jobs": {"quality": {"steps": [{"run": f"python {entry.relative_to(tmp_path)}"}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf1, tmp_path))
+
+    # SOL-R30-02: unparsed shell operators fail closed
+    wf2 = {
+        "jobs": {
+            "quality": {
+                "steps": [
+                    {"run": "echo ready;pytest"},
+                    {"run": "echo ready&&pytest"},
+                    {"run": 'echo ready | python -c "import pytest"'},
+                    {"run": "cd scripts && python lint_skills.py"},
+                ]
+            }
+        }
+    }
+    errs2 = validate_workflow_step_imports(wf2, tmp_path)
+    assert any("executes 'pytest' before it is installed" in e for e in errs2)
+    assert any("operator '|'" in e for e in errs2)
+    assert any("unanalysable command: 'cd'" in e for e in errs2)
+
+    # SOL-R30-03: Python option operands and attached flags
+    wf3 = {
+        "jobs": {
+            "quality": {
+                "steps": [
+                    {"run": 'python -W ignore -c "import pytest"'},
+                    {"run": "python -mpytest"},
+                ]
+            }
+        }
+    }
+    errs3 = validate_workflow_step_imports(wf3, tmp_path)
+    assert any("inline python code imports 'pytest'" in e for e in errs3)
+    assert any("executes 'pytest' before it is installed" in e for e in errs3)
+
+    # SOL-R30-04: package __main__.py for python -m
+    pkg_main = tmp_path / "pkg_with_main"
+    pkg_main.mkdir()
+    (pkg_main / "__init__.py").write_text("")
+    (pkg_main / "__main__.py").write_text("import pytest\n")
+    wf4 = {"jobs": {"quality": {"steps": [{"run": "python -m pkg_with_main"}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf4, tmp_path))
+
+    # Package without __main__.py fails closed
+    pkg_no_main = tmp_path / "pkg_no_main"
+    pkg_no_main.mkdir()
+    (pkg_no_main / "__init__.py").write_text("")
+    wf4_err = {"jobs": {"quality": {"steps": [{"run": "python -m pkg_no_main"}]}}}
+    assert any("has no __main__.py" in e for e in validate_workflow_step_imports(wf4_err, tmp_path))
+
+    # SOL-R30-05: custom unittest pattern
+    checks = tmp_path / "checks_sol"
+    checks.mkdir()
+    (checks / "check_probe.py").write_text("import pytest\n")
+    wf5 = {"jobs": {"quality": {"steps": [{"run": 'python -m unittest discover -s checks_sol -p "check_*.py"'}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf5, tmp_path))
+
+
+def test_workflow_step_imports_ts30_02_resolves_against_repo_root_not_parent(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    repo_dir = tmp_path / "fake_repo"
+    repo_dir.mkdir()
+    parent_pytest = tmp_path / "pytest"
+    parent_pytest.mkdir()
+
+    wf = {"jobs": {"tests": {"steps": [{"run": 'python -c "import pytest"'}]}}}
+    errs = validate_workflow_step_imports(wf, repo_dir)
+    assert any("inline python code imports 'pytest'" in e for e in errs)
+
+
+def test_workflow_step_imports_relative_multi_hop_and_discover(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    # 1. Two-hop package import: entry -> pkg_a.sub -> pkg_b.leaf -> pytest
+    pkg_a = tmp_path / "pkg_a" / "sub"
+    pkg_a.mkdir(parents=True)
+    (tmp_path / "pkg_a" / "__init__.py").write_text("")
+    (pkg_a / "__init__.py").write_text("from pkg_b.leaf import val\n")
+
+    pkg_b = tmp_path / "pkg_b"
+    pkg_b.mkdir(parents=True)
+    (pkg_b / "__init__.py").write_text("")
+    (pkg_b / "leaf.py").write_text("import pytest\nval = 1\n")
+
+    entry1 = tmp_path / "scripts" / "entry_two_hop.py"
+    entry1.parent.mkdir(parents=True, exist_ok=True)
+    entry1.write_text("import pkg_a.sub\n")
+
+    wf1 = {"jobs": {"quality": {"steps": [{"run": f"python {entry1.relative_to(tmp_path)}"}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf1, tmp_path))
+
+    # 2. Relative import: from .inner import x
+    pkg_rel = tmp_path / "pkg_rel"
+    pkg_rel.mkdir(parents=True)
+    (pkg_rel / "__init__.py").write_text("")
+    (pkg_rel / "inner.py").write_text("import pytest\nx = 1\n")
+    (pkg_rel / "mod_a.py").write_text("from .inner import x\n")
+
+    entry2 = tmp_path / "scripts" / "entry_rel.py"
+    entry2.write_text("from pkg_rel import mod_a\n")
+
+    wf2 = {"jobs": {"quality": {"steps": [{"run": f"python {entry2.relative_to(tmp_path)}"}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf2, tmp_path))
+
+    # 3. Relative import: from . import inner
+    (pkg_rel / "mod_b.py").write_text("from . import inner\n")
+    entry3 = tmp_path / "scripts" / "entry_rel_b.py"
+    entry3.write_text("from pkg_rel import mod_b\n")
+
+    wf3 = {"jobs": {"quality": {"steps": [{"run": f"python {entry3.relative_to(tmp_path)}"}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf3, tmp_path))
+
+    # 4. Local module via python -m
+    local_mod = tmp_path / "local_mod.py"
+    local_mod.write_text("import pytest\n")
+    wf4 = {"jobs": {"quality": {"steps": [{"run": "python -m local_mod"}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf4, tmp_path))
+
+    # 5. Local package with __main__ via python -m
+    local_pkg = tmp_path / "my_local_pkg"
+    local_pkg.mkdir()
+    (local_pkg / "__init__.py").write_text("")
+    (local_pkg / "__main__.py").write_text("import pytest\n")
+    wf5 = {"jobs": {"quality": {"steps": [{"run": "python -m my_local_pkg"}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf5, tmp_path))
+
+    # 6. Unittest discover with -s and -p
+    test_suite = tmp_path / "my_test_suite"
+    test_suite.mkdir()
+    (test_suite / "custom_test.py").write_text("import pytest\n")
+    wf6 = {"jobs": {"quality": {"steps": [{"run": 'python -m unittest discover -s my_test_suite -p "custom_*.py"'}]}}}
+    assert any("imports 'pytest'" in e for e in validate_workflow_step_imports(wf6, tmp_path))
