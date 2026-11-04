@@ -4336,3 +4336,108 @@ class TestR42Hygiene:
         }
         errs = _check_reusable_workflow_job("diagram-freshness", job, ".github/workflows/diagram-freshness.yml", None)
         assert errs == []
+
+
+class TestR43Hygiene:
+    """Table-stakes R43: git-quoted filenames handling via git ls-files -z (SOL-R42-01)."""
+
+    def _setup_tmp_git_repo(self, tmp_path: Path) -> Path:
+        """Create a minimal real git repository in tmp_path with valid git config."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.check_call(["git", "init"], cwd=repo_dir)
+        subprocess.check_call(["git", "config", "user.name", "Test Committer"], cwd=repo_dir)
+        subprocess.check_call(["git", "config", "user.email", "test@example.com"], cwd=repo_dir)
+
+        # Populate minimal workflows and requirements-dev.txt for validators
+        wf_dir = repo_dir / ".github" / "workflows"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        q_src = REPO_ROOT / ".github" / "workflows" / "quality.yaml"
+        if q_src.is_file():
+            (wf_dir / "quality.yaml").write_text(q_src.read_text(encoding="utf-8"), encoding="utf-8")
+        r_src = REPO_ROOT / ".github" / "workflows" / "release.yaml"
+        if r_src.is_file():
+            (wf_dir / "release.yaml").write_text(r_src.read_text(encoding="utf-8"), encoding="utf-8")
+        req_src = REPO_ROOT / "requirements-dev.txt"
+        if req_src.is_file():
+            (repo_dir / "requirements-dev.txt").write_text(req_src.read_text(encoding="utf-8"), encoding="utf-8")
+        pre_src = REPO_ROOT / ".pre-commit-config.yaml"
+        if pre_src.is_file():
+            (repo_dir / ".pre-commit-config.yaml").write_text(pre_src.read_text(encoding="utf-8"), encoding="utf-8")
+
+        return repo_dir
+
+    @pytest.mark.parametrize(
+        ("rel_dir", "filename", "is_bytes"),
+        [
+            ("artifacts", "café.pyc", True),
+            ("artifacts", 'a"b.so', True),
+            ("__pycache__", "odd\tfile.txt", False),
+        ],
+    )
+    def test_real_git_tracked_quoted_paths_fail_all_three_validators(
+        self,
+        tmp_path: Path,
+        rel_dir: str,
+        filename: str,
+        is_bytes: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import scripts.test_pr_workflow_cancellation as test_pr
+        import tools.validate_marketplace as val_mp
+        import tools.validate_skills as val_skills
+
+        repo_dir = self._setup_tmp_git_repo(tmp_path)
+        target_dir = repo_dir / rel_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = target_dir / filename
+        if is_bytes:
+            target_file.write_bytes(b"\x00dummy")
+        else:
+            target_file.write_text("dummy text\n", encoding="utf-8")
+
+        subprocess.check_call(["git", "add", "-A"], cwd=repo_dir)
+        subprocess.check_call(["git", "commit", "-m", "add bad file"], cwd=repo_dir)
+
+        # Verify git ls-files -z discovers the unquoted raw filename
+        tracked = val_skills.get_tracked_files(repo_dir)
+        expected_rel = f"{rel_dir}/{filename}"
+        assert expected_rel in tracked
+
+        # Direct check
+        errs = val_skills._check_disallowed_compiled_or_extension_files(repo_dir)
+        assert any(expected_rel in e for e in errs)
+
+        # Entrypoint 1: validate_skills.main fails (returns 1)
+        rc_skills = val_skills.main([], repo_root=repo_dir)
+        assert rc_skills == 1
+
+        # Entrypoint 2: validate_marketplace.main fails (returns 1)
+        rc_mp = val_mp.main([], repo_root=repo_dir)
+        assert rc_mp == 1
+
+        # Entrypoint 3: test_pr_workflow_cancellation fails (raises AssertionError)
+        monkeypatch.setattr(test_pr, "REPO_ROOT", repo_dir)
+        monkeypatch.setattr(test_pr, "WORKFLOWS_DIR", repo_dir / ".github" / "workflows")
+        with pytest.raises(AssertionError):
+            test_pr.main()
+
+    def test_real_git_tracked_non_ascii_python_discovered_by_rule_c(self, tmp_path: Path) -> None:
+        import tools.validate_skills as val_skills
+
+        repo_dir = self._setup_tmp_git_repo(tmp_path)
+        tools_dir = repo_dir / "tools"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        py_file = tools_dir / "café_ok.py"
+        py_file.write_text("import sys\n", encoding="utf-8")
+
+        subprocess.check_call(["git", "add", "-A"], cwd=repo_dir)
+        subprocess.check_call(["git", "commit", "-m", "add non-ascii py"], cwd=repo_dir)
+
+        # Discovered by get_tracked_python_files
+        py_files = val_skills.get_tracked_python_files(repo_dir)
+        assert py_file in py_files
+
+        # Discovered and passes Rule C
+        errs = val_skills.validate_tracked_python_imports(repo_dir)
+        assert errs == []

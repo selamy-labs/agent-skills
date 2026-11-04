@@ -682,7 +682,7 @@ def is_tracked_by_git_status(path: Path | str) -> tuple[bool, str | None]:
     target = Path(path)
     try:
         proc = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", str(target)],
+            ["git", "ls-files", "-z", "--error-unmatch", str(target)],
             capture_output=True,
             text=True,
             check=False,
@@ -1673,14 +1673,14 @@ def _git_tracked_files(repo_root: Path) -> list[str] | None:
         return None
     try:
         proc = subprocess.run(
-            ["git", "ls-files"],
+            ["git", "ls-files", "-z"],
             cwd=repo_root,
             capture_output=True,
             text=True,
             check=False,
         )
         if proc.returncode == 0:
-            return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            return [p for p in proc.stdout.split("\0") if p]
     except Exception:
         pass
     return None
@@ -2164,14 +2164,14 @@ def get_tracked_python_files(repo_root: Path) -> list[Path]:
     """Collect tracked python files under repo_root."""
     try:
         proc = subprocess.run(
-            ["git", "ls-files", "*.py"],
+            ["git", "ls-files", "-z", "*.py"],
             cwd=repo_root,
             capture_output=True,
             text=True,
             check=False,
         )
-        if proc.returncode == 0 and proc.stdout.strip():
-            raw_paths = proc.stdout.strip().splitlines()
+        if proc.returncode == 0 and proc.stdout:
+            raw_paths = [p for p in proc.stdout.split("\0") if p]
             return [repo_root / p for p in raw_paths]
     except Exception:
         pass
@@ -2237,9 +2237,9 @@ def validate_skills_directory(repo_root: Path | None = None) -> tuple[list[str],
     return validate_all_skills(root)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, repo_root: Path | None = None) -> int:
     """Validate all skills in repo and quality workflow contract."""
-    root = Path(__file__).resolve().parents[1]
+    root = repo_root or Path(__file__).resolve().parents[1]
     skill_errors, count = validate_skills_directory(root)
     workflow_path = root / ".github" / "workflows" / "quality.yaml"
     wf_errors = validate_quality_workflow(workflow_path) if workflow_path.is_file() else ["quality.yaml not found"]

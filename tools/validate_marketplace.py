@@ -383,9 +383,9 @@ def validate_release_workflow(workflow_input: dict[str, Any] | str | Path) -> li
     return errors
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, repo_root: Path | None = None) -> int:
     """Validate marketplace files and release workflow contract."""
-    root = Path(__file__).resolve().parents[1]
+    root = repo_root or Path(__file__).resolve().parents[1]
     mp_errors = validate_marketplace_files(root)
     workflow_path = root / ".github" / "workflows" / "release.yaml"
     wf_errors = validate_release_workflow(workflow_path) if workflow_path.is_file() else ["release.yaml not found"]
