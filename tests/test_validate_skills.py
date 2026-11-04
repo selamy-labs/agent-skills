@@ -33,7 +33,10 @@ def _make_valid_job() -> dict[str, Any]:
         "runs-on": "ubuntu-latest",
         "steps": [
             {"uses": "actions/checkout@v7.0.0"},
-            {"uses": "actions/setup-python@v6.3.0", "with": {"python-version": "3.12"}},
+            {
+                "uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+                "with": {"python-version": "3.12"},
+            },
             {
                 "uses": "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
                 "with": {"go-version": "1.26.10"},

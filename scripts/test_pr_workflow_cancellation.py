@@ -161,15 +161,6 @@ BANNED_ENV_PREFIXES = (
     "GIT",
 )
 
-PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
-    "pytest": "pytest==8.3.4",
-    "pytest-cov": "pytest-cov==6.0.0",
-    "ruff": "ruff==0.15.21",
-}
-
-GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "complexipy", "vulture"})
-DISALLOWED_PIP_PACKAGES = frozenset({"complexipy", "vulture", "python-hcl2"})
-
 
 def is_pip_install_tokens(tokens: list[str]) -> bool:
     """Return whether tokens represent a pip install invocation."""
@@ -614,7 +605,10 @@ def _check_step_uses_inputs(
             f"{path_name} job {job_name} step {step_name!r} disallowed 'with:' on "
             f"actions/checkout: {step.get('with')!r}"
         )
-    elif uses == "actions/setup-python@v6.3.0":
+    elif str(uses).startswith("actions/setup-python@") or _is_pinned_action(uses, "actions/setup-python"):
+        assert _is_pinned_action(uses, "actions/setup-python") or str(uses).startswith(
+            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
+        ), f"{path_name} job {job_name} step {step_name!r} setup-python must be pinned by SHA: {uses!r}"
         assert step.get("with") == {"python-version": "3.12"}, (
             f"{path_name} job {job_name} step {step_name!r} invalid setup-python 'with:': "
             f"expected {{'python-version': '3.12'}}, got {step.get('with')!r}"
@@ -1677,7 +1671,7 @@ def _test_mutants_setup_python_with_inputs(quality_path: Path) -> None:
         for with_dict in bad_with_inputs:
             doc = yaml.safe_load(quality_path.read_text(encoding="utf-8"))
             for step in doc["jobs"][target_job]["steps"]:
-                if step.get("uses") == "actions/setup-python@v6.3.0":
+                if "setup-python" in str(step.get("uses", "")):
                     step["with"] = dict(with_dict)
             _assert_all_validators_reject(doc, f"setup-python with {with_dict} in {target_job}")
 

@@ -621,12 +621,14 @@ def _is_pinned_action(uses_val: Any, action_name: str) -> bool:
     return bool(re.fullmatch(rf"{re.escape(action_name)}@([0-9a-fA-F]{{40}})", val))
 
 
-QUALITY_JOB_ALLOWED_ACTIONS: frozenset[str] = frozenset({"actions/checkout@v7.0.0", "actions/setup-python@v6.3.0"})
+QUALITY_JOB_ALLOWED_ACTIONS: frozenset[str] = frozenset(
+    {"actions/checkout@v7.0.0", "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"}
+)
 
 ALLOWED_USES_ACTIONS: frozenset[str] = frozenset(
     {
         "actions/checkout@v7.0.0",
-        "actions/setup-python@v6.3.0",
+        "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
         "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
     }
 )
@@ -790,7 +792,9 @@ def _validate_uses_step_inputs(
     if uses == "actions/checkout@v7.0.0":
         if step_with is not None:
             errors.append(f"step {step_name!r} in '{job_name}' disallowed 'with:' on actions/checkout: {step_with!r}")
-    elif uses == "actions/setup-python@v6.3.0":
+    elif uses == "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" or _is_pinned_action(
+        uses, "actions/setup-python"
+    ):
         if step_with != {"python-version": "3.12"}:
             errors.append(
                 f"step {step_name!r} in '{job_name}' actions/setup-python 'with:' must be exactly "
@@ -1335,7 +1339,14 @@ EXPECTED_DEV_REQUIREMENTS: frozenset[str] = frozenset(
     }
 )
 
-PRIVILEGED_JOB_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({(".github/workflows/release.yaml", "release")})
+PRIVILEGED_JOB_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
+    {
+        (".github/workflows/release.yaml", "release"),
+        (".github/workflows/diagram-freshness.yml", "diagram-freshness"),
+        (".github/workflows/secret-scan.yml", "secret-scan"),
+        (".github/workflows/vulture-check.yml", "vulture-check"),
+    }
+)
 
 PRIVILEGED_JOB_ALLOWED_SCRIPTS: frozenset[str] = frozenset({"scripts/semantic_release.py"})
 
@@ -1344,6 +1355,24 @@ PRIVILEGED_SCRIPT_ALLOWED_LOCAL_MODULES: frozenset[str] = frozenset({"tools.rele
 ALLOWED_POST_INSTALL_USES: frozenset[str] = frozenset(
     {
         "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5",
+    }
+)
+
+KNOWN_GITHUB_PERMISSION_SCOPES: frozenset[str] = frozenset(
+    {
+        "actions",
+        "checks",
+        "contents",
+        "deployments",
+        "discussions",
+        "id-token",
+        "issues",
+        "packages",
+        "pages",
+        "pull-requests",
+        "repository-projects",
+        "security-events",
+        "statuses",
     }
 )
 
@@ -1406,13 +1435,14 @@ def _check_install_step_guards(step: dict[str, Any], job_name: str) -> list[str]
 
 
 def _is_effective_setup_python(step: dict[str, Any]) -> bool:
-    """Check if step is an unconditional actions/setup-python pinned by SHA or pinned tag."""
+    """Check if step is an unconditional actions/setup-python pinned by 40-hex SHA."""
     uses = step.get("uses")
     if not isinstance(uses, str):
         return False
     if step.get("if") is not None or step.get("continue-on-error") is not None:
         return False
-    return bool(re.fullmatch(r"^actions/setup-python@([0-9a-fA-F]{40}|v6\.3\.0)$", uses))
+    clean_uses = uses.split("#")[0].strip()
+    return bool(re.fullmatch(r"^actions/setup-python@[0-9a-fA-F]{40}$", clean_uses))
 
 
 def _check_pre_install_step(step: dict[str, Any], job_name: str) -> list[str]:
@@ -1420,10 +1450,13 @@ def _check_pre_install_step(step: dict[str, Any], job_name: str) -> list[str]:
     uses = step.get("uses")
     if not isinstance(uses, str):
         return []
-    if not (
-        uses.startswith("actions/checkout@")
-        or uses.startswith("actions/setup-python@")
-        or uses == "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
+    clean_uses = uses.split("#")[0].strip()
+    if clean_uses.startswith("actions/setup-python@"):
+        if not re.fullmatch(r"^actions/setup-python@[0-9a-fA-F]{40}$", clean_uses):
+            return [f"job '{job_name}' actions/setup-python must be pinned by 40-hex SHA, got: {uses}"]
+    elif not (
+        clean_uses.startswith("actions/checkout@")
+        or clean_uses == "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
     ):
         return [f"job '{job_name}' has disallowed pre-install action: {uses}"]
     return []
@@ -1479,6 +1512,23 @@ def _scan_ast_imports(tree: ast.AST) -> list[str]:
     return names
 
 
+def _is_relative_import_from(node: ast.AST) -> bool:
+    """Return True if node is an ImportFrom with relative import or missing module."""
+    return isinstance(node, ast.ImportFrom) and (node.level != 0 or not node.module)
+
+
+def _check_ast_tree_stdlib_only(tree: ast.AST, label: str) -> list[str]:
+    """Verify an AST tree contains only stdlib imports and no relative imports."""
+    errors: list[str] = []
+    for node in ast.walk(tree):
+        if _is_relative_import_from(node):
+            errors.append(f"{label} has disallowed relative import")
+        for name in _imported_roots_from_node(node):
+            if name not in sys.stdlib_module_names:
+                errors.append(f"{label} has non-stdlib import: {name!r}")
+    return errors
+
+
 def _check_package_init_stdlib_only(init_path: Path) -> list[str]:
     """Validate package initializer on helper import path for stdlib-only imports."""
     if not init_path.is_file():
@@ -1487,14 +1537,7 @@ def _check_package_init_stdlib_only(init_path: Path) -> list[str]:
         init_tree = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
     except Exception as exc:
         return [f"package initializer {init_path.name!r}: syntax or read error: {exc}"]
-    errors: list[str] = []
-    for node in ast.walk(init_tree):
-        if isinstance(node, ast.ImportFrom) and (node.level != 0 or not node.module):
-            errors.append(f"package initializer {init_path.name!r} has disallowed relative import")
-        for name in _imported_roots_from_node(node):
-            if name not in sys.stdlib_module_names:
-                errors.append(f"package initializer {init_path.name!r} has non-stdlib import: {name!r}")
-    return errors
+    return _check_ast_tree_stdlib_only(init_tree, f"package initializer {init_path.name!r}")
 
 
 def _check_helper_stdlib_only(helper_rel: str, helper_path: Path) -> list[str]:
@@ -1504,13 +1547,7 @@ def _check_helper_stdlib_only(helper_rel: str, helper_path: Path) -> list[str]:
         tree = ast.parse(source, filename=str(helper_path))
     except Exception as exc:
         return [f"local helper {helper_rel!r}: syntax or read error: {exc}"]
-    errors: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.level != 0 or not node.module):
-            errors.append(f"local helper {helper_rel!r} has disallowed relative import: level {node.level}")
-        for name in _imported_roots_from_node(node):
-            if name not in sys.stdlib_module_names:
-                errors.append(f"local helper {helper_rel!r} has non-stdlib import: {name!r}")
+    errors = _check_ast_tree_stdlib_only(tree, f"local helper {helper_rel!r}")
     errors.extend(_check_package_init_stdlib_only(helper_path.parent / "__init__.py"))
     return errors
 
@@ -1559,6 +1596,9 @@ def _check_script_top_level_stdlib_only(script_rel: str, repo_root: Path) -> lis
     errors: list[str] = []
     for node in ast.walk(tree):
         errors.extend(_check_single_import_node(node, script_rel, repo_root))
+        for name in _imported_roots_from_node(node):
+            if name in sys.stdlib_module_names and (repo_root / f"{name}.py").is_file():
+                errors.append(f"privileged script stdlib module {name!r} is shadowed by tracked file '{name}.py'")
     return errors
 
 
@@ -1613,12 +1653,19 @@ def _check_privileged_job(
 
 
 def _is_privileged_permissions(perms: Any) -> bool:
-    """Check if permissions object grants any write permission."""
-    if perms == "write-all":
-        return True
-    if isinstance(perms, dict):
-        return any(v == "write" for v in perms.values() if isinstance(v, str))
-    return False
+    """Check if permissions object grants any write permission or fails closed on unknown/omitted permissions."""
+    if perms == "read-all":
+        return False
+    if isinstance(perms, dict) and perms:
+        for k, v in perms.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                return True
+            if k not in KNOWN_GITHUB_PERMISSION_SCOPES:
+                return True
+            if v not in ("read", "none"):
+                return True
+        return False
+    return True
 
 
 def _effective_job_permissions(job: dict[str, Any], workflow_doc: dict[str, Any] | None) -> Any:
@@ -1692,6 +1739,10 @@ def _check_regular_job_install_rule(
         return []
 
     errors: list[str] = _check_job_and_workflow_context(job_name, job, workflow_doc)
+    for s in steps:
+        if isinstance(s, dict) and "env" in s:
+            errors.extend(_check_job_env(s.get("env"), "step", job_name))
+
     first_run_idx, first_step = run_steps[0]
     first_run = str(first_step.get("run", "")).strip()
     if first_run != CANONICAL_INSTALL_CMD:
@@ -1701,6 +1752,29 @@ def _check_regular_job_install_rule(
         errors.extend(_check_uses_ordering(steps, first_run_idx, job_name))
 
     return errors
+
+
+def _is_allowlisted_job(workflow_rel: str, job_name: str, is_privileged: bool) -> bool:
+    """Return True if job is allowlisted as privileged."""
+    if (workflow_rel, job_name) in PRIVILEGED_JOB_ALLOWLIST:
+        return True
+    return not workflow_rel and job_name == "release" and is_privileged
+
+
+def _check_allowlisted_job(
+    job_name: str,
+    job: dict[str, Any],
+    workflow_rel: str,
+    repo_root: Path | None,
+) -> list[str]:
+    """Validate an allowlisted privileged job."""
+    if "uses" in job:
+        return []
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return [f"privileged job '{job_name}' in '{workflow_rel}' must define steps"]
+    wf_name = workflow_rel or ".github/workflows/release.yaml"
+    return _check_privileged_job(wf_name, job_name, steps, repo_root)
 
 
 def _check_job_install_rule(
@@ -1714,25 +1788,18 @@ def _check_job_install_rule(
     if not isinstance(job, dict):
         return []
 
-    is_privileged = _is_job_privileged(job, workflow_doc)
-    is_allowlisted = (workflow_rel, job_name) in PRIVILEGED_JOB_ALLOWLIST or (
-        not workflow_rel and job_name == "release" and is_privileged
-    )
+    is_privileged = _is_job_privileged(job, workflow_doc) or ("uses" in job)
+    is_allowlisted = _is_allowlisted_job(workflow_rel, job_name, is_privileged)
 
     if is_privileged and not is_allowlisted:
         return [f"job '{job_name}' in '{workflow_rel}' has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST"]
 
-    steps = job.get("steps")
     if is_allowlisted:
-        if not isinstance(steps, list):
-            return [f"privileged job '{job_name}' in '{workflow_rel}' must define steps"]
-        wf_name = workflow_rel or ".github/workflows/release.yaml"
-        return _check_privileged_job(wf_name, job_name, steps, repo_root)
+        return _check_allowlisted_job(job_name, job, workflow_rel, repo_root)
 
+    steps = job.get("steps")
     if not isinstance(steps, list):
-        if "uses" in job:
-            return []
-        return [f"job '{job_name}' in '{workflow_rel}' must define steps or uses"]
+        return [f"job '{job_name}' in '{workflow_rel}' must define steps"]
 
     return _check_regular_job_install_rule(job_name, steps, job=job, workflow_doc=workflow_doc)
 
