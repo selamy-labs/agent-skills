@@ -4234,3 +4234,105 @@ class TestR41Hygiene:
             },
         }
         assert validate_workflow_install_steps(clean_doc, workflow_rel=".github/workflows/diagram-freshness.yml") == []
+
+
+class TestR42Hygiene:
+    """Table-stakes R42: rejection of tracked bytecode or extension modules (TS41-01) and mypy doc typing (TS41-02)."""
+
+    def test_positive_current_tree_clean(self) -> None:
+        import scripts.test_pr_workflow_cancellation as test_pr
+        import tools.validate_marketplace as val_mp
+        from tools.validate_skills import (
+            _check_disallowed_compiled_or_extension_files,
+            validate_all_workflows_install_steps,
+            validate_tracked_python_imports,
+        )
+
+        assert _check_disallowed_compiled_or_extension_files(REPO_ROOT) == []
+        assert validate_all_workflows_install_steps(REPO_ROOT) == []
+        assert validate_tracked_python_imports(REPO_ROOT) == []
+        assert val_mp.validate_all_workflows_install_steps(REPO_ROOT) == []
+        assert test_pr.test_all_workflows_install_steps_and_requirements() is None
+
+    @pytest.mark.parametrize(
+        "bad_rel_path",
+        [
+            "tools/__pycache__/release_gate.cpython-312.pyc",
+            "json.pyc",
+            "scripts/x.so",
+        ],
+    )
+    def test_tracked_bytecode_or_extension_fails_all_three_validators(
+        self, bad_rel_path: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scripts.test_pr_workflow_cancellation as test_pr
+        import tools.validate_marketplace as val_mp
+        import tools.validate_skills as val_skills
+
+        real_files = val_skills.get_tracked_files(REPO_ROOT)
+        mocked_files = sorted(real_files + [bad_rel_path])
+        monkeypatch.setattr(val_skills, "get_tracked_files", lambda root: mocked_files)
+
+        errs = val_skills._check_disallowed_compiled_or_extension_files(REPO_ROOT)
+        assert any(bad_rel_path in e for e in errs)
+
+        # Entrypoint 1: validate_skills.main() fails (returns 1)
+        rc_skills = val_skills.main([])
+        assert rc_skills == 1
+
+        # Entrypoint 2: validate_marketplace.main() fails (returns 1)
+        rc_mp = val_mp.main([])
+        assert rc_mp == 1
+
+        # Entrypoint 3: test_pr_workflow_cancellation.main() fails (raises AssertionError)
+        with pytest.raises(AssertionError):
+            test_pr.main()
+
+    def test_tmp_path_fixture_negative_mutants(self, tmp_path: Path) -> None:
+        from tools.validate_skills import (
+            _check_disallowed_compiled_or_extension_files,
+            validate_all_workflows_install_steps,
+        )
+
+        # 1. Unchecked-hash __pycache__ pyc
+        pycache_dir = tmp_path / "tools" / "__pycache__"
+        pycache_dir.mkdir(parents=True, exist_ok=True)
+        pyc_file = pycache_dir / "release_gate.cpython-312.pyc"
+        pyc_file.write_bytes(b"dummy bytecode")
+
+        errs1 = _check_disallowed_compiled_or_extension_files(tmp_path)
+        assert any("release_gate.cpython-312.pyc" in e for e in errs1)
+        wf_errs1 = validate_all_workflows_install_steps(tmp_path)
+        assert any("release_gate.cpython-312.pyc" in e for e in wf_errs1)
+        pyc_file.unlink()
+
+        # 2. Sourceless json.pyc at root
+        root_pyc = tmp_path / "json.pyc"
+        root_pyc.write_bytes(b"dummy bytecode")
+        errs2 = _check_disallowed_compiled_or_extension_files(tmp_path)
+        assert any("json.pyc" in e for e in errs2)
+        wf_errs2 = validate_all_workflows_install_steps(tmp_path)
+        assert any("json.pyc" in e for e in wf_errs2)
+        root_pyc.unlink()
+
+        # 3. Extension module scripts/x.so
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        so_file = scripts_dir / "x.so"
+        so_file.write_bytes(b"dummy so")
+        errs3 = _check_disallowed_compiled_or_extension_files(tmp_path)
+        assert any("scripts/x.so" in e for e in errs3)
+        wf_errs3 = validate_all_workflows_install_steps(tmp_path)
+        assert any("scripts/x.so" in e for e in wf_errs3)
+        so_file.unlink()
+
+    def test_reusable_workflow_job_doc_none_no_union_attr_error(self) -> None:
+        from tools.validate_skills import _check_reusable_workflow_job
+
+        # TS41-02: workflow_doc is None should not raise AttributeError or typing error
+        job = {
+            "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+            "permissions": {"contents": "read"},
+        }
+        errs = _check_reusable_workflow_job("diagram-freshness", job, ".github/workflows/diagram-freshness.yml", None)
+        assert errs == []

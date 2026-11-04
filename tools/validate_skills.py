@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.machinery
 import re
 import shlex
 import subprocess
@@ -1649,6 +1650,79 @@ def _check_stdlib_shadowing(repo_root: Path) -> list[str]:
     return errors
 
 
+def _disallowed_module_suffixes() -> tuple[str, ...]:
+    """Compute disallowed compiled or extension module suffixes from importlib.machinery at runtime."""
+    suffixes = {s for s in importlib.machinery.all_suffixes() if s != ".py"}
+    suffixes.update({".pyo", ".pyd"})
+    return tuple(sorted(suffixes))
+
+
+def _is_disallowed_path(rel_path: str, disallowed_suffixes: tuple[str, ...]) -> bool:
+    """Return True if rel_path has a __pycache__ component or a disallowed module suffix."""
+    path_obj = Path(rel_path)
+    if "__pycache__" in path_obj.parts:
+        return True
+    if path_obj.suffix in disallowed_suffixes:
+        return True
+    return any(path_obj.name.endswith(s) for s in disallowed_suffixes)
+
+
+def _git_tracked_files(repo_root: Path) -> list[str] | None:
+    """Return tracked files from git ls-files if repo_root is a git checkout."""
+    if not (repo_root / ".git").exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    except Exception:
+        pass
+    return None
+
+
+def _fallback_tracked_files(repo_root: Path) -> list[str]:
+    """Collect candidate files under repo_root when not in a git checkout."""
+    files: list[str] = []
+    for p in repo_root.rglob("*"):
+        if p.is_file():
+            try:
+                rel = p.relative_to(repo_root).as_posix()
+                if not rel.startswith(".git/"):
+                    files.append(rel)
+            except ValueError:
+                pass
+    return sorted(files)
+
+
+def get_tracked_files(repo_root: Path) -> list[str]:
+    """Return all tracked file paths relative to repo_root (or all files if not a git repo)."""
+    git_files = _git_tracked_files(repo_root)
+    if git_files is not None:
+        return git_files
+    return _fallback_tracked_files(repo_root)
+
+
+def _check_disallowed_compiled_or_extension_files(repo_root: Path) -> list[str]:
+    """Reject any tracked file whose suffix is in importlib.machinery.all_suffixes() other than '.py'
+    or whose path contains a __pycache__/ component across the whole repository.
+    """
+    disallowed = _disallowed_module_suffixes()
+    errors: list[str] = []
+    for rel_path in sorted(get_tracked_files(repo_root)):
+        if _is_disallowed_path(rel_path, disallowed):
+            errors.append(
+                f"tracked file '{rel_path}' is a compiled bytecode or extension module; "
+                f"only source .py files may be tracked"
+            )
+    return errors
+
+
 def _is_path_tracked(target: Path, repo_root: Path) -> bool:
     """Return True if target exists and is tracked in git (or repo_root is not a git checkout)."""
     if not target.exists():
@@ -1660,7 +1734,7 @@ def _is_path_tracked(target: Path, repo_root: Path) -> bool:
 
 def _check_pinned_helper_resolution(repo_root: Path) -> list[str]:
     """Ensure pinned helper resolves exclusively to tools/release_gate.py."""
-    errors: list[str] = []
+    errors: list[str] = _check_disallowed_compiled_or_extension_files(repo_root)
     if _is_path_tracked(repo_root / "tools" / "release_gate", repo_root):
         errors.append(
             "competing package 'tools/release_gate' exists; "
@@ -1699,7 +1773,7 @@ def _check_competing_modules_and_packages(repo_root: Path) -> list[str]:
     errors: list[str] = _check_pinned_helper_resolution(repo_root)
     for loc in (repo_root, repo_root / "scripts", repo_root / "tools"):
         errors.extend(_check_coexisting_module_and_package(loc, repo_root))
-    return errors
+    return list(dict.fromkeys(errors))
 
 
 def _check_script_top_level_stdlib_only(script_rel: str, repo_root: Path) -> list[str]:
@@ -1716,7 +1790,7 @@ def _check_script_top_level_stdlib_only(script_rel: str, repo_root: Path) -> lis
     errors.extend(_check_competing_modules_and_packages(repo_root))
     for node in ast.walk(tree):
         errors.extend(_check_single_import_node(node, script_rel, repo_root))
-    return errors
+    return list(dict.fromkeys(errors))
 
 
 def _extract_script_invocations(cmd_str: str) -> list[str]:
@@ -1767,7 +1841,7 @@ def _check_privileged_job(
         if isinstance(step, dict) and step.get("run"):
             cmd_str = str(step["run"]).strip()
             errors.extend(_check_privileged_step(cmd_str, workflow_rel, job_name, root))
-    return errors
+    return list(dict.fromkeys(errors))
 
 
 def _is_valid_permission_entry(key: Any, val: Any) -> bool:
@@ -1937,8 +2011,9 @@ def _check_reusable_workflow_job(
             f"job '{job_name}' in '{workflow_rel}' invokes unallowlisted reusable workflow '{uses_target}'; "
             f"is not in PRIVILEGED_REUSABLE_JOB_ALLOWLIST and is not in PRIVILEGED_JOB_ALLOWLIST"
         ]
-    if "secrets" in job or (workflow_doc and "secrets" in workflow_doc):
-        sec_val = job.get("secrets") if "secrets" in job else workflow_doc.get("secrets")
+    doc = workflow_doc or {}
+    if "secrets" in job or "secrets" in doc:
+        sec_val = job.get("secrets") if "secrets" in job else doc.get("secrets")
         return [
             f"reusable workflow job '{job_name}' in '{workflow_rel}' declares disallowed 'secrets' key: {sec_val!r}"
         ]
@@ -2012,10 +2087,10 @@ def validate_workflow_install_steps(
 def validate_all_workflows_install_steps(repo_root: Path | None = None) -> list[str]:
     """Scan and validate Rule B across every workflow under .github/workflows/."""
     root = (repo_root or Path(__file__).resolve().parents[1]).resolve()
+    errors: list[str] = _check_disallowed_compiled_or_extension_files(root)
     wf_dir = root / ".github" / "workflows"
     if not wf_dir.is_dir():
-        return []
-    errors: list[str] = []
+        return errors
     for wf_path in sorted(wf_dir.glob("*.y*ml")):
         doc, load_errs = _load_workflow_mapping(wf_path)
         if doc is None:
@@ -2026,7 +2101,7 @@ def validate_all_workflows_install_steps(repo_root: Path | None = None) -> list[
         except ValueError:
             rel_path = wf_path.as_posix()
         errors.extend(validate_workflow_install_steps(doc, workflow_rel=rel_path, repo_root=root))
-    return errors
+    return list(dict.fromkeys(errors))
 
 
 def _read_pinned_distributions(requirements_path: Path) -> set[str]:
@@ -2111,10 +2186,10 @@ def validate_tracked_python_imports(repo_root: Path | None = None) -> list[str]:
     pinned_dists = _read_pinned_distributions(req_file)
 
     files = get_tracked_python_files(root)
-    errors: list[str] = []
+    errors: list[str] = _check_disallowed_compiled_or_extension_files(root)
     for f in sorted(files):
         errors.extend(_validate_single_python_file(f, root, pinned_dists))
-    return errors
+    return list(dict.fromkeys(errors))
 
 
 def validate_quality_workflow(workflow_input: dict[str, Any] | str | Path) -> list[str]:
