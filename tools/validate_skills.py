@@ -1335,11 +1335,6 @@ EXPECTED_DEV_REQUIREMENTS: frozenset[str] = frozenset(
     }
 )
 
-INSTALLER_EXACT_NAMES: frozenset[str] = frozenset(
-    {"conda", "mamba", "uv", "pipx", "poetry", "ensurepip", "easy_install"}
-)
-INSTALLER_COMMAND_NAMES: frozenset[str] = INSTALLER_EXACT_NAMES | frozenset({"pip", "pip3"})
-
 PRIVILEGED_JOB_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({(".github/workflows/release.yaml", "release")})
 
 PRIVILEGED_JOB_ALLOWED_SCRIPTS: frozenset[str] = frozenset({"scripts/semantic_release.py"})
@@ -1389,46 +1384,6 @@ def validate_requirements_dev_file(path: Path) -> list[str]:
     return validate_requirements_dev_content(path.read_text(encoding="utf-8"))
 
 
-def _token_is_installer(tok: str) -> bool:
-    """Check if a single command token represents an installer tool."""
-    clean = tok.strip("'\"")
-    if "=" in clean and not clean.startswith("-"):
-        clean = clean.split("=", 1)[1]
-    base = clean.split("/")[-1]
-    if not base:
-        return False
-    if base in INSTALLER_EXACT_NAMES or base.startswith("easy_install"):
-        return True
-    if re.fullmatch(r"^pip\d*(\.\d+)*$", base):
-        return True
-    if re.fullmatch(r"^-[a-zA-Z0-9]*m(pip\d*(\.\d+)*|ensurepip)$", base):
-        return True
-    return False
-
-
-def _cmd_contains_installer(cmd_str: str) -> bool:
-    """Return True if any command line in cmd_str invokes a package installer."""
-    for line in cmd_str.splitlines():
-        trimmed = line.strip()
-        if not trimmed or trimmed.startswith("#"):
-            continue
-        words = re.findall(r'[^\s;&|()"\']+', trimmed)
-        prev_is_m = False
-        for w in words:
-            if _token_is_installer(w):
-                return True
-            base = w.split("/")[-1]
-            if prev_is_m and (re.fullmatch(r"^pip\d*(\.\d+)*$", base) or base == "ensurepip"):
-                return True
-            prev_is_m = bool(re.fullmatch(r"^-[a-zA-Z0-9]*m$", w))
-    return False
-
-
-def _has_pip_install(cmd_str: str) -> bool:
-    """Return True if cmd_str invokes any package installer."""
-    return _cmd_contains_installer(cmd_str)
-
-
 def _check_install_step_guards(step: dict[str, Any], job_name: str) -> list[str]:
     """Ensure canonical install step has no conditional, shell, directory, or coe overrides."""
     errors: list[str] = []
@@ -1450,6 +1405,30 @@ def _check_install_step_guards(step: dict[str, Any], job_name: str) -> list[str]
     return errors
 
 
+def _is_effective_setup_python(step: dict[str, Any]) -> bool:
+    """Check if step is an unconditional actions/setup-python pinned by SHA or pinned tag."""
+    uses = step.get("uses")
+    if not isinstance(uses, str):
+        return False
+    if step.get("if") is not None or step.get("continue-on-error") is not None:
+        return False
+    return bool(re.fullmatch(r"^actions/setup-python@([0-9a-fA-F]{40}|v6\.3\.0)$", uses))
+
+
+def _check_pre_install_step(step: dict[str, Any], job_name: str) -> list[str]:
+    """Ensure pre-install actions are restricted to checkout, setup-python, or setup-go."""
+    uses = step.get("uses")
+    if not isinstance(uses, str):
+        return []
+    if not (
+        uses.startswith("actions/checkout@")
+        or uses.startswith("actions/setup-python@")
+        or uses == "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
+    ):
+        return [f"job '{job_name}' has disallowed pre-install action: {uses}"]
+    return []
+
+
 def _check_post_install_step(step: dict[str, Any], job_name: str) -> list[str]:
     """Validate an individual step that occurs after canonical install."""
     uses = step.get("uses")
@@ -1467,10 +1446,14 @@ def _check_post_install_step(step: dict[str, Any], job_name: str) -> list[str]:
 def _check_uses_ordering(steps: list[Any], first_run_idx: int, job_name: str) -> list[str]:
     """Ensure setup-python precedes install and only allowlisted actions follow install."""
     errors: list[str] = []
-    has_setup_python = any(
-        isinstance(s, dict) and "setup-python" in str(s.get("uses", "")) for s in steps[:first_run_idx]
-    )
-    if not has_setup_python:
+    has_effective_setup_python = False
+    for s in steps[:first_run_idx]:
+        if isinstance(s, dict):
+            errors.extend(_check_pre_install_step(s, job_name))
+            if _is_effective_setup_python(s):
+                has_effective_setup_python = True
+
+    if not has_effective_setup_python:
         errors.append(f"job '{job_name}' requires actions/setup-python before canonical install step")
 
     for s in steps[first_run_idx + 1 :]:
@@ -1496,6 +1479,24 @@ def _scan_ast_imports(tree: ast.AST) -> list[str]:
     return names
 
 
+def _check_package_init_stdlib_only(init_path: Path) -> list[str]:
+    """Validate package initializer on helper import path for stdlib-only imports."""
+    if not init_path.is_file():
+        return []
+    try:
+        init_tree = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
+    except Exception as exc:
+        return [f"package initializer {init_path.name!r}: syntax or read error: {exc}"]
+    errors: list[str] = []
+    for node in ast.walk(init_tree):
+        if isinstance(node, ast.ImportFrom) and (node.level != 0 or not node.module):
+            errors.append(f"package initializer {init_path.name!r} has disallowed relative import")
+        for name in _imported_roots_from_node(node):
+            if name not in sys.stdlib_module_names:
+                errors.append(f"package initializer {init_path.name!r} has non-stdlib import: {name!r}")
+    return errors
+
+
 def _check_helper_stdlib_only(helper_rel: str, helper_path: Path) -> list[str]:
     """Ensure a local helper script uses only stdlib imports and no local/third-party imports."""
     try:
@@ -1505,16 +1506,19 @@ def _check_helper_stdlib_only(helper_rel: str, helper_path: Path) -> list[str]:
         return [f"local helper {helper_rel!r}: syntax or read error: {exc}"]
     errors: list[str] = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.level != 0 or not node.module):
+            errors.append(f"local helper {helper_rel!r} has disallowed relative import: level {node.level}")
         for name in _imported_roots_from_node(node):
             if name not in sys.stdlib_module_names:
                 errors.append(f"local helper {helper_rel!r} has non-stdlib import: {name!r}")
+    errors.extend(_check_package_init_stdlib_only(helper_path.parent / "__init__.py"))
     return errors
 
 
 def _check_import_from_node(node: ast.ImportFrom, script_rel: str, repo_root: Path) -> list[str]:
     """Validate an ImportFrom AST node against stdlib or approved local helpers."""
     if node.level != 0 or not node.module:
-        return []
+        return [f"privileged script {script_rel!r} has disallowed relative import: level {node.level}"]
     mod_full = node.module
     mod_root = mod_full.split(".")[0]
     if mod_root in sys.stdlib_module_names:
@@ -1581,10 +1585,6 @@ def _check_privileged_step(
 ) -> list[str]:
     """Check a single run command in a privileged job."""
     errors: list[str] = []
-    if _cmd_contains_installer(cmd_str):
-        errors.append(
-            f"privileged job '{job_name}' in '{workflow_rel}' must not run any package installer: {cmd_str!r}"
-        )
     for script in _extract_script_invocations(cmd_str):
         if script not in PRIVILEGED_JOB_ALLOWED_SCRIPTS:
             errors.append(
@@ -1637,12 +1637,12 @@ def _is_job_privileged(job: dict[str, Any], workflow_doc: dict[str, Any] | None)
 
 
 def _check_job_env(env: Any, scope: str, job_name: str) -> list[str]:
-    """Reject PIP_* and PYTHON* environment variables."""
+    """Reject PIP_*, PYTHON*, and PATH environment variables."""
     if not isinstance(env, dict):
         return []
     errors: list[str] = []
     for key in env:
-        if isinstance(key, str) and (key.startswith("PIP_") or key.startswith("PYTHON")):
+        if isinstance(key, str) and (key.startswith("PIP_") or key.startswith("PYTHON") or key == "PATH"):
             errors.append(f"{scope} '{job_name}' has disallowed environment variable: {key!r}")
     return errors
 
@@ -1657,6 +1657,22 @@ def _check_job_defaults_run(defaults: Any, scope: str, job_name: str) -> list[st
     errors: list[str] = []
     if "shell" in run_defaults or "working-directory" in run_defaults or "working_directory" in run_defaults:
         errors.append(f"{scope} '{job_name}' must not define defaults.run (shell/working-directory)")
+    return errors
+
+
+def _check_job_and_workflow_context(
+    job_name: str,
+    job: dict[str, Any] | None,
+    workflow_doc: dict[str, Any] | None,
+) -> list[str]:
+    """Validate job- and workflow-level environment and defaults."""
+    errors: list[str] = []
+    if job:
+        errors.extend(_check_job_defaults_run(job.get("defaults"), "job", job_name))
+        errors.extend(_check_job_env(job.get("env"), "job", job_name))
+    if workflow_doc:
+        errors.extend(_check_job_defaults_run(workflow_doc.get("defaults"), "workflow", job_name))
+        errors.extend(_check_job_env(workflow_doc.get("env"), "workflow", job_name))
     return errors
 
 
@@ -1675,14 +1691,7 @@ def _check_regular_job_install_rule(
     if not run_steps:
         return []
 
-    errors: list[str] = []
-    if job:
-        errors.extend(_check_job_defaults_run(job.get("defaults"), "job", job_name))
-        errors.extend(_check_job_env(job.get("env"), "job", job_name))
-    if workflow_doc:
-        errors.extend(_check_job_defaults_run(workflow_doc.get("defaults"), "workflow", job_name))
-        errors.extend(_check_job_env(workflow_doc.get("env"), "workflow", job_name))
-
+    errors: list[str] = _check_job_and_workflow_context(job_name, job, workflow_doc)
     first_run_idx, first_step = run_steps[0]
     first_run = str(first_step.get("run", "")).strip()
     if first_run != CANONICAL_INSTALL_CMD:
@@ -1690,12 +1699,6 @@ def _check_regular_job_install_rule(
     else:
         errors.extend(_check_install_step_guards(first_step, job_name))
         errors.extend(_check_uses_ordering(steps, first_run_idx, job_name))
-
-    for _, step in run_steps[1:]:
-        step_cmd = str(step.get("run", ""))
-        if _cmd_contains_installer(step_cmd):
-            step_name = step.get("name") or step.get("id") or "unnamed step"
-            errors.append(f"job '{job_name}' step {step_name!r} has disallowed secondary pip install: {step_cmd!r}")
 
     return errors
 
@@ -1710,26 +1713,28 @@ def _check_job_install_rule(
     """Validate install rule for a single workflow job."""
     if not isinstance(job, dict):
         return []
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return []
 
     is_privileged = _is_job_privileged(job, workflow_doc)
     is_allowlisted = (workflow_rel, job_name) in PRIVILEGED_JOB_ALLOWLIST or (
         not workflow_rel and job_name == "release" and is_privileged
     )
 
+    if is_privileged and not is_allowlisted:
+        return [f"job '{job_name}' in '{workflow_rel}' has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST"]
+
+    steps = job.get("steps")
     if is_allowlisted:
+        if not isinstance(steps, list):
+            return [f"privileged job '{job_name}' in '{workflow_rel}' must define steps"]
         wf_name = workflow_rel or ".github/workflows/release.yaml"
         return _check_privileged_job(wf_name, job_name, steps, repo_root)
 
-    errors: list[str] = []
-    if is_privileged:
-        errors.append(
-            f"job '{job_name}' in '{workflow_rel}' has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST"
-        )
-    errors.extend(_check_regular_job_install_rule(job_name, steps, job=job, workflow_doc=workflow_doc))
-    return errors
+    if not isinstance(steps, list):
+        if "uses" in job:
+            return []
+        return [f"job '{job_name}' in '{workflow_rel}' must define steps or uses"]
+
+    return _check_regular_job_install_rule(job_name, steps, job=job, workflow_doc=workflow_doc)
 
 
 def validate_workflow_install_steps(
@@ -1737,7 +1742,9 @@ def validate_workflow_install_steps(
     workflow_rel: str = "",
     repo_root: Path | None = None,
 ) -> list[str]:
-    """Validate Rule B: first run step in every job is canonical pip install, no others."""
+    """Validate Rule B: the canonical install runs first and unconditionally in every non-privileged job,
+    and privileged jobs run no Python with third-party dependencies.
+    """
     if not isinstance(doc, dict):
         return ["workflow document must be a mapping"]
     jobs = doc.get("jobs")

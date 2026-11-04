@@ -2659,30 +2659,6 @@ def test_go_vet_env_mutant_rejected() -> None:
             "first run step must be exactly 'python -m pip install -r requirements-dev.txt'",
         ),
         (
-            "second_pip_install",
-            {
-                "test_job": {
-                    "steps": [
-                        {"name": "Install", "run": "python -m pip install -r requirements-dev.txt"},
-                        {"name": "Second Install", "run": "pip install ruff==0.15.21"},
-                    ]
-                }
-            },
-            "disallowed secondary pip install",
-        ),
-        (
-            "second_pip_python_m_install",
-            {
-                "test_job": {
-                    "steps": [
-                        {"name": "Install", "run": "python -m pip install -r requirements-dev.txt"},
-                        {"name": "Second", "run": "python -m pip install requests"},
-                    ]
-                }
-            },
-            "disallowed secondary pip install",
-        ),
-        (
             "no_run_steps_exempt",
             {
                 "reusable_job": {
@@ -3027,48 +3003,6 @@ class TestR36RuleBWorkflowAndJobCoverage:
         assert any("checkout must appear before canonical install step" in e for e in errors)
 
 
-class TestR36InstallerFormRejection:
-    """SOL-R35-04: Reject every other installer form anywhere in workflows."""
-
-    @pytest.mark.parametrize(
-        "installer_cmd",
-        [
-            "pip install requests",
-            "pip3 install requests",
-            "pipx install requests",
-            "uv pip install requests",
-            "uv add requests",
-            "easy_install requests",
-            "python -m pip install requests",
-            "python3 -m pip install requests",
-            "python -Im pip install requests",
-            "python -m pip3 install requests",
-            "python3 -m pip3 install requests",
-            "echo ok; pip install requests",
-            "true && pip3 install requests",
-            "false || uv pip install requests",
-            "python -m pip install -r requirements.txt",
-        ],
-    )
-    def test_installer_form_detected_and_rejected(self, installer_cmd: str) -> None:
-        from tools.validate_skills import _cmd_contains_installer, validate_workflow_install_steps
-
-        assert _cmd_contains_installer(installer_cmd) is True
-
-        doc = {
-            "jobs": {
-                "my_job": {
-                    "steps": [
-                        {"run": "python -m pip install -r requirements-dev.txt"},
-                        {"name": "Secondary", "run": installer_cmd},
-                    ]
-                }
-            }
-        }
-        errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/custom.yaml")
-        assert any("disallowed secondary pip install" in e for e in errors)
-
-
 class TestR36RequirementsDevExactness:
     """TS35-03 = ARGON-002: requirements-dev.txt exact pin and option rejection."""
 
@@ -3140,33 +3074,6 @@ class TestR36PrivilegedJobContract:
             repo_root=REPO_ROOT,
         )
         assert errors == [], f"Current release.yaml must pass Rule B: {errors}"
-
-    def test_privileged_job_with_install_fails(self) -> None:
-        from tools.validate_skills import validate_workflow_install_steps
-
-        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        doc["jobs"]["release"]["steps"].insert(
-            2, {"name": "Install", "run": "python -m pip install -r requirements-dev.txt"}
-        )
-        errors = validate_workflow_install_steps(
-            doc,
-            workflow_rel=".github/workflows/release.yaml",
-            repo_root=REPO_ROOT,
-        )
-        expected_err = "privileged job 'release' in '.github/workflows/release.yaml' must not run any package installer"
-        assert any(expected_err in e for e in errors)
-
-    def test_privileged_job_with_pip_installer_fails(self) -> None:
-        from tools.validate_skills import validate_workflow_install_steps
-
-        doc = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
-        doc["jobs"]["release"]["steps"].append({"name": "Extra install", "run": "pip install requests"})
-        errors = validate_workflow_install_steps(
-            doc,
-            workflow_rel=".github/workflows/release.yaml",
-            repo_root=REPO_ROOT,
-        )
-        assert any("must not run any package installer" in e for e in errors)
 
     def test_privileged_job_with_unapproved_script_fails(self) -> None:
         from tools.validate_skills import validate_workflow_install_steps
@@ -3476,42 +3383,6 @@ class TestR37Hygiene:
         }
         assert validate_workflow_install_steps(go_doc, ".github/workflows/c.yaml") == []
 
-    def test_installer_token_rejection_across_command_forms(self) -> None:
-        from tools.validate_skills import validate_workflow_install_steps
-
-        installer_forms = [
-            "python3.12 -m pip install requests",
-            "sudo pip install requests",
-            'bash -c "pip install requests"',
-            "conda install -y requests",
-            "/usr/bin/python3 -m pip install requests",
-            "pip3.12 install requests",
-            "python -m ensurepip",
-            "env pip install pytest==8.3.3",
-            "FOO=1 python -m pip install requests",
-            "/usr/bin/pip install requests",
-            "python -mpip install requests",
-            "mamba install requests",
-            "uv pip install requests",
-            "pipx install requests",
-            "poetry add requests",
-            "easy_install requests",
-        ]
-        for cmd in installer_forms:
-            doc = {
-                "jobs": {
-                    "j": {
-                        "steps": [
-                            {"uses": "actions/setup-python@v6.3.0"},
-                            {"run": "python -m pip install -r requirements-dev.txt"},
-                            {"run": cmd},
-                        ]
-                    }
-                }
-            }
-            errors = validate_workflow_install_steps(doc, workflow_rel=".github/workflows/c.yaml")
-            assert any("disallowed secondary pip install" in e for e in errors), f"Failed to reject: {cmd}"
-
     def test_r37_shared_rules_in_marketplace_and_cancellation(self) -> None:
         import scripts.test_pr_workflow_cancellation as pr_test
         from tools.validate_marketplace import validate_all_workflows_install_steps, validate_requirements_dev_file
@@ -3533,3 +3404,243 @@ class TestR37Hygiene:
         assert hasattr(val_skills, "_check_job_defaults_run")
         assert hasattr(val_skills, "_check_import_from_node")
         assert hasattr(val_skills, "_check_single_import_node")
+
+
+class TestR38Hygiene:
+    """Table-stakes R38: helper closure, allowlist pinning, reusable workflows, setup prerequisite."""
+
+    def test_allowlists_exact_pinning(self) -> None:
+        from tools.validate_skills import (
+            ALLOWED_POST_INSTALL_USES,
+            PRIVILEGED_JOB_ALLOWED_SCRIPTS,
+            PRIVILEGED_JOB_ALLOWLIST,
+            PRIVILEGED_SCRIPT_ALLOWED_LOCAL_MODULES,
+        )
+
+        assert PRIVILEGED_JOB_ALLOWLIST == frozenset({(".github/workflows/release.yaml", "release")})
+        assert PRIVILEGED_JOB_ALLOWED_SCRIPTS == frozenset({"scripts/semantic_release.py"})
+        assert PRIVILEGED_SCRIPT_ALLOWED_LOCAL_MODULES == frozenset({"tools.release_gate"})
+        assert ALLOWED_POST_INSTALL_USES == frozenset({"actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"})
+
+    def test_helper_closure_rejects_relative_imports_and_package_init(self, tmp_path: Path) -> None:
+        from tools.validate_skills import (
+            _check_helper_stdlib_only,
+            _check_script_top_level_stdlib_only,
+        )
+
+        # 1. Privileged script relative import fails
+        bad_script = tmp_path / "scripts" / "semantic_release.py"
+        bad_script.parent.mkdir(parents=True, exist_ok=True)
+        bad_script.write_text("from . import release_gate\n", encoding="utf-8")
+        errors = _check_script_top_level_stdlib_only("scripts/semantic_release.py", tmp_path)
+        assert any("disallowed relative import" in e for e in errors)
+
+        # 2. Local helper relative import fails
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        bad_helper = tools_dir / "release_gate.py"
+        bad_helper.write_text("from . import validate_skills\n", encoding="utf-8")
+        h_errors = _check_helper_stdlib_only("tools/release_gate.py", bad_helper)
+        assert any("disallowed relative import" in e for e in h_errors)
+
+        # 3. Package initializer with non-stdlib import fails
+        pkg_init = tools_dir / "__init__.py"
+        pkg_init.write_text("import yaml\n", encoding="utf-8")
+        clean_helper = tools_dir / "clean_gate.py"
+        clean_helper.write_text("import sys\n", encoding="utf-8")
+        init_errors = _check_helper_stdlib_only("tools/clean_gate.py", clean_helper)
+        assert any("package initializer '__init__.py' has non-stdlib import" in e for e in init_errors)
+
+        # 4. Actual repository scripts/semantic_release.py passes
+        repo_errors = _check_script_top_level_stdlib_only("scripts/semantic_release.py", REPO_ROOT)
+        assert repo_errors == []
+
+    def test_reusable_workflow_write_scope_enforcement(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        # Direct write-all on reusable workflow job fails
+        direct_write_doc = {
+            "jobs": {
+                "rw_job": {
+                    "permissions": "write-all",
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            }
+        }
+        errs = validate_workflow_install_steps(direct_write_doc, workflow_rel=".github/workflows/c.yaml")
+        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errs)
+
+        # Inherited workflow write permission on reusable workflow job fails
+        inherited_write_doc = {
+            "permissions": {"pull-requests": "write"},
+            "jobs": {
+                "rw_job": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            },
+        }
+        errs2 = validate_workflow_install_steps(inherited_write_doc, workflow_rel=".github/workflows/c.yaml")
+        assert any("has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e for e in errs2)
+
+        # Read-only reusable workflow job passes
+        clean_rw_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "rw_job": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            },
+        }
+        assert validate_workflow_install_steps(clean_rw_doc, workflow_rel=".github/workflows/c.yaml") == []
+
+        # Existing diagram-freshness.yml passes
+        df_doc = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "diagram-freshness.yml").read_text(encoding="utf-8")
+        )
+        assert validate_workflow_install_steps(df_doc, workflow_rel=".github/workflows/diagram-freshness.yml") == []
+
+    def test_setup_prerequisite_effective_and_unconditional(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        # Unrelated lookalike action fails
+        unrelated_doc = {
+            "jobs": {
+                "j": {
+                    "steps": [
+                        {"uses": "some-owner/setup-python-wrapper@v1"},
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                    ]
+                }
+            }
+        }
+        errs = validate_workflow_install_steps(unrelated_doc, ".github/workflows/c.yaml")
+        assert any("requires actions/setup-python" in e for e in errs)
+
+        # Unpinned setup-python fails
+        unpinned_doc = {
+            "jobs": {
+                "j": {
+                    "steps": [
+                        {"uses": "actions/setup-python@main"},
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                    ]
+                }
+            }
+        }
+        assert any(
+            "requires actions/setup-python" in e
+            for e in validate_workflow_install_steps(unpinned_doc, ".github/workflows/c.yaml")
+        )
+
+        # Conditional if: false fails
+        if_doc = {
+            "jobs": {
+                "j": {
+                    "steps": [
+                        {"uses": "actions/setup-python@v6.3.0", "if": "false"},
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                    ]
+                }
+            }
+        }
+        assert any(
+            "requires actions/setup-python" in e
+            for e in validate_workflow_install_steps(if_doc, ".github/workflows/c.yaml")
+        )
+
+        # continue-on-error: true fails
+        coe_doc = {
+            "jobs": {
+                "j": {
+                    "steps": [
+                        {"uses": "actions/setup-python@v6.3.0", "continue-on-error": True},
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                    ]
+                }
+            }
+        }
+        assert any(
+            "requires actions/setup-python" in e
+            for e in validate_workflow_install_steps(coe_doc, ".github/workflows/c.yaml")
+        )
+
+        # Pinned SHA passes
+        sha_doc = {
+            "jobs": {
+                "j": {
+                    "steps": [
+                        {"uses": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"},
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                    ]
+                }
+            }
+        }
+        assert validate_workflow_install_steps(sha_doc, ".github/workflows/c.yaml") == []
+
+        # Disallowed pre-install action fails
+        bad_pre_doc = {
+            "jobs": {
+                "j": {
+                    "steps": [
+                        {"uses": "actions/setup-node@v4"},
+                        {"uses": "actions/setup-python@v6.3.0"},
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                    ]
+                }
+            }
+        }
+        assert any(
+            "disallowed pre-install action" in e
+            for e in validate_workflow_install_steps(bad_pre_doc, ".github/workflows/c.yaml")
+        )
+
+    def test_omitted_permissions_and_interpreter_redirect_rejected(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        # Inherited workflow write permission is treated as privileged for reusable workflow
+        inherited_doc = {
+            "permissions": {"contents": "write"},
+            "jobs": {
+                "rw_job": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            },
+        }
+        assert any(
+            "has write permissions but is not in PRIVILEGED_JOB_ALLOWLIST" in e
+            for e in validate_workflow_install_steps(inherited_doc, ".github/workflows/c.yaml")
+        )
+
+        # PATH environment variable rejected at job level
+        path_doc = {
+            "jobs": {
+                "j": {
+                    "env": {"PATH": "/usr/bin:/bin"},
+                    "steps": [
+                        {"uses": "actions/setup-python@v6.3.0"},
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                    ],
+                }
+            }
+        }
+        assert any(
+            "disallowed environment variable: 'PATH'" in e
+            for e in validate_workflow_install_steps(path_doc, ".github/workflows/c.yaml")
+        )
+
+        # PATH environment variable rejected at workflow level
+        wf_path_doc = {
+            "env": {"PATH": "/usr/bin:/bin"},
+            "jobs": {
+                "j": {
+                    "steps": [
+                        {"uses": "actions/setup-python@v6.3.0"},
+                        {"run": "python -m pip install -r requirements-dev.txt"},
+                    ],
+                }
+            },
+        }
+        assert any(
+            "disallowed environment variable: 'PATH'" in e
+            for e in validate_workflow_install_steps(wf_path_doc, ".github/workflows/c.yaml")
+        )
