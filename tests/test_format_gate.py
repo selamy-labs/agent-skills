@@ -3153,16 +3153,20 @@ class TestR36PrivilegedJobContract:
 
 
 class TestR36RuleCFixturesExemption:
-    """SOL-R35-02 = TS35-02 = ARGON-001: Exemption is exactly tests/fixtures/ prefix."""
+    """SOL-R35-02 = TS35-02 = ARGON-001: Rule C covers tracked fixtures; unmapped imports fail."""
 
-    def test_tests_fixtures_prefix_is_exempt_from_tracking(self, tmp_path: Path) -> None:
-        from tools.validate_skills import get_tracked_python_files
+    def test_tests_fixtures_prefix_is_scanned_and_fails(self, tmp_path: Path) -> None:
+        from tools.validate_skills import _validate_single_python_file, get_tracked_python_files
 
         fixtures_dir = tmp_path / "tests" / "fixtures" / "sub"
         fixtures_dir.mkdir(parents=True, exist_ok=True)
-        (fixtures_dir / "sample.py").write_text("import requests\n", encoding="utf-8")
+        sample = fixtures_dir / "sample.py"
+        sample.write_text("import requests\n", encoding="utf-8")
         files = get_tracked_python_files(tmp_path)
-        assert not any("sample.py" in str(f) for f in files)
+        assert sample in files, "tests/fixtures/sub/sample.py must be included in Rule C discovery"
+
+        errors = _validate_single_python_file(sample, tmp_path, {"pytest", "pytest-cov", "pyyaml", "ruff"})
+        assert any("disallowed top-level import 'requests'" in e for e in errors)
 
     def test_other_fixtures_directory_is_scanned_and_fails(self, tmp_path: Path) -> None:
         from tools.validate_skills import _validate_single_python_file, get_tracked_python_files
@@ -4112,3 +4116,121 @@ class TestR40Hygiene:
         assert _is_privileged_permissions({"contents": "read"}) is False
         assert _is_privileged_permissions({"contents": "write"}) is True
         assert _is_privileged_permissions({"unknown-scope": "read"}) is True
+
+
+class TestR41Hygiene:
+    """Table-stakes R41: competing helper package, tracked fixtures in Rule C, reusable workflow secrets rejection."""
+
+    def test_competing_helper_package_and_coexisting_modules(self, tmp_path: Path) -> None:
+        from tools.validate_skills import (
+            _check_competing_modules_and_packages,
+            _check_pinned_helper_resolution,
+            _check_privileged_job,
+        )
+
+        # 1. Clean repo root passes
+        assert _check_competing_modules_and_packages(REPO_ROOT) == []
+
+        # 2. tools/release_gate/__init__.py causes rejection
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        (tools_dir / "release_gate.py").write_text("# clean helper\n", encoding="utf-8")
+        pkg_dir = tools_dir / "release_gate"
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        (pkg_dir / "__init__.py").write_text("import yaml\n", encoding="utf-8")
+
+        errs = _check_pinned_helper_resolution(tmp_path)
+        assert any("competing package 'tools/release_gate'" in e for e in errs)
+
+        errs_comp = _check_competing_modules_and_packages(tmp_path)
+        assert any("competing package 'tools/release_gate'" in e for e in errs_comp)
+
+        # 3. Privileged job proof fails if competing package exists
+        release_steps = [
+            {"name": "Checkout", "uses": "actions/checkout@v7.0.0"},
+            {"name": "Release", "run": "python -m scripts.semantic_release"},
+        ]
+        priv_errs = _check_privileged_job(".github/workflows/release.yaml", "release", release_steps, tmp_path)
+        assert any("competing" in e for e in priv_errs)
+
+        # 4. release_gate at root or scripts fails
+        (pkg_dir / "__init__.py").unlink()
+        pkg_dir.rmdir()
+        root_rg = tmp_path / "release_gate.py"
+        root_rg.write_text("# root rg\n", encoding="utf-8")
+        assert any("competing release_gate" in e for e in _check_pinned_helper_resolution(tmp_path))
+        root_rg.unlink()
+
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        scripts_rg = scripts_dir / "release_gate.py"
+        scripts_rg.write_text("# scripts rg\n", encoding="utf-8")
+        assert any("competing release_gate" in e for e in _check_pinned_helper_resolution(tmp_path))
+        scripts_rg.unlink()
+
+    def test_rule_c_tracked_fixtures_included_and_fail_on_unmapped_import(self, tmp_path: Path) -> None:
+        from tools.validate_skills import (
+            _read_pinned_distributions,
+            _validate_single_python_file,
+            get_tracked_python_files,
+            validate_tracked_python_imports,
+        )
+
+        # 1. Tracked fixture is included in discovery
+        tracked_files = get_tracked_python_files(REPO_ROOT)
+        tracked_fixture = REPO_ROOT / "tests" / "fixtures" / "r28" / "scripts" / "test_pr_workflow_cancellation.py"
+        assert tracked_fixture in tracked_files
+
+        # 2. Existing repo tree passes Rule C
+        assert validate_tracked_python_imports(REPO_ROOT) == []
+
+        # 3. Fixture with unmapped import fails Rule C
+        fixtures_dir = tmp_path / "tests" / "fixtures" / "custom"
+        fixtures_dir.mkdir(parents=True, exist_ok=True)
+        bad_fixture = fixtures_dir / "bad.py"
+        bad_fixture.write_text("import requests\n", encoding="utf-8")
+        pinned = _read_pinned_distributions(REPO_ROOT / "requirements-dev.txt")
+        errors = _validate_single_python_file(bad_fixture, tmp_path, pinned)
+        assert any("disallowed top-level import 'requests'" in e for e in errors)
+
+    def test_reusable_workflow_rejects_secrets_key(self) -> None:
+        from tools.validate_skills import validate_workflow_install_steps
+
+        # 1. secrets: inherit rejected on allowlisted reusable call
+        secrets_inherit_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "diagram-freshness": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                    "secrets": "inherit",
+                }
+            },
+        }
+        errs = validate_workflow_install_steps(
+            secrets_inherit_doc, workflow_rel=".github/workflows/diagram-freshness.yml"
+        )
+        assert any("declares disallowed 'secrets' key: 'inherit'" in e for e in errs)
+
+        # 2. Mapping secrets rejected
+        secrets_map_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "diagram-freshness": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                    "secrets": {"GH_TOKEN": "${{ secrets.GH_TOKEN }}"},
+                }
+            },
+        }
+        errs2 = validate_workflow_install_steps(secrets_map_doc, workflow_rel=".github/workflows/diagram-freshness.yml")
+        assert any("declares disallowed 'secrets' key" in e for e in errs2)
+
+        # 3. Clean allowlisted call without secrets passes
+        clean_doc = {
+            "permissions": {"contents": "read"},
+            "jobs": {
+                "diagram-freshness": {
+                    "uses": "selamy-labs/.github/.github/workflows/diagram-freshness.yml@main",
+                }
+            },
+        }
+        assert validate_workflow_install_steps(clean_doc, workflow_rel=".github/workflows/diagram-freshness.yml") == []

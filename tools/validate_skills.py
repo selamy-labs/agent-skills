@@ -1583,6 +1583,10 @@ def _check_import_from_node(node: ast.ImportFrom, script_rel: str, repo_root: Pa
     helper_path = repo_root / helper_rel
     if not helper_path.is_file():
         return [f"privileged script {script_rel!r} references missing local helper: {helper_rel}"]
+    helper_pkg = repo_root / mod_full.replace(".", "/")
+    if helper_pkg.is_dir():
+        rel_pkg = helper_pkg.relative_to(repo_root)
+        return [f"privileged script {script_rel!r} helper '{helper_rel}' is shadowed by competing package '{rel_pkg}'"]
     return _check_helper_stdlib_only(helper_rel, helper_path)
 
 
@@ -1645,6 +1649,59 @@ def _check_stdlib_shadowing(repo_root: Path) -> list[str]:
     return errors
 
 
+def _is_path_tracked(target: Path, repo_root: Path) -> bool:
+    """Return True if target exists and is tracked in git (or repo_root is not a git checkout)."""
+    if not target.exists():
+        return False
+    if not (repo_root / ".git").is_dir():
+        return True
+    return is_tracked_by_git(target)
+
+
+def _check_pinned_helper_resolution(repo_root: Path) -> list[str]:
+    """Ensure pinned helper resolves exclusively to tools/release_gate.py."""
+    errors: list[str] = []
+    if _is_path_tracked(repo_root / "tools" / "release_gate", repo_root):
+        errors.append(
+            "competing package 'tools/release_gate' exists; "
+            "pinned helper must resolve only to tracked file 'tools/release_gate.py'"
+        )
+    for parent, loc_name in ((repo_root, "repository root"), (repo_root / "scripts", "scripts/")):
+        if _is_path_tracked(parent / "release_gate.py", repo_root) or _is_path_tracked(
+            parent / "release_gate", repo_root
+        ):
+            errors.append(
+                f"competing release_gate module or package at {loc_name}; "
+                "pinned helper must resolve only to tracked file 'tools/release_gate.py'"
+            )
+    return errors
+
+
+def _check_coexisting_module_and_package(loc: Path, repo_root: Path) -> list[str]:
+    """Reject any tracked module X.py that coexists with a tracked package directory X/ in the same directory."""
+    if not loc.is_dir():
+        return []
+    errors: list[str] = []
+    rel_loc = loc.relative_to(repo_root).as_posix() if loc != repo_root else "."
+    for item in sorted(loc.iterdir()):
+        if item.is_file() and item.name.endswith(".py"):
+            pkg_dir = loc / item.stem
+            if pkg_dir.is_dir() and _is_path_tracked(pkg_dir, repo_root) and _is_path_tracked(item, repo_root):
+                errors.append(
+                    f"competing tracked module '{item.name}' and package directory '{item.stem}/' "
+                    f"coexist in '{rel_loc}'"
+                )
+    return errors
+
+
+def _check_competing_modules_and_packages(repo_root: Path) -> list[str]:
+    """Ensure pinned helper uniqueness and reject coexisting X.py and X/ across root, scripts, tools."""
+    errors: list[str] = _check_pinned_helper_resolution(repo_root)
+    for loc in (repo_root, repo_root / "scripts", repo_root / "tools"):
+        errors.extend(_check_coexisting_module_and_package(loc, repo_root))
+    return errors
+
+
 def _check_script_top_level_stdlib_only(script_rel: str, repo_root: Path) -> list[str]:
     """Ensure all AST imports in script (at any scope) are in sys.stdlib_module_names or approved local modules."""
     script_path = repo_root / script_rel
@@ -1656,6 +1713,7 @@ def _check_script_top_level_stdlib_only(script_rel: str, repo_root: Path) -> lis
     except Exception as exc:
         return [f"{script_rel}: syntax or read error: {exc}"]
     errors: list[str] = _check_stdlib_shadowing(repo_root)
+    errors.extend(_check_competing_modules_and_packages(repo_root))
     for node in ast.walk(tree):
         errors.extend(_check_single_import_node(node, script_rel, repo_root))
     return errors
@@ -1704,6 +1762,7 @@ def _check_privileged_job(
     """Validate privileged job runs no installers and only allowed stdlib-only scripts."""
     root = repo_root or Path(__file__).resolve().parents[1]
     errors: list[str] = _check_stdlib_shadowing(root)
+    errors.extend(_check_competing_modules_and_packages(root))
     for step in steps:
         if isinstance(step, dict) and step.get("run"):
             cmd_str = str(step["run"]).strip()
@@ -1878,6 +1937,11 @@ def _check_reusable_workflow_job(
             f"job '{job_name}' in '{workflow_rel}' invokes unallowlisted reusable workflow '{uses_target}'; "
             f"is not in PRIVILEGED_REUSABLE_JOB_ALLOWLIST and is not in PRIVILEGED_JOB_ALLOWLIST"
         ]
+    if "secrets" in job or (workflow_doc and "secrets" in workflow_doc):
+        sec_val = job.get("secrets") if "secrets" in job else workflow_doc.get("secrets")
+        return [
+            f"reusable workflow job '{job_name}' in '{workflow_rel}' declares disallowed 'secrets' key: {sec_val!r}"
+        ]
     eff_perms = _effective_job_permissions(job, workflow_doc)
     if _is_privileged_permissions(eff_perms):
         return [
@@ -2022,7 +2086,7 @@ def _validate_single_python_file(
 
 
 def get_tracked_python_files(repo_root: Path) -> list[Path]:
-    """Collect tracked python files under repo_root excluding tests/fixtures/**."""
+    """Collect tracked python files under repo_root."""
     try:
         proc = subprocess.run(
             ["git", "ls-files", "*.py"],
@@ -2033,11 +2097,11 @@ def get_tracked_python_files(repo_root: Path) -> list[Path]:
         )
         if proc.returncode == 0 and proc.stdout.strip():
             raw_paths = proc.stdout.strip().splitlines()
-            return [repo_root / p for p in raw_paths if not p.startswith("tests/fixtures/")]
+            return [repo_root / p for p in raw_paths]
     except Exception:
         pass
 
-    return [p for p in repo_root.rglob("*.py") if not p.relative_to(repo_root).as_posix().startswith("tests/fixtures/")]
+    return [p for p in repo_root.rglob("*.py")]
 
 
 def validate_tracked_python_imports(repo_root: Path | None = None) -> list[str]:
