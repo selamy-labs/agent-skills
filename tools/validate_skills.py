@@ -1322,27 +1322,107 @@ WORKFLOW_PACKAGE_TO_MODULES: dict[str, set[str]] = {
     "mypy": {"mypy"},
 }
 
-ALLOWED_HEADS: frozenset[str] = frozenset({"pip", "pip3", "python", "python3", "go", "pytest", "git", "gh"})
-ALLOWED_M_MODULES: frozenset[str] = frozenset({"ruff", "unittest", "tests.test_coverage_threshold", "pip", "pytest"})
-PIP_ALLOWED_FLAGS: frozenset[str] = frozenset({"-q", "--quiet", "--no-cache-dir", "--require-hashes"})
-
-PYTHON_ZERO_ARG_FLAGS: frozenset[str] = frozenset(
-    {"-B", "-E", "-s", "-S", "-u", "-v", "-q", "-O", "-OO", "-d", "-i", "-I", "-P"}
+ACCEPTED_COMMAND_SEGMENTS: frozenset[str] = frozenset(
+    {
+        'gh release create "${{ steps.plan.outputs.next_tag }}" --notes-file release-notes.md',
+        'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
+        'git config user.name "github-actions[bot]"',
+        'git merge-base --is-ancestor "${{ github.event.workflow_run.head_sha || github.sha }}" origin/main',
+        'git push origin "${{ steps.plan.outputs.next_tag }}"',
+        'git tag -a "${{ steps.plan.outputs.next_tag }}" -F release-notes.md',
+        "go vet ./...",
+        "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1",
+        "pip install pyyaml==6.0.1",
+        "pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90",
+        "python -m ruff check .",
+        "python -m ruff format --check --diff .",
+        "python -m tests.test_coverage_threshold coverage.json",
+        "python -m unittest discover -s skills/portfolio-delivery-control/tests -v",
+        "python scripts/lint_skills.py",
+        "python scripts/privacy_scan.py",
+        "python scripts/public_api_stability.py",
+        "python scripts/security_scan.py",
+        "python scripts/semantic_release.py --notes-file release-notes.md",
+        "python scripts/test_pr_workflow_cancellation.py",
+        "python scripts/test_privacy_scan.py",
+        "python scripts/test_security_scan.py",
+        "python scripts/test_semantic_release.py",
+        'python scripts/validate_pr_title.py --title "$PR_TITLE" --body "$PR_BODY"',
+        "python tools/tf_module_layout.py --self-test",
+        "python tools/validate_marketplace.py",
+        "python tools/validate_skills.py",
+        "python3 -B scripts/lint_skills.py",
+        "python3 -B scripts/privacy_scan.py",
+        "python3 -B scripts/public_api_stability.py",
+        "python3 -B scripts/security_scan.py",
+        "python3 -B scripts/test_pr_workflow_cancellation.py",
+        "python3 -B scripts/test_privacy_scan.py",
+        "python3 -B scripts/test_security_scan.py",
+        "python3 -B scripts/test_semantic_release.py",
+        (
+            'python3 -B tools/release_gate.py --repo "${{ github.repository }}" '
+            '--sha "${{ github.event.workflow_run.head_sha || github.sha }}" '
+            '--expected-app-slug "github-actions" '
+            '--check-suite-id "${{ github.event.workflow_run.check_suite_id }}" '
+            "--wait-seconds 600 --poll-interval-seconds 10"
+        ),
+    }
 )
 
-PYTHON_ONE_ARG_FLAGS: frozenset[str] = frozenset({"-W", "-X", "-Q", "--check-hash-based-pycs"})
 
-PYTHON_ATTACHED_PREFIXES: tuple[str, ...] = ("-W", "-X", "-Q")
+def _extract_segments_from_step(step: Any) -> list[str]:
+    if not isinstance(step, dict) or not isinstance(step.get("run"), str):
+        return []
+    lines = []
+    for line in step["run"].splitlines():
+        trimmed = line.strip()
+        if trimmed and not trimmed.startswith("#"):
+            lines.append(" ".join(trimmed.split()))
+    return lines
 
+
+def _extract_segments_from_job(job: Any) -> list[str]:
+    if not isinstance(job, dict):
+        return []
+    segs: list[str] = []
+    for step in job.get("steps", []):
+        segs.extend(_extract_segments_from_step(step))
+    return segs
+
+
+def _extract_segments_from_workflow_file(wf_file: Path) -> list[str]:
+    content = yaml.safe_load(wf_file.read_text(encoding="utf-8"))
+    if not isinstance(content, dict):
+        return []
+    segs: list[str] = []
+    for job in content.get("jobs", {}).values():
+        segs.extend(_extract_segments_from_job(job))
+    return segs
+
+
+def extract_workflow_command_segments(repo_root: Path) -> set[str]:
+    wf_dir = repo_root / ".github" / "workflows"
+    segments: set[str] = set()
+    for wf_file in sorted(wf_dir.glob("*.y*ml")):
+        segments.update(_extract_segments_from_workflow_file(wf_file))
+    return segments
+
+
+ALLOWED_M_MODULES: frozenset[str] = frozenset({"ruff", "unittest", "tests.test_coverage_threshold", "pytest"})
+PIP_ALLOWED_FLAGS: frozenset[str] = frozenset({"-q", "--quiet", "--no-cache-dir", "--require-hashes"})
 FORBIDDEN_OPERATORS: frozenset[str] = frozenset({"|", "|&", "&", "(", ")", "<", ">", ">>", "||"})
+ALLOWED_PYTEST_FLAGS: frozenset[str] = frozenset({"--cov-branch", "-q", "-v", "-s"})
 
 
 def _parse_single_pip_token(tok: str, installed: set[str]) -> str | None:
     if tok.startswith("-"):
-        if tok not in PIP_ALLOWED_FLAGS:
-            return f"unanalysable pip install flag: {tok!r}"
-        return None
-    clean = re.split(r"[=<>!~]", tok)[0].strip().lower()
+        return f"unanalysable pip install flag: {tok!r}"
+    if ";" in tok or "@" in tok or "://" in tok:
+        return f"unanalysable pip install argument: {tok!r}"
+    if "==" not in tok:
+        return f"pip install requires exact pinned version (name==version), got: {tok!r}"
+    name, _, _ = tok.partition("==")
+    clean = name.strip().lower()
     if clean in WORKFLOW_PACKAGE_TO_MODULES:
         installed.update(WORKFLOW_PACKAGE_TO_MODULES[clean])
     elif clean:
@@ -1351,9 +1431,8 @@ def _parse_single_pip_token(tok: str, installed: set[str]) -> str | None:
 
 
 def _validate_and_extract_pip_install(tokens: list[str]) -> tuple[set[str], str | None]:
-    if len(tokens) < 2 or tokens[1] != "install":
-        sub = tokens[1] if len(tokens) > 1 else "<missing>"
-        return set(), f"unanalysable pip subcommand: {sub!r}"
+    if len(tokens) < 3 or tokens[0] not in ("pip", "pip3") or tokens[1] != "install":
+        return set(), f"unanalysable pip command: {tokens!r}"
     installed: set[str] = set()
     for tok in tokens[2:]:
         err = _parse_single_pip_token(tok, installed)
@@ -1378,13 +1457,23 @@ def _get_enclosing_package_inits(file_path: Path, repo_root: Path) -> list[Path]
 
 
 def _check_candidate_file(base: Path, rel: Path) -> Path | None:
-    py_file = base / f"{rel}.py"
-    if py_file.is_file():
-        return py_file
     init_file = base / rel / "__init__.py"
     if init_file.is_file():
         return init_file
+    py_file = base / f"{rel}.py"
+    if py_file.is_file():
+        return py_file
     return None
+
+
+def _resolve_leaf_in_base(base: Path, curr: Path, parts: list[str]) -> list[Path]:
+    init_file = curr / "__init__.py"
+    if init_file.is_file():
+        return [init_file]
+    py_file = base / f"{Path(*parts)}.py"
+    if py_file.is_file():
+        return [py_file]
+    return []
 
 
 def _resolve_chain_in_base(base: Path, parts: list[str]) -> list[Path]:
@@ -1392,26 +1481,28 @@ def _resolve_chain_in_base(base: Path, parts: list[str]) -> list[Path]:
     curr = base
     for i, part in enumerate(parts):
         curr = curr / part
+        if i == len(parts) - 1:
+            leaf = _resolve_leaf_in_base(base, curr, parts)
+            return chain + leaf if leaf else []
         init_file = curr / "__init__.py"
-        py_file = base / f"{Path(*parts[: i + 1])}.py"
-        if py_file.is_file():
-            chain.append(py_file)
-            return chain
         if init_file.is_file():
             chain.append(init_file)
         elif not curr.is_dir():
-            return chain if chain else []
+            return []
     return chain
 
 
 def _get_search_bases(file_path: Path, repo_root: Path) -> list[Path]:
     bases: list[Path] = []
-    if file_path != repo_root and file_path.parent != repo_root:
-        try:
-            file_path.parent.relative_to(repo_root)
-            bases.append(file_path.parent)
-        except ValueError:
-            pass
+    if file_path != repo_root:
+        curr = file_path.parent
+        while curr != repo_root:
+            try:
+                curr.relative_to(repo_root)
+                bases.append(curr)
+                curr = curr.parent
+            except ValueError:
+                break
     bases.append(repo_root)
     return bases
 
@@ -1423,6 +1514,31 @@ def _resolve_dotted_module_to_files(mod: str, file_path: Path, repo_root: Path) 
         if chain:
             return chain
     return []
+
+
+def _has_local_candidate(top: str, file_path: Path, repo_root: Path) -> bool:
+    for base in _get_search_bases(file_path, repo_root):
+        if (base / top / "__init__.py").is_file():
+            return True
+        if (base / f"{top}.py").is_file():
+            return True
+        if (base / top).is_dir():
+            return True
+    return False
+
+
+def _scan_resolved_local_files(
+    locals_: list[Path],
+    repo_root: Path,
+    visited: set[Path],
+) -> tuple[set[str], str | None]:
+    all_third_party: set[str] = set()
+    for local in locals_:
+        tp, err = _get_transitive_script_third_party_imports(local, repo_root, visited)
+        if err is not None:
+            return set(), err
+        all_third_party.update(tp)
+    return all_third_party, None
 
 
 def _extract_relative_import_targets(node: ast.ImportFrom, file_path: Path, repo_root: Path) -> list[Path]:
@@ -1459,7 +1575,10 @@ def _collect_import_from_targets(
     if node.level == 0 and node.module:
         named_targets.add(node.module)
         for alias in node.names:
-            named_targets.add(f"{node.module}.{alias.name}")
+            sub = f"{node.module}.{alias.name}"
+            sub_files = _resolve_dotted_module_to_files(sub, file_path, repo_root)
+            if sub_files:
+                file_targets.update(sub_files)
     elif node.level > 0:
         file_targets.update(_extract_relative_import_targets(node, file_path, repo_root))
 
@@ -1483,19 +1602,6 @@ def _get_script_ast_imports(file_path: Path, repo_root: Path) -> tuple[set[str],
         return set(), set(), str(exc)
     named, files = _parse_ast_imports(tree, file_path, repo_root)
     return named, files, None
-
-
-def _is_local_repo_dir(mod: str, file_path: Path, repo_root: Path) -> bool:
-    rel = Path(*mod.split("."))
-    if (repo_root / rel).is_dir():
-        return True
-    if file_path != repo_root and file_path.parent != repo_root:
-        try:
-            file_path.parent.relative_to(repo_root)
-            return (file_path.parent / rel).is_dir()
-        except ValueError:
-            pass
-    return False
 
 
 def _collect_named_imports(
@@ -1534,21 +1640,16 @@ def _classify_module_import(
     visited: set[Path],
 ) -> tuple[set[str], str | None]:
     top = mod.split(".")[0]
+    has_local = _has_local_candidate(top, file_path, repo_root)
     stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
-    if top in stdlib or top == "__future__":
+    if not has_local and (top in stdlib or top == "__future__"):
         return set(), None
 
     locals_ = _resolve_dotted_module_to_files(mod, file_path, repo_root)
     if locals_:
-        all_third_party: set[str] = set()
-        for local in locals_:
-            tp, err = _get_transitive_script_third_party_imports(local, repo_root, visited)
-            if err is not None:
-                return set(), err
-            all_third_party.update(tp)
-        return all_third_party, None
+        return _scan_resolved_local_files(locals_, repo_root, visited)
 
-    if _is_local_repo_dir(top, file_path, repo_root):
+    if has_local:
         if "." in mod:
             return set(), f"cannot resolve local import chain '{mod}'"
         return set(), None
@@ -1588,19 +1689,44 @@ def _is_allowed_c_expr(expr_val: ast.expr) -> bool:
         return True
     if isinstance(expr_val, ast.Call):
         if isinstance(expr_val.func, ast.Name) and expr_val.func.id == "print":
+            if expr_val.keywords:
+                return False
             return all(isinstance(a, ast.Constant) for a in expr_val.args)
     return False
+
+
+def _is_print_rebound(names: list[ast.alias]) -> bool:
+    for alias in names:
+        if alias.asname == "print" or alias.name == "print":
+            return True
+    return False
+
+
+def _check_python_c_import(stmt: ast.Import | ast.ImportFrom) -> str | None:
+    if isinstance(stmt, ast.ImportFrom) and stmt.level > 0:
+        return "relative imports in python -c are not allowed"
+    if _is_print_rebound(stmt.names):
+        return "rebinding of print builtin in python -c is forbidden"
+    return None
+
+
+def _check_python_c_stmt(stmt: ast.stmt) -> str | None:
+    if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+        return _check_python_c_import(stmt)
+    if isinstance(stmt, ast.Pass):
+        return None
+    if isinstance(stmt, ast.Expr) and _is_allowed_c_expr(stmt.value):
+        return None
+    return f"unanalysable statement or call in python -c code: {type(stmt).__name__}"
 
 
 def _check_python_c_ast_allowlist(tree: ast.AST) -> str | None:
     if not isinstance(tree, ast.Module):
         return f"unanalysable python -c AST: root is not Module ({type(tree).__name__})"
     for stmt in tree.body:
-        if isinstance(stmt, (ast.Import, ast.ImportFrom, ast.Pass)):
-            continue
-        if isinstance(stmt, ast.Expr) and _is_allowed_c_expr(stmt.value):
-            continue
-        return f"unanalysable statement or call in python -c code: {type(stmt).__name__}"
+        err = _check_python_c_stmt(stmt)
+        if err is not None:
+            return err
     return None
 
 
@@ -1713,46 +1839,128 @@ def _is_pytest_test_file(f: Path) -> bool:
     return name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py"
 
 
-def _collect_files_from_dir(d: Path) -> list[Path]:
-    return [f for f in sorted(d.rglob("*.py")) if _is_pytest_test_file(f)]
+def _collect_ancestor_conftests(target: Path, root: Path) -> list[Path]:
+    conftests: list[Path] = []
+    curr = target if target.is_dir() else target.parent
+    while True:
+        cand = curr / "conftest.py"
+        if cand.is_file() and cand not in conftests:
+            conftests.append(cand)
+        if curr == root:
+            break
+        try:
+            curr.relative_to(root)
+            curr = curr.parent
+        except ValueError:
+            break
+    if (root / "conftest.py").is_file() and root / "conftest.py" not in conftests:
+        conftests.append(root / "conftest.py")
+    return conftests
 
 
-def _resolve_pytest_target_paths(args: list[str], root: Path) -> list[Path]:
-    positional = [
-        a
-        for a in args
-        if not a.startswith("-") and not (a.startswith('"') and a.endswith('"') and a[1:-1].startswith("-"))
-    ]
-    if positional:
-        return [root / p if not Path(p).is_absolute() else Path(p) for p in positional]
-    default_paths = ["tests", "scripts", "skills/portfolio-delivery-control/tests"]
-    return [root / p for p in default_paths if (root / p).exists()]
+def _extract_plugins_from_assign(node: ast.Assign) -> list[str]:
+    is_target = any(isinstance(t, ast.Name) and t.id == "pytest_plugins" for t in node.targets)
+    if not is_target:
+        return []
+    if isinstance(node.value, ast.List):
+        return [elt.value for elt in node.value.elts if isinstance(elt, ast.Constant) and isinstance(elt.value, str)]
+    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+        return [node.value.value]
+    return []
 
 
-def _collect_pytest_target_files(args: list[str], root: Path) -> list[Path]:
-    target_paths = _resolve_pytest_target_paths(args, root)
+def _extract_pytest_plugins(f: Path) -> list[str]:
+    try:
+        tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+    except Exception:
+        return []
+    plugins: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            plugins.extend(_extract_plugins_from_assign(node))
+    return plugins
+
+
+def _validate_pytest_flags(args: list[str]) -> str | None:
+    for a in args:
+        if a.startswith("-"):
+            if a.startswith(("--cov=", "--cov-report=", "--cov-fail-under=")):
+                continue
+            if a in ALLOWED_PYTEST_FLAGS:
+                continue
+            return f"unanalysable pytest option: {a!r}"
+    return None
+
+
+def _resolve_pytest_target_paths(args: list[str], root: Path) -> tuple[list[Path], str | None]:
+    positional = [a for a in args if not a.startswith("-")]
+    if not positional:
+        default_p = root / "tests"
+        return ([default_p] if default_p.is_dir() else []), None
+    targets: list[Path] = []
+    for p in positional:
+        if "$" in p or "::" in p:
+            return [], f"unanalysable pytest target: {p!r}"
+        target = root / p if not Path(p).is_absolute() else Path(p)
+        if not target.exists():
+            return [], f"cannot resolve pytest target path: '{p}'"
+        targets.append(target)
+    return targets, None
+
+
+def _collect_dir_pytest_files(target: Path, files: list[Path]) -> None:
+    for f in sorted(target.rglob("*.py")):
+        if _is_pytest_test_file(f) and f not in files:
+            files.append(f)
+
+
+def _collect_files_for_single_target(target: Path, root: Path) -> list[Path]:
+    files = list(_collect_ancestor_conftests(target, root))
+    if target.is_file() and target.suffix == ".py" and target not in files:
+        files.append(target)
+    elif target.is_dir():
+        _collect_dir_pytest_files(target, files)
+    return files
+
+
+def _collect_pytest_target_files(target_paths: list[Path], root: Path) -> list[Path]:
     collected: list[Path] = []
     for target in target_paths:
-        if target.is_file() and target.suffix == ".py":
-            collected.append(target)
-        elif target.is_dir():
-            collected.extend(_collect_files_from_dir(target))
+        for f in _collect_files_for_single_target(target, root):
+            if f not in collected:
+                collected.append(f)
     return collected
 
 
-def _validate_pytest_execution(
-    args: list[str],
-    root: Path,
-    step_name: str,
+def _check_pytest_plugins_installed(
+    files: list[Path],
+    installed_modules: set[str],
     job_name: str,
+    step_name: str,
+    errors: list[str],
+) -> None:
+    for f in files:
+        for plugin in _extract_pytest_plugins(f):
+            if plugin not in installed_modules:
+                errors.append(f"job '{job_name}' step '{step_name}': pytest plugin '{plugin}' is not installed")
+
+
+def _check_pytest_prerequisites(args: list[str], installed_modules: set[str]) -> str | None:
+    if "pytest" not in installed_modules:
+        return "executes 'pytest' before it is installed"
+    if any(a.startswith("--cov") for a in args) and "pytest_cov" not in installed_modules:
+        return "pytest --cov requires 'pytest-cov' installed"
+    return None
+
+
+def _validate_pytest_test_files(
+    collected: list[Path],
+    root: Path,
+    job_name: str,
+    step_name: str,
     installed_modules: set[str],
     errors: list[str],
 ) -> None:
-    if "pytest" not in installed_modules:
-        errors.append(f"job '{job_name}' step '{step_name}': executes 'pytest' before it is installed")
-        return
-
-    collected = _collect_pytest_target_files(args, root)
     for test_file in collected:
         needed, err = _get_transitive_script_third_party_imports(test_file, root)
         if err is not None:
@@ -1769,6 +1977,77 @@ def _validate_pytest_execution(
                 )
 
 
+def _validate_pytest_execution(
+    args: list[str],
+    root: Path,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> None:
+    prereq_err = _check_pytest_prerequisites(args, installed_modules)
+    if prereq_err is not None:
+        errors.append(f"job '{job_name}' step '{step_name}': {prereq_err}")
+        return
+
+    flag_err = _validate_pytest_flags(args)
+    if flag_err is not None:
+        errors.append(f"job '{job_name}' step '{step_name}': {flag_err}")
+        return
+
+    target_paths, target_err = _resolve_pytest_target_paths(args, root)
+    if target_err is not None:
+        errors.append(f"job '{job_name}' step '{step_name}': {target_err}")
+        return
+
+    collected = _collect_pytest_target_files(target_paths, root)
+    _check_pytest_plugins_installed(collected, installed_modules, job_name, step_name, errors)
+    _validate_pytest_test_files(collected, root, job_name, step_name, installed_modules, errors)
+
+
+def _check_ruff_execution(
+    root: Path,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> None:
+    if "ruff" not in installed_modules:
+        errors.append(f"job '{job_name}' step '{step_name}': executes 'ruff' before it is installed")
+        return
+    for cand in (root / "ruff.py", root / "ruff" / "__init__.py"):
+        if cand.is_file():
+            _check_step_script_imports(str(cand), root, step_name, job_name, installed_modules, errors)
+
+
+def _get_discover_args(tokens: list[str]) -> list[str]:
+    if tokens and tokens[0] == "discover":
+        return tokens[1:]
+    return tokens
+
+
+def _dispatch_python_m_target(
+    tokens: list[str],
+    target_mod: str,
+    root: Path,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    errors: list[str],
+) -> None:
+    if target_mod == "ruff":
+        _check_ruff_execution(root, step_name, job_name, installed_modules, errors)
+    elif target_mod == "unittest":
+        _scan_unittest_discover_imports(
+            _get_discover_args(tokens), root, job_name, step_name, installed_modules, errors
+        )
+    elif target_mod == "tests.test_coverage_threshold":
+        script_file = root / "tests" / "test_coverage_threshold.py"
+        _check_step_script_imports(str(script_file), root, step_name, job_name, installed_modules, errors)
+    elif target_mod == "pytest":
+        _validate_pytest_execution(tokens, root, step_name, job_name, installed_modules, errors)
+
+
 def _process_python_m_flag(
     tokens: list[str],
     target_mod: str,
@@ -1781,32 +2060,7 @@ def _process_python_m_flag(
     if target_mod not in ALLOWED_M_MODULES:
         errors.append(f"job '{job_name}' step '{step_name}': unanalysable python -m target: {target_mod!r}")
         return
-
-    if target_mod == "ruff":
-        if "ruff" not in installed_modules:
-            errors.append(f"job '{job_name}' step '{step_name}': executes 'ruff' before it is installed")
-        return
-
-    if target_mod == "pytest":
-        _validate_pytest_execution(tokens, root, step_name, job_name, installed_modules, errors)
-        return
-
-    if target_mod == "pip":
-        installed, pip_err = _validate_and_extract_pip_install(["pip"] + tokens)
-        if pip_err is not None:
-            errors.append(f"job '{job_name}' step '{step_name}': {pip_err}")
-        else:
-            installed_modules.update(installed)
-        return
-
-    if target_mod == "unittest":
-        args = tokens[1:] if tokens and tokens[0] == "discover" else tokens
-        _scan_unittest_discover_imports(args, root, job_name, step_name, installed_modules, errors)
-        return
-
-    if target_mod == "tests.test_coverage_threshold":
-        script_file = root / "tests" / "test_coverage_threshold.py"
-        _check_step_script_imports(str(script_file), root, step_name, job_name, installed_modules, errors)
+    _dispatch_python_m_target(tokens, target_mod, root, step_name, job_name, installed_modules, errors)
 
 
 def _check_step_script_imports(
@@ -1860,13 +2114,13 @@ def _consume_python_interpreter_flag(
     idx: int,
 ) -> tuple[int, str | None]:
     tok = tokens[idx]
-    if tok in PYTHON_ZERO_ARG_FLAGS:
+    if tok == "-B":
         return idx + 1, None
-    if tok in PYTHON_ONE_ARG_FLAGS:
+    if tok in ("-W", "-X", "-Q"):
         if idx + 1 >= len(tokens):
             return idx, f"python flag {tok} requires an operand"
         return idx + 2, None
-    if tok.startswith(PYTHON_ATTACHED_PREFIXES) and len(tok) > 2:
+    if tok.startswith(("-W", "-X", "-Q")) and len(tok) > 2:
         return idx + 1, None
     if tok.startswith("-"):
         return idx, f"unrecognised python flag {tok!r}"
@@ -1940,21 +2194,37 @@ def _validate_go_command(tokens: list[str]) -> str | None:
     return None
 
 
+def _consume_gh_release_create_arg(
+    tokens: list[str],
+    idx: int,
+    state: list[bool],
+) -> tuple[int, str | None]:
+    tok = tokens[idx]
+    if tok in ("--notes-file", "-F"):
+        if idx + 1 >= len(tokens):
+            return idx, f"gh release create {tok} missing argument"
+        state[1] = True
+        return idx + 2, None
+    if tok.startswith("-"):
+        return idx, f"unanalysable gh release create flag: {tok!r}"
+    if state[0]:
+        return idx, f"unanalysable gh release create extra positional argument: {tok!r}"
+    state[0] = True
+    return idx + 1, None
+
+
 def _validate_gh_command(tokens: list[str]) -> str | None:
     if len(tokens) < 3 or tokens[1] != "release" or tokens[2] != "create":
         sub = " ".join(tokens[1:3]) if len(tokens) > 1 else "<missing>"
         return f"unanalysable gh subcommand: {sub!r}"
     idx = 3
+    state = [False, False]
     while idx < len(tokens):
-        tok = tokens[idx]
-        if tok in ("--notes-file", "-F"):
-            if idx + 1 >= len(tokens):
-                return f"gh release create {tok} missing argument"
-            idx += 2
-        elif tok.startswith("-"):
-            return f"unanalysable gh release create flag: {tok!r}"
-        else:
-            idx += 1
+        idx, err = _consume_gh_release_create_arg(tokens, idx, state)
+        if err is not None:
+            return err
+    if not state[0] or not state[1]:
+        return "unanalysable gh release create arguments"
     return None
 
 
@@ -1967,7 +2237,7 @@ def _validate_git_merge_base(args: list[str]) -> str | None:
 
 
 def _validate_git_config(args: list[str]) -> str | None:
-    if len(args) < 2 or args[0] not in ("user.name", "user.email"):
+    if len(args) != 2 or args[0] not in ("user.name", "user.email"):
         key = args[0] if args else "<missing>"
         return f"unanalysable git config key: {key!r}"
     return None
@@ -2002,11 +2272,13 @@ def _validate_git_tag(args: list[str]) -> str | None:
 
 
 def _validate_git_push(args: list[str]) -> str | None:
-    if not args or args[0] != "origin":
-        return f"unanalysable git push arguments: {args!r}"
-    for tok in args[1:]:
+    if not args:
+        return "unanalysable git push arguments: []"
+    for tok in args:
         if tok.startswith("-"):
             return f"unanalysable git push option: {tok!r}"
+    if len(args) != 2 or args[0] != "origin":
+        return f"unanalysable git push arguments: {args!r}"
     return None
 
 
@@ -2044,16 +2316,6 @@ def _split_chained_tokens(tokens: list[str]) -> list[list[str]]:
     return commands
 
 
-def _join_line_continuations(raw_text: str) -> list[str]:
-    joined = re.sub(r"\\\s*\n\s*", " ", raw_text)
-    lines: list[str] = []
-    for raw_line in joined.splitlines():
-        line = raw_line.strip()
-        if line and not line.startswith("#"):
-            lines.append(line)
-    return lines
-
-
 def _process_pip_step_tokens(
     tokens: list[str],
     step_name: str,
@@ -2086,6 +2348,16 @@ def _handle_other_head(
     if err is not None:
         errors.append(f"job '{job_name}' step '{step_name}': {err}")
     return True
+
+
+def _check_sub_command_hashes(tokens: list[str], step_name: str, job_name: str, errors: list[str]) -> bool:
+    for tok in tokens:
+        if "#" in tok:
+            errors.append(
+                f"job '{job_name}' step '{step_name}': unanalysable shell construct: '#' in line {' '.join(tokens)!r}"
+            )
+            return True
+    return False
 
 
 def _dispatch_command_head(
@@ -2128,11 +2400,20 @@ def _process_sub_command_tokens(
         )
         return
 
+    if first not in ("pip", "pip3", "python", "python3", "pytest", "git", "go", "gh"):
+        errors.append(f"job '{job_name}' step '{step_name}': unanalysable command: {first!r}")
+        return
+
+    if _check_sub_command_hashes(tokens, step_name, job_name, errors):
+        return
+
     if not _dispatch_command_head(first, tokens, step_name, job_name, installed_modules, root, errors):
         errors.append(f"job '{job_name}' step '{step_name}': unanalysable command: {first!r}")
 
 
 def _check_line_shell_constructs(line: str) -> tuple[list[str] | None, str | None]:
+    if "\\" in line:
+        return None, f"unanalysable shell construct: continuation in line {line!r}"
     if "$(" in line or "`" in line:
         return None, f"unanalysable shell construct: command substitution in {line!r}"
     if "<<" in line:
@@ -2143,18 +2424,47 @@ def _check_line_shell_constructs(line: str) -> tuple[list[str] | None, str | Non
         raw_tokens = list(lexer)
     except ValueError as exc:
         return None, f"unanalysable syntax in line {line!r}: {exc}"
-
-    tokens: list[str] = []
     for tok in raw_tokens:
-        if tok.startswith("#"):
-            break
-        if "#" in tok:
-            return None, f"unanalysable shell construct: '#' inside token {tok!r} in {line!r}"
         if tok in FORBIDDEN_OPERATORS:
             return None, f"unanalysable shell construct: operator {tok!r} in {line!r}"
-        tokens.append(tok)
+    return raw_tokens, None
 
-    return tokens, None
+
+def _process_single_run_line_segment(
+    line: str,
+    step_name: str,
+    job_name: str,
+    installed_modules: set[str],
+    root: Path,
+    errors: list[str],
+) -> None:
+    norm_line = " ".join(line.split())
+    if norm_line in ACCEPTED_COMMAND_SEGMENTS:
+        try:
+            tokens = shlex.split(norm_line, posix=True)
+        except ValueError:
+            tokens = norm_line.split()
+        _process_sub_command_tokens(tokens, step_name, job_name, installed_modules, root, errors)
+        return
+
+    tokens, shell_err = _check_line_shell_constructs(line)
+    if shell_err is not None:
+        errors.append(f"job '{job_name}' step '{step_name}': {shell_err}")
+        return
+    if not tokens:
+        return
+    for sub_cmd in _split_chained_tokens(tokens):
+        _process_sub_command_tokens(sub_cmd, step_name, job_name, installed_modules, root, errors)
+
+
+def _join_line_continuations(raw_text: str) -> list[str]:
+    joined = re.sub(r"\\\n\s*", " ", raw_text)
+    lines: list[str] = []
+    for raw_line in joined.splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#"):
+            lines.append(line)
+    return lines
 
 
 def _process_workflow_step_run(
@@ -2167,14 +2477,7 @@ def _process_workflow_step_run(
 ) -> None:
     lines = _join_line_continuations(run_cmd)
     for line in lines:
-        tokens, shell_err = _check_line_shell_constructs(line)
-        if shell_err is not None:
-            errors.append(f"job '{job_name}' step '{step_name}': {shell_err}")
-            continue
-        if not tokens:
-            continue
-        for sub_cmd in _split_chained_tokens(tokens):
-            _process_sub_command_tokens(sub_cmd, step_name, job_name, installed_modules, root, errors)
+        _process_single_run_line_segment(line, step_name, job_name, installed_modules, root, errors)
 
 
 def _validate_job_step_imports(

@@ -10,6 +10,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
+collect_ignore = ["fixtures"]
+
 # Ensure all subprocesses inherit branch coverage and configuration
 os.environ["COV_CORE_BRANCH"] = "enabled"
 os.environ["COVERAGE_RCFILE"] = str(REPO_ROOT / "pyproject.toml")

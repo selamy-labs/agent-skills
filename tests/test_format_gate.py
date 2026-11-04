@@ -2974,33 +2974,16 @@ EXPECTED_CURRENT_WORKFLOW_FORMS = [
 
 
 def test_current_workflow_forms_pinned_and_accepted() -> None:
-    from tools.validate_skills import validate_workflow_step_imports
-
-    wf_dir = REPO_ROOT / ".github" / "workflows"
-    run_lines = []
-    for wf_file in sorted(wf_dir.glob("*.y*ml")):
-        content = yaml.safe_load(wf_file.read_text(encoding="utf-8"))
-        if not isinstance(content, dict):
-            continue
-        jobs = content.get("jobs", {})
-        if not isinstance(jobs, dict):
-            continue
-        for job_data in jobs.values():
-            if not isinstance(job_data, dict):
-                continue
-            for step in job_data.get("steps", []):
-                if isinstance(step, dict) and isinstance(step.get("run"), str):
-                    for line in step["run"].splitlines():
-                        trimmed = line.strip()
-                        if trimmed and not trimmed.startswith("#"):
-                            run_lines.append(trimmed)
-
-    unique_forms = sorted(set(run_lines))
-    assert unique_forms == sorted(EXPECTED_CURRENT_WORKFLOW_FORMS), (
-        f"Workflow forms drift: added={set(unique_forms) - set(EXPECTED_CURRENT_WORKFLOW_FORMS)}, "
-        f"removed={set(EXPECTED_CURRENT_WORKFLOW_FORMS) - set(unique_forms)}"
+    from tools.validate_skills import (
+        ACCEPTED_COMMAND_SEGMENTS,
+        extract_workflow_command_segments,
+        validate_workflow_step_imports,
     )
 
+    extracted = extract_workflow_command_segments(REPO_ROOT)
+    assert extracted == set(ACCEPTED_COMMAND_SEGMENTS)
+
+    wf_dir = REPO_ROOT / ".github" / "workflows"
     q_yaml = yaml.safe_load((wf_dir / "quality.yaml").read_text(encoding="utf-8"))
     r_yaml = yaml.safe_load((wf_dir / "release.yaml").read_text(encoding="utf-8"))
     assert validate_workflow_step_imports(q_yaml, REPO_ROOT) == []
@@ -3010,17 +2993,9 @@ def test_current_workflow_forms_pinned_and_accepted() -> None:
 def test_real_r28_workflows_give_exactly_one_pytest_finding(tmp_path: Path) -> None:
     from tools.validate_skills import validate_workflow_step_imports
 
-    r28_q_text = subprocess.check_output(
-        ["git", "-C", str(REPO_ROOT), "show", "05f02f98:.github/workflows/quality.yaml"],
-        text=True,
-    )
-    r28_q = yaml.safe_load(r28_q_text)
-
-    r28_r_text = subprocess.check_output(
-        ["git", "-C", str(REPO_ROOT), "show", "05f02f98:.github/workflows/release.yaml"],
-        text=True,
-    )
-    r28_r = yaml.safe_load(r28_r_text)
+    fixtures_dir = REPO_ROOT / "tests" / "fixtures" / "r28"
+    r28_q = yaml.safe_load((fixtures_dir / "quality.yaml").read_text(encoding="utf-8"))
+    r28_r = yaml.safe_load((fixtures_dir / "release.yaml").read_text(encoding="utf-8"))
 
     # Replicate R28 file tree where scripts/test_pr_workflow_cancellation.py transitively imports pytest
     r28_dir = tmp_path / "r28_root"
@@ -3029,10 +3004,9 @@ def test_real_r28_workflows_give_exactly_one_pytest_finding(tmp_path: Path) -> N
     shutil.copytree(REPO_ROOT / "scripts", r28_dir / "scripts")
     shutil.copytree(REPO_ROOT / "skills", r28_dir / "skills")
     shutil.copytree(REPO_ROOT / "tests", r28_dir / "tests")
-    # In R28, test_pr_workflow_cancellation.py imported test_format_gate which imported pytest
-    (r28_dir / "scripts" / "test_pr_workflow_cancellation.py").write_text(
-        "import pytest\n",
-        encoding="utf-8",
+    shutil.copyfile(
+        fixtures_dir / "scripts" / "test_pr_workflow_cancellation.py",
+        r28_dir / "scripts" / "test_pr_workflow_cancellation.py",
     )
 
     errs_q = validate_workflow_step_imports(r28_q, r28_dir)
@@ -3079,6 +3053,19 @@ REVIEWER_FAIL_CLOSED_CASES = [
     ("PYTHONPATH=tools python scripts/lint_skills.py", "environment prefix"),
     ("env PYTHONPATH=tools python -c pass", "environment prefix or command 'env'"),
     ("export PYTHONPATH=tools", "environment prefix or command 'export'"),
+    # SOL-R32-02 / ARGON-002: keyword args in print, rebinding print, relative imports in -c
+    ("python -c 'print(1, file=__import__(\"pytest\"))'", "unanalysable statement or call in python -c"),
+    ("python -c 'print(1, end=exec(\"import pytest\"))'", "unanalysable statement or call in python -c"),
+    ("python -c 'import math as print'", "rebinding of print builtin in python -c is forbidden"),
+    ("python -c 'from math import sqrt as print'", "rebinding of print builtin in python -c is forbidden"),
+    ("python -c 'from . import helper'", "relative imports in python -c are not allowed"),
+    # SOL-R32-03: '#' in command line
+    ("git config user.name 'bot' # comment", "unanalysable shell construct: '#' in line"),
+    # SOL-R32-04 / TS32-04: unanalysable extra options and continuation lines
+    ("python -S scripts/lint_skills.py", "unrecognised python flag '-S'"),
+    ("pip install pytest==8.3.4; python_version<'3'", "unanalysable shell construct"),
+    ("git push origin HEAD:refs/heads/feature", "unanalysable git push"),
+    ("gh release create v1 file1 file2", "unanalysable gh release create"),
 ]
 
 
@@ -3239,3 +3226,135 @@ def test_workflow_step_validator_branch_coverage(tmp_path: Path) -> None:
     errs: list[str] = []
     _validate_job_step_imports("j", {"steps": "not-list"}, tmp_path, errs)
     _validate_job_step_imports("j", {"steps": [None, 123, {"name": "no-run"}]}, tmp_path, errs)
+
+
+def test_package_over_module_precedence(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    pkg_dir = scripts_dir / "helper"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("import pytest\n", encoding="utf-8")
+    (scripts_dir / "helper.py").write_text("x = 1\n", encoding="utf-8")
+    (scripts_dir / "entry.py").write_text("import helper\n", encoding="utf-8")
+
+    wf = {
+        "jobs": {
+            "quality": {
+                "steps": [
+                    {"run": "pip install pyyaml==6.0.1"},
+                    {"run": "python scripts/entry.py"},
+                ]
+            }
+        }
+    }
+    errs = validate_workflow_step_imports(wf, tmp_path)
+    assert any("imports 'pytest'" in e for e in errs)
+
+
+def test_stdlib_shadow_resolution(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "json.py").write_text("import pytest\n", encoding="utf-8")
+    (scripts_dir / "entry.py").write_text("import json\n", encoding="utf-8")
+
+    wf = {
+        "jobs": {
+            "quality": {
+                "steps": [
+                    {"run": "pip install pyyaml==6.0.1"},
+                    {"run": "python scripts/entry.py"},
+                ]
+            }
+        }
+    }
+    errs = validate_workflow_step_imports(wf, tmp_path)
+    assert any("imports 'pytest'" in e for e in errs)
+
+
+def test_pytest_cov_and_ancestor_conftest(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    # Missing pytest-cov when --cov flag is present
+    wf_cov = {
+        "jobs": {
+            "tests": {
+                "steps": [
+                    {"run": "pip install pytest==8.3.4"},
+                    {
+                        "run": (
+                            "pytest --cov=tools --cov-branch --cov-report=term-missing "
+                            "--cov-report=json:coverage.json --cov-fail-under=90"
+                        )
+                    },
+                ]
+            }
+        }
+    }
+    errs_cov = validate_workflow_step_imports(wf_cov, tmp_path)
+    assert any("pytest-cov" in e for e in errs_cov)
+
+    # Ancestor conftest with uninstalled module
+    tests_dir = tmp_path / "tests" / "sub"
+    tests_dir.mkdir(parents=True)
+    (tmp_path / "conftest.py").write_text("import uninstalled_module_abc\n", encoding="utf-8")
+    (tests_dir / "test_example.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+    wf_conf = {
+        "jobs": {
+            "tests": {
+                "steps": [
+                    {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
+                    {"run": "pytest tests/sub/test_example.py"},
+                ]
+            }
+        }
+    }
+    errs_conf = validate_workflow_step_imports(wf_conf, tmp_path)
+    assert any("uninstalled_module_abc" in e for e in errs_conf)
+
+
+def test_pytest_plugins_installed(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_plug.py").write_text('pytest_plugins = ["custom_plugin_xyz"]\n', encoding="utf-8")
+    wf = {
+        "jobs": {
+            "tests": {
+                "steps": [
+                    {"run": "pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1"},
+                    {"run": "pytest tests/test_plug.py"},
+                ]
+            }
+        }
+    }
+    errs = validate_workflow_step_imports(wf, tmp_path)
+    assert any("custom_plugin_xyz" in e for e in errs)
+
+
+def test_incomplete_import_chain_fails_closed(tmp_path: Path) -> None:
+    from tools.validate_skills import validate_workflow_step_imports
+
+    ns_dir = tmp_path / "ns" / "pkg"
+    ns_dir.mkdir(parents=True)
+    (ns_dir / "__init__.py").write_text("# init\n", encoding="utf-8")
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "entry.py").write_text("import ns.pkg.missing\n", encoding="utf-8")
+
+    wf = {
+        "jobs": {
+            "quality": {
+                "steps": [
+                    {"run": "pip install pyyaml==6.0.1"},
+                    {"run": "python scripts/entry.py"},
+                ]
+            }
+        }
+    }
+    errs = validate_workflow_step_imports(wf, tmp_path)
+    assert any("cannot resolve local import chain" in e and "ns.pkg.missing" in e for e in errs)
