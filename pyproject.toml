@@ -4,10 +4,11 @@ version = "0.0.0"
 requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "--strict-markers -q"
+testpaths = ["tests", "scripts", "skills/portfolio-delivery-control/tests"]
+addopts = "--strict-markers -q --cov-branch"
 
 [tool.coverage.run]
+branch = true
 source = ["tools"]
 
 [tool.coverage.report]
@@ -22,3 +23,10 @@ select = ["E", "F", "W", "I", "UP", "C90"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
+
+[tool.complexipy]
+max-complexity-allowed = 10
+
+[tool.mypy]
+explicit_package_bases = true
+mypy_path = ["."]

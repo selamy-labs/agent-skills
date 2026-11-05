@@ -7,12 +7,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.naming import validate_all_skills
+from tools.validate_skills import check_no_tracked_coverage_json
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
     errors, count = validate_all_skills(ROOT)
+    errors.extend(check_no_tracked_coverage_json(ROOT))
     if errors:
         for error in errors:
             print(error, file=sys.stderr)

@@ -1,0 +1,93 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality:
+    name: Skill Quality And Privacy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install pyyaml==6.0.1
+      - name: Validate skill frontmatter and naming
+        run: python scripts/lint_skills.py
+      - name: Block public information leaks
+        run: python scripts/privacy_scan.py
+      - name: Test privacy scanner
+        run: python scripts/test_privacy_scan.py
+      - name: Block malicious-instruction / injection patterns
+        run: python scripts/security_scan.py
+      - name: Test security scanner
+        run: python scripts/test_security_scan.py
+      - name: Check public API stability
+        run: python scripts/public_api_stability.py
+      - name: Test PR workflow cancellation
+        run: python scripts/test_pr_workflow_cancellation.py
+      - name: Test semantic release planner
+        run: python scripts/test_semantic_release.py
+      - name: Validate PR title for squash release
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python scripts/validate_pr_title.py --title "$PR_TITLE" --body "$PR_BODY"
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: "1.26.10"
+      - name: Install dependencies
+        # ruff is pinned (issue #101): `ruff format` output is version-dependent, so an
+        # unpinned formatter would let a future release turn main red with no
+        # code change — defeating the "formatter output is the source of truth"
+        # goal of the format gate (#101).
+        run: pip install pytest==8.3.4 pytest-cov==6.0.0 ruff==0.15.21 pyyaml==6.0.1
+      - name: Verify Go helper
+        working-directory: tools/hclblocks
+        env:
+          GOTOOLCHAIN: local
+          GOWORK: "off"
+          GOFLAGS: -mod=readonly
+        run: go vet ./...
+      - name: Lint with ruff
+        run: python -m ruff check .
+        # Covers all executable Python across the repository
+      - name: Check formatting with ruff
+        run: python -m ruff format --check --diff .
+      - name: Validate skills
+        run: python tools/validate_skills.py
+      - name: Validate marketplace
+        run: python tools/validate_marketplace.py
+      - name: Self-test terraform module layout
+        run: python tools/tf_module_layout.py --self-test
+      - name: Test portfolio delivery control
+        run: python -m unittest discover -s skills/portfolio-delivery-control/tests -v
+      - name: Run tests with coverage
+        env:
+          COVERAGE_SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
+      - name: Verify coverage threshold
+        env:
+          COVERAGE_SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -m tests.test_coverage_threshold coverage.json

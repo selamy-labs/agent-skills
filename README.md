@@ -108,12 +108,28 @@ their own license terms; they should not be republished in this repository.
 
 ## Public Code Coverage
 
-This public repository requires at least 90 percent coverage for repo-owned
-tooling code. The percentage applies to `tools/` and the tests around the
-validators, scanners, and release helpers. Skill content correctness is enforced
-separately by the SKILL conformance, privacy, security, and public API stability
-checks, so markdown-heavy content is not used to inflate the code coverage
-number.
+This public repository requires at least 90 percent statement and branch coverage
+for repo-owned tooling code (`[tool.coverage.run] branch = true`). The coverage
+gate (`--cov-fail-under=90`) applies to `tools/`, including the naming validators,
+privacy and security scanners, Terraform module layout validator, and release gate
+helpers. Repository-wide linting and formatting gates (`ruff check` and
+`ruff format --check`) enforce quality across `tools/`, `tests/`, `scripts/`, and
+`skills/`. Skill content correctness is enforced separately by `scripts/lint_skills.py`,
+`scripts/privacy_scan.py`, and `scripts/security_scan.py`, ensuring markdown-heavy
+documentation is not used to inflate the test coverage metric.
+
+To execute the coverage gate locally, export a synchronized session identifier across
+both commands, or invoke the automated wrapper script:
+
+```bash
+# Automated wrapper (generates a shared session ID and runs both commands):
+python scripts/run_coverage_gate.py
+
+# Or manually via two steps sharing one session ID:
+export COVERAGE_SESSION_ID="local-run-$(date +%s)"
+pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
+python -m tests.test_coverage_threshold coverage.json
+```
 
 ## Versioning
 
@@ -169,6 +185,10 @@ CI enforces this with:
 - `scripts/privacy_scan.py`: blocks known private names and secret/path
   patterns.
 - `scripts/test_privacy_scan.py`: proves representative private-boundary leaks
+  fail the scanner.
+- `scripts/security_scan.py`: blocks malicious-instruction and prompt-injection
+  patterns.
+- `scripts/test_security_scan.py`: proves injection and safety patterns
   fail the scanner.
 - `scripts/public_api_stability.py`: blocks removals or renames unless the
   release is explicitly marked breaking.

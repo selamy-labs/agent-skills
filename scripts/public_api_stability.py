@@ -8,7 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 HEADER_RE = re.compile(r"^[a-z]+(?:\([^)]+\))?!:")
 
@@ -18,8 +17,7 @@ def run_git(args: list[str], *, check: bool = True) -> str:
         ["git", *args],
         check=False,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if check and result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
@@ -30,7 +28,8 @@ def parse_version(tag: str) -> tuple[int, int, int] | None:
     match = VERSION_RE.match(tag)
     if not match:
         return None
-    return tuple(int(part) for part in match.groups())
+    major, minor, patch = (int(part) for part in match.groups())
+    return (major, minor, patch)
 
 
 def latest_semver_tag() -> str | None:

@@ -182,3 +182,53 @@ class TestScanAll:
         (tmp_path / "leak.md").write_text("matchpoint integration guide")
         findings = scan_all(tmp_path)
         assert findings
+
+    def test_repository_root_clean(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        assert scan_all(root) == []
+
+
+class TestDenylistParserAndLoader:
+    def test_denylist_parser_edge_branches(self) -> None:
+        import re
+
+        from tools.privacy.loader import _DenylistParser, _flush, _unquote
+
+        parser = _DenylistParser()
+        m_dict = re.match(r"^\s+-\s+(\w+):\s*(.+)$", "  - k: v")
+        assert m_dict is not None
+        parser.handle_dict_item(m_dict)
+
+        m_cont = re.match(r"^\s{4,}(\w+):\s*(.+)$", "    k: v")
+        assert m_cont is not None
+        parser.handle_cont(m_cont)
+
+        m_list = re.match(r"^\s+-\s+(.+)$", "  - scalar")
+        assert m_list is not None
+        parser.handle_list_item(m_list)
+
+        mixed = "items:\n  - a: 1\n  - scalar\n"
+        res = parser.parse(mixed)
+        assert res["items"] == [{"a": "1"}, "scalar"]
+
+        parser.process_line("   unrecognized token that matches no pattern")
+
+        r1: dict = {}
+        _flush(r1, None, None, {}, False)
+        assert r1 == {}
+
+        _flush(r1, "k", None, {}, False)
+        assert r1 == {}
+
+        _flush(r1, "k1", [], {}, True)
+        assert r1 == {"k1": []}
+
+        _flush(r1, "k2", [], {"val": "1"}, True)
+        assert r1["k2"] == [{"val": "1"}]
+
+        _flush(r1, "k3", ["item"], {}, False)
+        assert r1["k3"] == ["item"]
+
+        assert _unquote("'abc'") == "abc"
+        assert _unquote('"abc"') == "abc"
+        assert _unquote("abc") == "abc"

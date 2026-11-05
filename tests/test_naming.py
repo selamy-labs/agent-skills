@@ -165,3 +165,41 @@ class TestValidateAllSkills:
         errors, count = validate_all_skills(tmp_path)
         assert count == 0
         assert any("no skills found" in e for e in errors)
+
+    def test_naming_edge_branches(self, tmp_path: Path) -> None:
+        from tools.naming import (
+            _add_frontmatter_entry,
+            _add_metadata_entry,
+            _split_frontmatter_entry,
+        )
+
+        with pytest.raises(ValueError, match="invalid frontmatter key"):
+            _split_frontmatter_entry("invalid key: val", Path("test"), "frontmatter")
+
+        data: dict[str, object] = {}
+        with pytest.raises(ValueError, match="empty metadata value"):
+            _add_metadata_entry(data, "key:   ", Path("test"))
+
+        data_scalar: dict[str, object] = {"metadata": "not-dict"}
+        with pytest.raises(ValueError, match="metadata must be a mapping"):
+            _add_metadata_entry(data_scalar, "key: val", Path("test"))
+
+        with pytest.raises(ValueError, match="metadata must be a mapping"):
+            _add_frontmatter_entry({}, "metadata: scalar-val", Path("test"))
+
+        with pytest.raises(ValueError, match="malformed frontmatter indentation"):
+            parse_frontmatter("---\n name: bad\ndescription: d\n---\nBody.", Path("test"))
+
+        errs = validate_skill(
+            "---\nname: Bad_Name\ndescription: d\n---\nBody.",
+            Path("skills/Bad_Name/SKILL.md"),
+            set(),
+        )
+        assert any("lowercase descriptive kebab-case" in e for e in errs)
+
+        skill_dir = tmp_path / "skills" / "corrupt-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("not valid frontmatter", encoding="utf-8")
+        all_errs, count = validate_all_skills(tmp_path)
+        assert count == 1
+        assert any("missing YAML frontmatter" in e for e in all_errs)

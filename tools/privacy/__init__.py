@@ -16,7 +16,7 @@ _DENYLIST_PATH = Path(__file__).with_name("denylist.yml")
 _denylist = load_denylist(_DENYLIST_PATH)
 
 TEXT_SUFFIXES = {".md", ".py", ".yml", ".yaml", ".txt", ".toml", ".json"}
-SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "tests"}
+SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "tests", ".venv", "venv"}
 
 # Category mapping preserves the display labels used in findings output.
 _CATEGORY_MAP = {
@@ -77,24 +77,39 @@ def iter_text_files(root: Path) -> list[Path]:
     return files
 
 
-def findings_for_text(text: str, rel_path: str) -> list[str]:
+def _check_blocked_terms(text: str, rel_path: str) -> list[str]:
     findings: list[str] = []
-    is_scanner = rel_path in _SELF_SCAN_PATHS
-    if not is_scanner:
-        for category, term, pattern in BLOCKED_TERM_PATTERNS:
-            if pattern.search(text):
-                findings.append(f"{rel_path}: blocked {category} term {term!r}")
+    for category, term, pattern in BLOCKED_TERM_PATTERNS:
+        if pattern.search(text):
+            findings.append(f"{rel_path}: blocked {category} term {term!r}")
+    return findings
+
+
+def _check_secret_patterns(text: str, rel_path: str, is_scanner: bool) -> list[str]:
+    findings: list[str] = []
     for label, pattern in SECRET_PATTERNS:
         if is_scanner and label not in SELF_SCAN_SECRET_LABELS:
             continue
         if pattern.search(text):
             findings.append(f"{rel_path}: blocked secret/path pattern {label!r}")
+    return findings
 
+
+def _check_silence_phrases(text: str, rel_path: str) -> list[str]:
+    for sp in SILENCE_PATTERNS:
+        if sp.search(text):
+            return [f"{rel_path}: blocked publish-boundary silence phrase"]
+    return []
+
+
+def findings_for_text(text: str, rel_path: str) -> list[str]:
+    findings: list[str] = []
+    is_scanner = rel_path in _SELF_SCAN_PATHS
     if not is_scanner:
-        for sp in SILENCE_PATTERNS:
-            if sp.search(text):
-                findings.append(f"{rel_path}: blocked publish-boundary silence phrase")
-                break
+        findings.extend(_check_blocked_terms(text, rel_path))
+    findings.extend(_check_secret_patterns(text, rel_path, is_scanner))
+    if not is_scanner:
+        findings.extend(_check_silence_phrases(text, rel_path))
     return findings
 
 

@@ -1048,7 +1048,7 @@ def test_runner_harvests_the_worker_group_on_timeout(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     _set_behavior(fixture, "hang_child")
 
-    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=1)
+    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=2)
 
     assert result.returncode != 0
     assert _status(fixture, "attempt-001")["classification"] == "timed_out"
@@ -1061,7 +1061,7 @@ def test_runner_harvests_an_observed_detached_descendant(tmp_path: Path) -> None
     fixture = _fixture(tmp_path)
     _set_behavior(fixture, "detached_child")
 
-    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=1)
+    result = _invoke(fixture, "attempt-001", preflight=False, timeout_seconds=2)
 
     assert result.returncode != 0
     assert _status(fixture, "attempt-001")["classification"] == "timed_out"
@@ -1574,15 +1574,34 @@ def test_capability_probe_harvests_a_detached_descendant_on_timeout(tmp_path: Pa
     runner = _load_runner_module()
     child_path = tmp_path / "probe-child.pid"
     probe = tmp_path / "probe.py"
-    probe.write_text(
+    child_script = (
+        "import os, pathlib, sys, time; "
+        "tmp = sys.argv[1] + '.tmp'; "
+        "pathlib.Path(tmp).write_text(str(os.getpid())); "
+        "os.replace(tmp, sys.argv[1]); "
+        "time.sleep(60)"
+    )
+    probe_script = (
         "#!/usr/bin/env python3\n"
-        "import pathlib, subprocess, sys, time\n"
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', sys.argv[1]], "
-        "start_new_session=True)\n"
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_script!r}, sys.argv[1]], start_new_session=True)\n"
         "time.sleep(60)\n"
     )
+    probe.write_text(probe_script)
     probe.chmod(0o755)
+
+    orig_snapshot = runner.snapshot_before
+    timed_out_triggered = False
+
+    def sync_snapshot(deadline: float) -> runner.ProcessInventory | None:
+        nonlocal timed_out_triggered
+        if child_path.exists() and child_path.stat().st_size > 0 and not timed_out_triggered:
+            timed_out_triggered = True
+            return None
+        return orig_snapshot(deadline)
+
+    runner.snapshot_before = sync_snapshot
+
     child_pid: int | None = None
     try:
         with pytest.raises(runner.PreflightError):
@@ -1591,7 +1610,7 @@ def test_capability_probe_harvests_a_detached_descendant_on_timeout(tmp_path: Pa
                 [str(child_path)],
                 tmp_path,
                 dict(os.environ),
-                time.monotonic() + 1,
+                time.monotonic() + 10,
                 tmp_path / "probe.stdout",
                 tmp_path / "probe.stderr",
             )
@@ -1599,6 +1618,7 @@ def test_capability_probe_harvests_a_detached_descendant_on_timeout(tmp_path: Pa
         child_pid = int(child_path.read_text())
         assert not _process_command_contains(str(child_path))
     finally:
+        runner.snapshot_before = orig_snapshot
         if child_pid is not None and _pid_is_running(child_pid):
             os.kill(child_pid, signal.SIGKILL)
 

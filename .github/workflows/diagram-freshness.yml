@@ -5,7 +5,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -13,6 +12,9 @@ concurrency:
 
 jobs:
   diagram-freshness:
+    permissions:
+      contents: read
+      pull-requests: write
     uses: selamy-labs/.github/.github/workflows/diagram-freshness.yml@main
     with:
       source-globs: |

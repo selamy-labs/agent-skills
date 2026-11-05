@@ -87,6 +87,33 @@ def force_read_only(specification: str) -> str:
     return f"{fields[0]}:{fields[1]}:{','.join(sorted(options))}"
 
 
+def _rewrite_publish(item: str, value: str, proxy: bool) -> list[str]:
+    if not proxy or value != "8877:8877":
+        fail("published ports are forbidden")
+    return [item, f"{LOOPBACK}:8877:8877"]
+
+
+def _rewrite_volume(item: str, value: str, workspace: Path, state: Path) -> list[str]:
+    source = mount_source(value, state)
+    if source != workspace and workspace not in source.parents and state not in source.parents:
+        fail(f"mount source is outside the lane: {source}")
+    writable_runtime_mounts = {state / "tmp", state / "gemini-home" / ".gemini"}
+    return [item, value if source in writable_runtime_mounts else force_read_only(value)]
+
+
+def _rewrite_env(item: str, value: str) -> list[str]:
+    if value.startswith(SECRET_ENV_PREFIXES):
+        fail("Gemini 0.51 attempted secret-bearing runtime argv")
+    if value.startswith("GEMINI_API_KEY="):
+        if value != "GEMINI_API_KEY=__ORCHESTRATE_GEMINI_RUNTIME_SECRET__":
+            fail("Gemini 0.51 attempted secret-bearing runtime argv")
+        credential = os.environ.get("ORCHESTRATE_GEMINI_CREDENTIAL_ENV_FILE", "")
+        if not credential or not Path(credential).is_file():
+            fail("private credential env file is unavailable")
+        return ["--env-file", credential]
+    return [item, value]
+
+
 def rewrite_pair(
     item: str,
     value: str,
@@ -97,25 +124,32 @@ def rewrite_pair(
     if item == "--add-host":
         return []
     if item in {"-p", "--publish"}:
-        if not proxy or value != "8877:8877":
-            fail("published ports are forbidden")
-        return [item, f"{LOOPBACK}:8877:8877"]
+        return _rewrite_publish(item, value, proxy)
     if item in {"-v", "--volume"}:
-        source = mount_source(value, state)
-        if source != workspace and workspace not in source.parents and state not in source.parents:
-            fail(f"mount source is outside the lane: {source}")
-        writable_runtime_mounts = {state / "tmp", state / "gemini-home" / ".gemini"}
-        return [item, value if source in writable_runtime_mounts else force_read_only(value)]
-    if item == "--env" and value.startswith(SECRET_ENV_PREFIXES):
-        fail("Gemini 0.51 attempted secret-bearing runtime argv")
-    if item == "--env" and value.startswith("GEMINI_API_KEY="):
-        if value != "GEMINI_API_KEY=__ORCHESTRATE_GEMINI_RUNTIME_SECRET__":
-            fail("Gemini 0.51 attempted secret-bearing runtime argv")
-        credential = os.environ.get("ORCHESTRATE_GEMINI_CREDENTIAL_ENV_FILE", "")
-        if not credential or not Path(credential).is_file():
-            fail("private credential env file is unavailable")
-        return ["--env-file", credential]
+        return _rewrite_volume(item, value, workspace, state)
+    if item == "--env":
+        return _rewrite_env(item, value)
     return [item, value]
+
+
+def _is_forbidden_runtime_flag(item: str) -> bool:
+    return item in FORBIDDEN_FLAGS or any(item.startswith(f"{flag}=") for flag in FORBIDDEN_FLAGS)
+
+
+def _process_paired_option(
+    item: str,
+    next_arg: str,
+    proxy: bool,
+    workspace: Path,
+    state: Path,
+    networks: list[str],
+    rewritten: list[str],
+) -> None:
+    if item == "--network":
+        networks.append(next_arg)
+        rewritten.extend((item, next_arg))
+    else:
+        rewritten.extend(rewrite_pair(item, next_arg, proxy, workspace, state))
 
 
 def rewrite_runtime_options(
@@ -131,16 +165,12 @@ def rewrite_runtime_options(
     paired = {"--add-host", "-p", "--publish", "-v", "--volume", "--env", "--network"}
     while index < image_index:
         item = arguments[index]
-        if item in FORBIDDEN_FLAGS or any(item.startswith(f"{flag}=") for flag in FORBIDDEN_FLAGS):
+        if _is_forbidden_runtime_flag(item):
             fail(f"forbidden runtime flag: {item}")
         if item in paired:
             if index + 1 >= image_index:
                 fail(f"malformed paired runtime option: {item}")
-            if item == "--network":
-                networks.append(arguments[index + 1])
-                rewritten.extend((item, arguments[index + 1]))
-            else:
-                rewritten.extend(rewrite_pair(item, arguments[index + 1], proxy, workspace, state))
+            _process_paired_option(item, arguments[index + 1], proxy, workspace, state, networks, rewritten)
             index += 2
             continue
         if item.startswith("--network="):

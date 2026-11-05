@@ -18,9 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
       - name: Validate skill frontmatter and naming
         run: python scripts/lint_skills.py
       - name: Block public information leaks
@@ -49,20 +51,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: "1.26.10"
       - name: Install dependencies
-        # ruff is pinned: `ruff format` output is version-dependent, so an
-        # unpinned formatter would let a future release turn main red with no
-        # code change — defeating the "formatter output is the source of truth"
-        # goal of the format gate (#101).
-        run: pip install pytest pytest-cov ruff==0.15.21
+        run: python -m pip install -r requirements-dev.txt
+      - name: Verify Go helper
+        working-directory: tools/hclblocks
+        env:
+          GOTOOLCHAIN: local
+          GOWORK: "off"
+          GOFLAGS: -mod=readonly
+        run: go vet ./...
       - name: Lint with ruff
-        run: ruff check tools/ tests/
+        run: python -m ruff check .
+        # Covers all executable Python across the repository
       - name: Check formatting with ruff
-        run: ruff format --check --diff .
+        run: python -m ruff format --check --diff .
+      - name: Validate skills
+        run: python tools/validate_skills.py
+      - name: Validate marketplace
+        run: python tools/validate_marketplace.py
+      - name: Self-test terraform module layout
+        run: python tools/tf_module_layout.py --self-test
       - name: Test portfolio delivery control
         run: python -m unittest discover -s skills/portfolio-delivery-control/tests -v
       - name: Run tests with coverage
-        run: pytest --cov=tools --cov-report=term-missing --cov-fail-under=90
+        env:
+          COVERAGE_SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
+      - name: Verify coverage threshold
+        env:
+          COVERAGE_SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -m tests.test_coverage_threshold coverage.json

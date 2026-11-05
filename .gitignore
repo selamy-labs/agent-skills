@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 .coverage
 .pytest_cache/
+coverage.json
+.coverage_session_start

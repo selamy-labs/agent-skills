@@ -201,6 +201,7 @@ def test_followup_retries_enter_and_requires_fresh_post_marker_activity(tmp_path
     try:
         _wait_for_pane_text(session, "• Working stale")
         env = os.environ | {
+            "TMPDIR": str(tmp_path),
             "ORCHESTRATION_DISPATCH_ID": f"{tool}-double-enter-test",
             "ORCHESTRATION_VERIFY_ATTEMPTS": "1",
             "ORCHESTRATION_VERIFY_DELAY_SECONDS": "0.05",

@@ -7,7 +7,6 @@ import argparse
 import re
 import sys
 
-
 TITLE_RE = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]+\))?(?P<breaking>!)?: .+")
 ALLOWED_TYPES = {
     "build",
