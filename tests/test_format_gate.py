@@ -4536,13 +4536,17 @@ class TestR44Hygiene:
 class TestR45SkillLocalImportReconciliation:
     """PREP R45: reconciliation of PR #154 Rule C import validation with PR #153 skill-local sibling imports."""
 
-    def test_merged_repo_and_skill_local_import_boundaries(self, tmp_path: Path) -> None:
+    def test_rule_c_passes_on_merged_repository(self) -> None:
         import tools.validate_skills as val_skills
 
-        # 1. Merged repository passes Rule C (PR #153 sibling imports accepted)
         assert val_skills.validate_tracked_python_imports(REPO_ROOT) == []
+        workflow_script = REPO_ROOT / "skills" / "portfolio-delivery-control" / "scripts" / "workflow.py"
+        errs_wf = val_skills._validate_single_python_file(workflow_script, REPO_ROOT, set())
+        assert errs_wf == []
 
-        # 2. Unmapped third-party import within skill scripts is still rejected
+    def test_rule_c_rejects_unmapped_third_party_import_in_skill_scripts(self, tmp_path: Path) -> None:
+        import tools.validate_skills as val_skills
+
         fake_root = tmp_path / "repo"
         skill_scripts = fake_root / "skills" / "portfolio-delivery-control" / "scripts"
         skill_scripts.mkdir(parents=True)
@@ -4552,9 +4556,22 @@ class TestR45SkillLocalImportReconciliation:
         errs_bad_tp = val_skills._validate_single_python_file(bad_third_party, fake_root, set())
         assert any("disallowed top-level import 'requests'" in e for e in errs_bad_tp)
 
-        # 3. Importing admission from outside that skill is still rejected
+    def test_rule_c_rejects_importing_skill_local_script_from_outside_skill(self, tmp_path: Path) -> None:
+        import tools.validate_skills as val_skills
+
+        fake_root = tmp_path / "repo"
+        skill_scripts = fake_root / "skills" / "portfolio-delivery-control" / "scripts"
+        skill_scripts.mkdir(parents=True)
+        (skill_scripts / "admission.py").write_text("# admission module\n", encoding="utf-8")
+
         outside_bad = fake_root / "scripts" / "bad.py"
         outside_bad.parent.mkdir(parents=True, exist_ok=True)
         outside_bad.write_text("import admission\n", encoding="utf-8")
         errs_outside = val_skills._validate_single_python_file(outside_bad, fake_root, set())
         assert any("disallowed top-level import 'admission'" in e for e in errs_outside)
+
+        other_skill_bad = fake_root / "skills" / "other-skill" / "scripts" / "bad_cross.py"
+        other_skill_bad.parent.mkdir(parents=True, exist_ok=True)
+        other_skill_bad.write_text("import admission\n", encoding="utf-8")
+        errs_other_skill = val_skills._validate_single_python_file(other_skill_bad, fake_root, set())
+        assert any("disallowed top-level import 'admission'" in e for e in errs_other_skill)
