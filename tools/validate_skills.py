@@ -2196,6 +2196,14 @@ def _is_allowed_import(name: str, pinned_dists: set[str]) -> bool:
     return False
 
 
+def _is_skill_local_script_import(name: str, rel_path: str, repo_root: Path) -> bool:
+    """Return True if rel_path is under skills/<skill>/(scripts|tests)/ and skills/<skill>/scripts/<name>.py exists."""
+    parts = Path(rel_path).parts
+    if len(parts) < 4 or parts[0] != "skills" or parts[2] not in ("scripts", "tests"):
+        return False
+    return (repo_root / "skills" / parts[1] / "scripts" / f"{name}.py").is_file()
+
+
 def _validate_single_python_file(
     py_path: Path,
     repo_root: Path,
@@ -2215,7 +2223,7 @@ def _validate_single_python_file(
     except ValueError:
         rel_path = py_path.as_posix()
     for name in imported_names:
-        if not _is_allowed_import(name, pinned_dists):
+        if not _is_allowed_import(name, pinned_dists) and not _is_skill_local_script_import(name, rel_path, repo_root):
             errors.append(
                 f"{rel_path}: disallowed top-level import {name!r} "
                 "(not in stdlib, LOCAL_TOP_LEVEL, or mapped in requirements-dev.txt)"
