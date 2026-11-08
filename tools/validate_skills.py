@@ -1734,7 +1734,7 @@ def _is_path_tracked(target: Path, repo_root: Path) -> bool:
     """Return True if target exists and is tracked in git (or repo_root is not a git checkout)."""
     if not target.exists():
         return False
-    if not (repo_root / ".git").is_dir():
+    if not (repo_root / ".git").exists():
         return True
     return is_tracked_by_git(target)
 
@@ -2197,11 +2197,14 @@ def _is_allowed_import(name: str, pinned_dists: set[str]) -> bool:
 
 
 def _is_skill_local_script_import(name: str, rel_path: str, repo_root: Path) -> bool:
-    """Return True if rel_path is under skills/<skill>/(scripts|tests)/ and skills/<skill>/scripts/<name>.py exists."""
+    """Return True if rel_path is under skills/<skill>/(scripts|tests)/
+    and skills/<skill>/scripts/<name>.py is a tracked file.
+    """
     parts = Path(rel_path).parts
     if len(parts) < 4 or parts[0] != "skills" or parts[2] not in ("scripts", "tests"):
         return False
-    return (repo_root / "skills" / parts[1] / "scripts" / f"{name}.py").is_file()
+    target = repo_root / "skills" / parts[1] / "scripts" / f"{name}.py"
+    return target.is_file() and _is_path_tracked(target, repo_root)
 
 
 def _validate_single_python_file(

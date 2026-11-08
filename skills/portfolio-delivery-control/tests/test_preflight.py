@@ -69,7 +69,7 @@ def ready_row():
     return result
 
 
-class PreflightTests(unittest.TestCase):
+class PreflightTestBase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -111,6 +111,32 @@ class PreflightTests(unittest.TestCase):
     def codes(self, result):
         return {v["code"] for v in result["diagnostics"]}
 
+    def set_control(self, value):
+        self.policy["required_controls"] = ["precommit"]
+        for project in self.doc["delivery_control"]["projects"].values():
+            project["revision"] = HEAD
+            project["controls"] = {"precommit": copy.deepcopy(value)}
+
+    def _resolve_pointer(self, ptr):
+        source = self.doc
+        for token in ptr.split("/")[1:]:
+            source = source[token.replace("~1", "/").replace("~0", "~")]
+        return source
+
+    def _collect_pointer_cids(self, gaps):
+        found_cids = set()
+        for g in gaps:
+            for ptr in g["drilldown_pointers"]:
+                source = self._resolve_pointer(ptr)
+                self.assertIn("status", source)
+                self.assertEqual(source["status"], "gap")
+                if "/controls/" in ptr:
+                    cid = ptr.split("/controls/")[1].replace("~1", "/").replace("~0", "~")
+                    found_cids.add(cid)
+        return found_cids
+
+
+class PreflightTests(PreflightTestBase):
     def test_complete_current_rows_pass_without_authorizing_work(self):
         result = self.run_audit()
         self.assertEqual(result["exit_code"], 0)
@@ -120,12 +146,6 @@ class PreflightTests(unittest.TestCase):
             result["coordinator_sha256"],
             hashlib.sha256((self.root / "coordinator-status.json").read_bytes()).hexdigest(),
         )
-
-    def set_control(self, value):
-        self.policy["required_controls"] = ["precommit"]
-        for project in self.doc["delivery_control"]["projects"].values():
-            project["revision"] = HEAD
-            project["controls"] = {"precommit": copy.deepcopy(value)}
 
     def test_required_control_absence_is_visible(self):
         self.policy["required_controls"] = ["precommit"]
@@ -2291,24 +2311,6 @@ class PreflightTests(unittest.TestCase):
         res_impl_absent = self.run_audit()
         self.assertIn("STALE_OR_MISSING_CLAIM", self.codes(res_impl_absent))
 
-    def _resolve_pointer(self, ptr):
-        source = self.doc
-        for token in ptr.split("/")[1:]:
-            source = source[token.replace("~1", "/").replace("~0", "~")]
-        return source
-
-    def _collect_pointer_cids(self, gaps):
-        found_cids = set()
-        for g in gaps:
-            for ptr in g["drilldown_pointers"]:
-                source = self._resolve_pointer(ptr)
-                self.assertIn("status", source)
-                self.assertEqual(source["status"], "gap")
-                if "/controls/" in ptr:
-                    cid = ptr.split("/controls/")[1].replace("~1", "/").replace("~0", "~")
-                    found_cids.add(cid)
-        return found_cids
-
     def test_r4_sol61_003_and_004_compact_control_gap_aggregation_and_exact_pointers(self):
         # 1. Exact control IDs containing colons, leading/trailing whitespace, slashes, tildes
         special_ids = ["quality:lint", " surrounded ", "spec~1/core"]
@@ -2739,11 +2741,11 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(MODULE.resolve_requested_transition_str(None, {"requested_transition": "review"}), "review")
 
 
-class TestR45ReconciliationRegressions(PreflightTests):
-    """Regressions for PREP R45 reconciliation of PR #154 onto PR #153."""
+class TestR45ReconciliationRegressions(PreflightTestBase):
+    """Regressions pinning merge-base (c6d0f4a2) delivery-control behavior across PR #153 and PR #154."""
 
     def test_r45_stage_aware_guard_active_claim_preservation(self):
-        """Preserves PR #153 stage-aware claim token validation across active stages."""
+        """Pins merge-base (c6d0f4a2) stage-aware claim token validation across active stages."""
         p = self.doc["delivery_control"]["projects"]["foundation"]
 
         # 1. Implementation stage requires active work_item with claim_token
@@ -2774,7 +2776,7 @@ class TestR45ReconciliationRegressions(PreflightTests):
         self.assertIn("WORK_ITEM_INVALID", self.codes(res_invalid))
 
     def test_r45_stage_aware_guard_auto_enforcement_preservation(self):
-        """Preserves PR #153 automatic stage guard enforcement on active stages."""
+        """Pins merge-base (c6d0f4a2) automatic stage guard enforcement on active stages."""
         p = self.doc["delivery_control"]["projects"]["foundation"]
 
         # Review stage auto-enforces unanimous SHIP reviews; missing reviews emit TRANSITION_GUARD_FAILED
@@ -2789,21 +2791,39 @@ class TestR45ReconciliationRegressions(PreflightTests):
         self.assertIn("TRANSITION_GUARD_FAILED", self.codes(res))
 
     def test_r45_gate_hygiene_exact_pointer_escaping_and_gap_aggregation(self):
-        """Preserves PR #154 special character escaping and gap aggregation in compact projection."""
+        """Pins merge-base (c6d0f4a2) exact pointer escaping, gap aggregation, and diagnostic ordering."""
+        # 1. Exact control IDs containing colons, leading/trailing whitespace, slashes, tildes
         special_ids = ["quality:lint", " surrounded ", "spec~1/core"]
-        self.policy["required_controls"] = special_ids
-        for r in self.doc["delivery_control"]["projects"].values():
-            r["controls"] = {
-                cid: {"status": "gap", "owner": "dev", "observed_at": NOW, "next_action": "fix"} for cid in special_ids
-            }
+        missing_id = "missing~/gate"
+        self.policy["required_controls"] = special_ids + [missing_id]
+        foundation_p = self.doc["delivery_control"]["projects"]["foundation"]
+        foundation_p["controls"] = {
+            cid: {"status": "gap", "owner": "dev", "observed_at": NOW, "next_action": "fix"} for cid in special_ids
+        }
         res = self.run_audit()
         gaps = res["compact_projection"]["aggregated_gaps"]
-        found_cids = self._collect_pointer_cids(gaps)
+        gap_items = [g for g in gaps if g["status"] == "gap"]
+        found_cids = self._collect_pointer_cids(gap_items)
         for cid in special_ids:
             self.assertIn(cid, found_cids)
 
+        missing_items = [g for g in gaps if g["status"] == "missing" and g["project"] == "foundation"]
+        self.assertTrue(len(missing_items) >= 1)
+        expected_missing_ptr = "/delivery_control/projects/foundation/controls/missing~0~1gate"
+        self.assertIn(expected_missing_ptr, missing_items[0]["drilldown_pointers"])
+
+        # 2. PR #153 / merge-base diagnostic ordering contract in _process_single_expected_project:
+        # project_row diagnostics precede worker_checks diagnostics when both fail on a row
+        foundation_p["stage"] = "invalid_stage"
+        foundation_p["workers"] = "not-a-list"
+        res_order = self.run_audit()
+        codes_order = [d["code"] for d in res_order["diagnostics"] if d.get("project") == "foundation"]
+        self.assertIn("PROJECT_FIELDS_INVALID", codes_order)
+        self.assertIn("WORKERS_INVALID", codes_order)
+        self.assertLess(codes_order.index("PROJECT_FIELDS_INVALID"), codes_order.index("WORKERS_INVALID"))
+
     def test_r45_gate_hygiene_blocker_staleness_and_recheck_deadlines(self):
-        """Preserves PR #154 blocker staleness evaluation and overdue recheck deadlines."""
+        """Pins merge-base (c6d0f4a2) blocker staleness evaluation and overdue recheck deadlines."""
         p = self.doc["delivery_control"]["projects"]["foundation"]
         p["stage"] = "blocked"
 

@@ -4575,3 +4575,82 @@ class TestR45SkillLocalImportReconciliation:
         other_skill_bad.write_text("import admission\n", encoding="utf-8")
         errs_other_skill = val_skills._validate_single_python_file(other_skill_bad, fake_root, set())
         assert any("disallowed top-level import 'admission'" in e for e in errs_other_skill)
+
+    def test_rule_c_pins_skill_root_and_subdir_guards(self, tmp_path: Path) -> None:
+        import tools.validate_skills as val_skills
+
+        fake_root = tmp_path / "repo"
+        skill_scripts = fake_root / "skills" / "portfolio-delivery-control" / "scripts"
+        skill_scripts.mkdir(parents=True)
+        (skill_scripts / "admission.py").write_text("# admission module\n", encoding="utf-8")
+
+        # Positive tmp_path cases: scripts/ and tests/ under skills/<skill>/
+        ok_caller = skill_scripts / "ok_caller.py"
+        ok_caller.write_text("import admission\n", encoding="utf-8")
+        assert val_skills._validate_single_python_file(ok_caller, fake_root, set()) == []
+
+        skill_tests = fake_root / "skills" / "portfolio-delivery-control" / "tests"
+        skill_tests.mkdir(parents=True)
+        ok_test_caller = skill_tests / "test_ok_caller.py"
+        ok_test_caller.write_text("import admission\n", encoding="utf-8")
+        assert val_skills._validate_single_python_file(ok_test_caller, fake_root, set()) == []
+
+        # parts[2] not in ("scripts", "tests") guard: references/ subdir
+        skill_refs = fake_root / "skills" / "portfolio-delivery-control" / "references"
+        skill_refs.mkdir(parents=True)
+        bad_ref = skill_refs / "bad_ref.py"
+        bad_ref.write_text("import admission\n", encoding="utf-8")
+        errs_bad_ref = val_skills._validate_single_python_file(bad_ref, fake_root, set())
+        assert any("disallowed top-level import 'admission'" in e for e in errs_bad_ref)
+
+        # parts[0] != "skills" guard: other root directory
+        bad_root = fake_root / "other" / "portfolio-delivery-control" / "scripts" / "bad_root.py"
+        bad_root.parent.mkdir(parents=True, exist_ok=True)
+        bad_root.write_text("import admission\n", encoding="utf-8")
+        errs_bad_root = val_skills._validate_single_python_file(bad_root, fake_root, set())
+        assert any("disallowed top-level import 'admission'" in e for e in errs_bad_root)
+
+    def test_rule_c_rejects_untracked_skill_local_script_in_git_repo(self, tmp_path: Path) -> None:
+        import subprocess
+
+        import tools.validate_skills as val_skills
+
+        repo_dir = tmp_path / "git_repo"
+        repo_dir.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True, capture_output=True
+        )
+
+        scripts_dir = repo_dir / "skills" / "portfolio-delivery-control" / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "tracked_mod.py").write_text("# tracked module\n", encoding="utf-8")
+        (scripts_dir / "untracked_scratch.py").write_text("# untracked module\n", encoding="utf-8")
+        caller = scripts_dir / "caller.py"
+        caller.write_text("import tracked_mod\nimport untracked_scratch\n", encoding="utf-8")
+
+        subprocess.run(
+            ["git", "add", "skills/portfolio-delivery-control/scripts/tracked_mod.py"],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "add", "skills/portfolio-delivery-control/scripts/caller.py"],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+        )
+
+        errs = val_skills._validate_single_python_file(caller, repo_dir, set())
+        assert any("disallowed top-level import 'untracked_scratch'" in e for e in errs)
+        assert not any("disallowed top-level import 'tracked_mod'" in e for e in errs)
+
+        subprocess.run(
+            ["git", "add", "skills/portfolio-delivery-control/scripts/untracked_scratch.py"],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+        )
+        assert val_skills._validate_single_python_file(caller, repo_dir, set()) == []
