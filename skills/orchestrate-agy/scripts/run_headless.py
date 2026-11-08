@@ -145,6 +145,17 @@ def signal_process(pid: int, signum: signal.Signals) -> bool:
     return True
 
 
+def _parse_ps_line(raw_line: str) -> tuple[int, ProcessInfo] | None:
+    fields = raw_line.split(maxsplit=4)
+    if len(fields) != 5:
+        return None
+    try:
+        pid, parent_pid, process_group_id = (int(value) for value in fields[:3])
+    except ValueError:
+        return None
+    return pid, ProcessInfo(parent_pid, process_group_id, fields[3], fields[4])
+
+
 def process_snapshot(timeout_seconds: float = 2) -> ProcessInventory:
     ps = shutil.which("ps")
     if not ps or timeout_seconds <= 0:
@@ -163,16 +174,12 @@ def process_snapshot(timeout_seconds: float = 2) -> ProcessInventory:
     snapshot: dict[int, ProcessInfo] = {}
     complete = completed.returncode == 0
     for raw_line in completed.stdout.splitlines():
-        fields = raw_line.split(maxsplit=4)
-        if len(fields) != 5:
+        parsed = _parse_ps_line(raw_line)
+        if parsed is None:
             complete = False
             continue
-        try:
-            pid, parent_pid, process_group_id = (int(value) for value in fields[:3])
-        except ValueError:
-            complete = False
-            continue
-        snapshot[pid] = ProcessInfo(parent_pid, process_group_id, fields[3], fields[4])
+        pid, info = parsed
+        snapshot[pid] = info
     return ProcessInventory(snapshot, complete and bool(snapshot))
 
 
@@ -214,6 +221,20 @@ def remember_process_tree(
         tracked_processes[pid] = ProcessIdentity(info.started_at)
 
 
+def _inspect_tracked_process(
+    pid: int,
+    identity: ProcessIdentity,
+    inventory: ProcessInventory,
+) -> tuple[bool, bool]:
+    """Returns (is_alive, is_unknown)."""
+    info = inventory.processes.get(pid)
+    if info is None:
+        return False, not inventory.complete
+    if info.started_at != identity.started_at or info.state.startswith("Z"):
+        return False, False
+    return True, False
+
+
 def tracked_descendant_state(
     root_pid: int,
     tracked_processes: dict[int, ProcessIdentity],
@@ -224,13 +245,11 @@ def tracked_descendant_state(
     for pid, identity in tracked_processes.items():
         if pid == root_pid:
             continue
-        info = inventory.processes.get(pid)
-        if info is None:
-            identity_unknown = identity_unknown or not inventory.complete
-            continue
-        if info.started_at != identity.started_at or info.state.startswith("Z"):
-            continue
-        alive.append(pid)
+        is_alive, is_unknown = _inspect_tracked_process(pid, identity, inventory)
+        if is_unknown:
+            identity_unknown = True
+        elif is_alive:
+            alive.append(pid)
     if alive:
         return "alive", sorted(alive)
     return ("unknown" if identity_unknown else "absent"), []
@@ -500,35 +519,49 @@ def harvest_is_complete(result: ProcessResult) -> bool:
     return result.process_group_state_after_harvest == "absent" and result.descendant_state_after_harvest == "absent"
 
 
+def _classify_process_failure(result: ProcessResult) -> str | None:
+    if not harvest_is_complete(result):
+        return "harvest_failed"
+    if result.interrupted_signal:
+        return "interrupted"
+    if result.timed_out:
+        return "timed_out"
+    if result.launch_error:
+        return "launch_error"
+    if result.returncode != 0:
+        return "cli_error"
+    return None
+
+
+def _classify_envelope(
+    envelope: dict[str, Any] | None,
+    stderr_path: Path,
+) -> tuple[str, dict[str, Any] | None]:
+    if not envelope:
+        return "invalid_output", None
+    agy_status = envelope.get("status")
+    if agy_status != "SUCCESS":
+        return f"agy_status_{agy_status or 'MISSING'}", envelope
+    response = envelope.get("response")
+    if not isinstance(response, str) or not response.strip():
+        return empty_response_classification(stderr_path), envelope
+    return "succeeded", envelope
+
+
 def classify_result(
     result: ProcessResult,
     stdout_path: Path,
     stderr_path: Path,
 ) -> tuple[str, dict[str, Any] | None]:
-    if not harvest_is_complete(result):
-        return "harvest_failed", None
-    if result.interrupted_signal:
-        return "interrupted", None
-    if result.timed_out:
-        return "timed_out", None
-    if result.launch_error:
-        return "launch_error", None
-    if result.returncode != 0:
-        return "cli_error", None
+    failure = _classify_process_failure(result)
+    if failure is not None:
+        return failure, None
 
     stdout_text = stdout_path.read_text(errors="replace")
     stream_error, envelope = terminal_stream_result(stdout_text)
-    if stream_error or not envelope:
-        return stream_error or "invalid_output", None
-
-    agy_status = envelope.get("status")
-    if agy_status != "SUCCESS":
-        return f"agy_status_{agy_status or 'MISSING'}", envelope
-
-    response = envelope.get("response")
-    if not isinstance(response, str) or not response.strip():
-        return empty_response_classification(stderr_path), envelope
-    return "succeeded", envelope
+    if stream_error:
+        return stream_error, None
+    return _classify_envelope(envelope, stderr_path)
 
 
 def absolute_path(parser: argparse.ArgumentParser, raw_path: str, label: str) -> Path:
@@ -609,6 +642,64 @@ def initial_status(args: argparse.Namespace, started_at: str) -> dict[str, objec
     }
 
 
+def _handle_probe_deadline_exceeded(
+    args: argparse.Namespace,
+    status: dict[str, object],
+    started_monotonic: float,
+) -> int:
+    status.update(
+        state="finished",
+        classification="timed_out",
+        failed_stage="capability_probes",
+        completed_at=utc_now(),
+        duration_seconds=round(time.monotonic() - started_monotonic, 3),
+    )
+    write_status(args.run_dir / "status.json", status)
+    print(f"AGY run timed out during capability probes; evidence: {args.run_dir}", file=sys.stderr)
+    return 124
+
+
+def _probe_failed(result: ProcessResult) -> bool:
+    return bool(
+        result.timed_out
+        or result.launch_error
+        or result.returncode != 0
+        or not harvest_is_complete(result)
+        or result.interrupted_signal
+    )
+
+
+def _handle_probe_failure(
+    args: argparse.Namespace,
+    status: dict[str, object],
+    name: str,
+    result: ProcessResult,
+    started_monotonic: float,
+    operation_deadline: float,
+) -> int:
+    overall_timeout = result.timed_out and time.monotonic() >= operation_deadline
+    if result.interrupted_signal:
+        classification = "interrupted"
+    elif overall_timeout:
+        classification = "timed_out"
+    else:
+        classification = "capability_probe_failed"
+
+    status.update(
+        state="finished",
+        classification=classification,
+        failed_probe=name,
+        completed_at=utc_now(),
+        duration_seconds=round(time.monotonic() - started_monotonic, 3),
+        **asdict(result),
+    )
+    write_status(args.run_dir / "status.json", status)
+    print(f"AGY capability probe failed: {name}; evidence: {args.run_dir}", file=sys.stderr)
+    if result.interrupted_signal:
+        return 128 + result.interrupted_signal
+    return 124 if classification == "timed_out" else 1
+
+
 def run_capability_probes(
     args: argparse.Namespace,
     status: dict[str, object],
@@ -623,43 +714,10 @@ def run_capability_probes(
     for name, command in probes:
         remaining = operation_deadline - time.monotonic()
         if remaining <= 0:
-            status.update(
-                state="finished",
-                classification="timed_out",
-                failed_stage="capability_probes",
-                completed_at=utc_now(),
-                duration_seconds=round(time.monotonic() - started_monotonic, 3),
-            )
-            write_status(args.run_dir / "status.json", status)
-            print(f"AGY run timed out during capability probes; evidence: {args.run_dir}", file=sys.stderr)
-            return 124
+            return _handle_probe_deadline_exceeded(args, status, started_monotonic)
         result = probe(args, args.run_dir, name, command, min(PROBE_TIMEOUT_SECONDS, remaining))
-        failed = (
-            result.timed_out
-            or result.launch_error
-            or result.returncode != 0
-            or not harvest_is_complete(result)
-            or result.interrupted_signal
-        )
-        if failed:
-            overall_timeout = result.timed_out and time.monotonic() >= operation_deadline
-            if result.interrupted_signal:
-                classification = "interrupted"
-            else:
-                classification = "timed_out" if overall_timeout else "capability_probe_failed"
-            status.update(
-                state="finished",
-                classification=classification,
-                failed_probe=name,
-                completed_at=utc_now(),
-                duration_seconds=round(time.monotonic() - started_monotonic, 3),
-                **asdict(result),
-            )
-            write_status(args.run_dir / "status.json", status)
-            print(f"AGY capability probe failed: {name}; evidence: {args.run_dir}", file=sys.stderr)
-            if result.interrupted_signal:
-                return 128 + result.interrupted_signal
-            return 124 if classification == "timed_out" else 1
+        if _probe_failed(result):
+            return _handle_probe_failure(args, status, name, result, started_monotonic, operation_deadline)
     return None
 
 

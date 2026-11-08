@@ -9,65 +9,100 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 
-def load_denylist(path: Path) -> dict:
+def load_denylist(path: Path) -> dict[str, Any]:
     """Parse denylist.yml into a dict matching the expected schema."""
     text = path.read_text(encoding="utf-8")
     return _parse(text)
 
 
-def _parse(text: str) -> dict:
-    result: dict = {}
-    current_key: str | None = None
-    current_list: list | None = None
-    in_dict_item = False
-    current_dict: dict = {}
+class _DenylistParser:
+    def __init__(self) -> None:
+        self.result: dict[str, Any] = {}
+        self.current_key: str | None = None
+        self.current_list: list[Any] | None = None
+        self.in_dict_item = False
+        self.current_dict: dict[str, str] = {}
 
-    for line in text.splitlines():
+    def flush(self) -> None:
+        if self.current_key is not None and self.current_list is not None:
+            if self.in_dict_item and self.current_dict:
+                self.current_list.append(dict(self.current_dict))
+            self.result[self.current_key] = self.current_list
+
+    def handle_top_key(self, stripped: str) -> None:
+        self.flush()
+        self.current_key = stripped.rstrip(":").strip()
+        self.current_list = []
+        self.current_dict = {}
+        self.in_dict_item = False
+
+    def handle_dict_item(self, m: re.Match[str]) -> None:
+        if self.current_list is None:
+            return
+        key, val = m.group(1), m.group(2).strip()
+        if self.in_dict_item and self.current_dict:
+            self.current_list.append(dict(self.current_dict))
+        self.current_dict = {key: _unquote(val)}
+        self.in_dict_item = True
+
+    def handle_cont(self, m: re.Match[str]) -> None:
+        if self.in_dict_item:
+            key, val = m.group(1), m.group(2).strip()
+            self.current_dict[key] = _unquote(val)
+
+    def handle_list_item(self, m: re.Match[str]) -> None:
+        if self.current_list is None:
+            return
+        if self.in_dict_item and self.current_dict:
+            self.current_list.append(dict(self.current_dict))
+            self.current_dict = {}
+            self.in_dict_item = False
+        self.current_list.append(_unquote(m.group(1).strip()))
+
+    def process_line(self, line: str) -> None:
         stripped = line.rstrip()
-
-        # Skip blank lines and comments
         if not stripped or stripped.lstrip().startswith("#"):
-            continue
+            return
 
-        # Top-level key (no leading whitespace, ends with colon)
         if re.match(r"^[a-z_]+:\s*$", stripped):
-            _flush(result, current_key, current_list, current_dict, in_dict_item)
-            current_key = stripped.rstrip(":").strip()
-            current_list = []
-            current_dict = {}
-            in_dict_item = False
-            continue
+            self.handle_top_key(stripped)
+            return
 
-        # List item with dict start: "  - key: value"
         m_dict_item = re.match(r"^\s+-\s+(\w+):\s*(.+)$", stripped)
-        # Simple list item: "  - value"
-        m_list_item = re.match(r"^\s+-\s+(.+)$", stripped)
-        # Continuation dict key: "    key: value"
+        if m_dict_item:
+            self.handle_dict_item(m_dict_item)
+            return
+
         m_cont = re.match(r"^\s{4,}(\w+):\s*(.+)$", stripped)
+        if m_cont:
+            self.handle_cont(m_cont)
+            return
 
-        if m_dict_item and current_list is not None:
-            key, val = m_dict_item.group(1), m_dict_item.group(2).strip()
-            if in_dict_item and current_dict:
-                current_list.append(dict(current_dict))
-            current_dict = {key: _unquote(val)}
-            in_dict_item = True
-        elif m_cont and in_dict_item:
-            key, val = m_cont.group(1), m_cont.group(2).strip()
-            current_dict[key] = _unquote(val)
-        elif m_list_item and current_list is not None:
-            if in_dict_item and current_dict:
-                current_list.append(dict(current_dict))
-                current_dict = {}
-                in_dict_item = False
-            current_list.append(_unquote(m_list_item.group(1).strip()))
+        m_list_item = re.match(r"^\s+-\s+(.+)$", stripped)
+        if m_list_item:
+            self.handle_list_item(m_list_item)
 
-    _flush(result, current_key, current_list, current_dict, in_dict_item)
-    return result
+    def parse(self, text: str) -> dict[str, Any]:
+        for line in text.splitlines():
+            self.process_line(line)
+        self.flush()
+        return self.result
 
 
-def _flush(result: dict, key: str | None, lst: list | None, dct: dict, in_dict: bool) -> None:
+def _parse(text: str) -> dict[str, Any]:
+    return _DenylistParser().parse(text)
+
+
+def _flush(
+    result: dict[str, Any],
+    key: str | None,
+    lst: list[Any] | None,
+    dct: dict[str, str],
+    in_dict: bool,
+) -> None:
     if key is not None and lst is not None:
         if in_dict and dct:
             lst.append(dict(dct))

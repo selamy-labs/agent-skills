@@ -195,21 +195,22 @@ def normalized_allowed_path(raw: object) -> str:
     return trimmed
 
 
+def _parse_single_verification_command(item: object) -> VerificationCommand:
+    if not isinstance(item, dict) or set(item) != {"argv", "timeout_seconds"}:
+        raise ValueError("verification commands require only argv and timeout_seconds")
+    argv = item["argv"]
+    timeout = item["timeout_seconds"]
+    if not isinstance(argv, list) or not argv or not all(is_nonempty_string(arg) for arg in argv):
+        raise ValueError("verification argv must be a non-empty string list")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise ValueError("verification timeout_seconds must be a positive integer")
+    return VerificationCommand(tuple(argv), timeout)
+
+
 def parse_verification_commands(raw: object) -> tuple[VerificationCommand, ...]:
     if not isinstance(raw, list) or not raw:
         raise ValueError("verification_commands must be a non-empty list")
-    commands: list[VerificationCommand] = []
-    for item in raw:
-        if not isinstance(item, dict) or set(item) != {"argv", "timeout_seconds"}:
-            raise ValueError("verification commands require only argv and timeout_seconds")
-        argv = item["argv"]
-        timeout = item["timeout_seconds"]
-        if not isinstance(argv, list) or not argv or not all(is_nonempty_string(arg) for arg in argv):
-            raise ValueError("verification argv must be a non-empty string list")
-        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
-            raise ValueError("verification timeout_seconds must be a positive integer")
-        commands.append(VerificationCommand(tuple(argv), timeout))
-    return tuple(commands)
+    return tuple(_parse_single_verification_command(item) for item in raw)
 
 
 def parse_string_list(raw: object, label: str) -> tuple[str, ...]:
@@ -231,6 +232,30 @@ def validate_goal_identity(raw: dict[str, object]) -> None:
         raise ValueError("base_sha must be a lowercase 40-character object ID")
 
 
+def _validate_goal_allowed_paths(raw_paths: Any) -> tuple[str, ...]:
+    allowed_paths = tuple(normalized_allowed_path(item) for item in raw_paths)
+    if not allowed_paths or len(set(allowed_paths)) != len(allowed_paths):
+        raise ValueError("allowed_paths must be non-empty and unique")
+    return allowed_paths
+
+
+def _validate_goal_constraints(raw: dict[str, Any]) -> None:
+    max_attempts = raw["max_attempts"]
+    allow_paid = raw["allow_paid_generation"]
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts <= 0:
+        raise ValueError("max_attempts must be a positive integer")
+    if raw["auth_type"] not in AUTH_TYPES:
+        raise ValueError("auth_type is unsupported")
+    if not isinstance(raw["credential_identity"], str) or not CREDENTIAL_IDENTITY_PATTERN.fullmatch(
+        raw["credential_identity"]
+    ):
+        raise ValueError("credential_identity must be a non-secret reviewed identity")
+    if not isinstance(allow_paid, bool):
+        raise ValueError("allow_paid_generation must be boolean")
+    if not isinstance(raw["sandbox_image"], str) or not IMAGE_PATTERN.fullmatch(raw["sandbox_image"]):
+        raise ValueError("sandbox_image must be an immutable image@sha256 digest reference")
+
+
 def parse_goal(path: Path) -> Goal:
     try:
         raw = json.loads(read_owner_only_file(path, "invalid_goal").decode())
@@ -240,25 +265,10 @@ def parse_goal(path: Path) -> Goal:
         if not isinstance(raw, dict):
             raise ValueError("goal must be a JSON object")
         validate_goal_identity(raw)
-        max_attempts = raw["max_attempts"]
-        allow_paid = raw["allow_paid_generation"]
-        allowed_paths = tuple(normalized_allowed_path(item) for item in raw["allowed_paths"])
-        if not allowed_paths or len(set(allowed_paths)) != len(allowed_paths):
-            raise ValueError("allowed_paths must be non-empty and unique")
+        allowed_paths = _validate_goal_allowed_paths(raw["allowed_paths"])
         commands = parse_verification_commands(raw["verification_commands"])
         stop_conditions = parse_string_list(raw["stop_conditions"], "stop_conditions")
-        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts <= 0:
-            raise ValueError("max_attempts must be a positive integer")
-        if raw["auth_type"] not in AUTH_TYPES:
-            raise ValueError("auth_type is unsupported")
-        if not isinstance(raw["credential_identity"], str) or not CREDENTIAL_IDENTITY_PATTERN.fullmatch(
-            raw["credential_identity"]
-        ):
-            raise ValueError("credential_identity must be a non-secret reviewed identity")
-        if not isinstance(allow_paid, bool):
-            raise ValueError("allow_paid_generation must be boolean")
-        if not isinstance(raw["sandbox_image"], str) or not IMAGE_PATTERN.fullmatch(raw["sandbox_image"]):
-            raise ValueError("sandbox_image must be an immutable image@sha256 digest reference")
+        _validate_goal_constraints(raw)
     except (KeyError, TypeError, ValueError) as error:
         raise PreflightError("invalid_goal", str(error)) from error
     return Goal(
@@ -269,10 +279,10 @@ def parse_goal(path: Path) -> Goal:
         allowed_paths=allowed_paths,
         verification_commands=commands,
         stop_conditions=stop_conditions,
-        max_attempts=max_attempts,
+        max_attempts=raw["max_attempts"],
         auth_type=raw["auth_type"],
         credential_identity=raw["credential_identity"].strip(),
-        allow_paid_generation=allow_paid,
+        allow_paid_generation=raw["allow_paid_generation"],
         sandbox_image=raw["sandbox_image"],
     )
 
@@ -454,6 +464,22 @@ def ensure_owner_controlled_file(path: Path, classification: str) -> None:
         raise PreflightError(classification, f"{path.name} must be owner-controlled and not writable by others")
 
 
+def is_private_primary_group(gid: int) -> bool:
+    current_name = pwd.getpwuid(os.getuid()).pw_name
+    primary_users = {entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == gid}
+    listed_members = set(grp.getgrgid(gid).gr_mem)
+    return primary_users <= {current_name} and listed_members <= {current_name}
+
+
+def is_group_writable_safe(target_metadata: os.stat_result) -> bool:
+    group_writable = bool(target_metadata.st_mode & 0o020)
+    if not group_writable:
+        return True
+    if target_metadata.st_uid == os.getuid() and target_metadata.st_gid == os.getgid():
+        return is_private_primary_group(target_metadata.st_gid)
+    return False
+
+
 def resolve_controlled_executable(path: Path, label: str, classification: str) -> Path:
     """Resolve a launcher symlink without weakening policy-file checks."""
     try:
@@ -465,14 +491,7 @@ def resolve_controlled_executable(path: Path, label: str, classification: str) -
     allowed_owners = {0, os.getuid()}
     if link_metadata.st_uid not in allowed_owners or target_metadata.st_uid not in allowed_owners:
         raise PreflightError(classification, f"{label} executable must be owned by the lane user or root")
-    group_writable = bool(target_metadata.st_mode & 0o020)
-    private_primary_group = False
-    if group_writable and target_metadata.st_uid == os.getuid() and target_metadata.st_gid == os.getgid():
-        current_name = pwd.getpwuid(os.getuid()).pw_name
-        primary_users = {entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == target_metadata.st_gid}
-        listed_members = set(grp.getgrgid(target_metadata.st_gid).gr_mem)
-        private_primary_group = primary_users <= {current_name} and listed_members <= {current_name}
-    unsafe_permissions = bool(target_metadata.st_mode & 0o002) or (group_writable and not private_primary_group)
+    unsafe_permissions = bool(target_metadata.st_mode & 0o002) or not is_group_writable_safe(target_metadata)
     if not resolved.is_file() or unsafe_permissions or not os.access(resolved, os.X_OK):
         raise PreflightError(
             classification,
@@ -528,28 +547,39 @@ def is_narrow_allow(rule: dict[str, object], deny_priority: int) -> bool:
     return rule.get("decision") == "allow" and (narrow_names or narrow_mcp) and policy_priority(rule) > deny_priority
 
 
-def validate_policy_rules(rules: list[dict[str, object]]) -> None:
-    default_deny = catch_all_deny(rules)
-    deny_priority = policy_priority(default_deny)
-    for rule in rules:
-        if rule.get("decision") not in {"allow", "deny", "ask_user"}:
-            raise PreflightError("invalid_policy", "policy decision is unsupported")
-        if "*" in policy_tool_names(rule) and rule is not default_deny:
-            raise PreflightError("invalid_policy", "only the unconditional deny may match every tool")
-        mcp_name = rule.get("mcpName")
-        if isinstance(mcp_name, str) and "*" in mcp_name:
-            raise PreflightError("invalid_policy", "wildcard MCP rules are forbidden")
-        policy_priority(rule)
-        if rule.get("decision") == "allow" and not is_narrow_allow(rule, deny_priority):
+def _has_shell_tool(names: set[str]) -> bool:
+    return any(name.lower() == "shelltool" or name.lower().startswith("run_shell_command") for name in names)
+
+
+def _validate_policy_rule(
+    rule: dict[str, object],
+    default_deny: dict[str, object],
+    deny_priority: int,
+) -> None:
+    if rule.get("decision") not in {"allow", "deny", "ask_user"}:
+        raise PreflightError("invalid_policy", "policy decision is unsupported")
+    tool_names = policy_tool_names(rule)
+    if "*" in tool_names and rule is not default_deny:
+        raise PreflightError("invalid_policy", "only the unconditional deny may match every tool")
+    mcp_name = rule.get("mcpName")
+    if isinstance(mcp_name, str) and "*" in mcp_name:
+        raise PreflightError("invalid_policy", "wildcard MCP rules are forbidden")
+    policy_priority(rule)
+    if rule.get("decision") == "allow":
+        if not is_narrow_allow(rule, deny_priority):
             raise PreflightError("invalid_policy", "every allow must be narrow and above the catch-all deny")
-        if rule.get("decision") == "allow" and any(
-            name.lower() == "shelltool" or name.lower().startswith("run_shell_command")
-            for name in policy_tool_names(rule)
-        ):
+        if _has_shell_tool(tool_names):
             raise PreflightError(
                 "invalid_policy",
                 "process-execution tools are forbidden because the worker carries billing credentials",
             )
+
+
+def validate_policy_rules(rules: list[dict[str, object]]) -> None:
+    default_deny = catch_all_deny(rules)
+    deny_priority = policy_priority(default_deny)
+    for rule in rules:
+        _validate_policy_rule(rule, default_deny, deny_priority)
     if not any(is_narrow_allow(rule, deny_priority) for rule in rules):
         raise PreflightError("invalid_policy", "policy requires a narrow allow above the catch-all deny")
 
@@ -614,27 +644,32 @@ def build_system_settings(provider: str, image: str, auth_type: str) -> bytes:
     return (json.dumps(settings, indent=2, sort_keys=True) + "\n").encode()
 
 
+def _ensure_owner_only_dir(directory: Path, name: str) -> None:
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
+        raise PreflightError("invalid_path", f"{name} must be owner-only")
+
+
+def _validate_sandbox_provider(provider: str) -> None:
+    if shutil.which(provider) is None:
+        raise PreflightError("sandbox_unavailable", f"sandbox provider is unavailable: {provider}")
+    if provider == "runsc" and shutil.which("docker") is None:
+        raise PreflightError("sandbox_unavailable", "runsc requires Docker")
+
+
 def prepare_runtime(
     state_dir: Path,
     provider: str,
     goal: Goal,
     cwd: Path,
 ) -> tuple[dict[str, str], Path, Path]:
-    if shutil.which(provider) is None:
-        raise PreflightError("sandbox_unavailable", f"sandbox provider is unavailable: {provider}")
-    if provider == "runsc" and shutil.which("docker") is None:
-        raise PreflightError("sandbox_unavailable", "runsc requires Docker")
+    _validate_sandbox_provider(provider)
     gemini_home = state_dir / "gemini-home"
     tmp_dir = state_dir / "tmp"
-    gemini_home.mkdir(mode=0o700, exist_ok=True)
-    tmp_dir.mkdir(mode=0o700, exist_ok=True)
-    for directory in (gemini_home, tmp_dir):
-        if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
-            raise PreflightError("invalid_path", f"{directory.name} must be owner-only")
+    _ensure_owner_only_dir(gemini_home, gemini_home.name)
+    _ensure_owner_only_dir(tmp_dir, tmp_dir.name)
     user_settings_dir = gemini_home / ".gemini"
-    user_settings_dir.mkdir(mode=0o700, exist_ok=True)
-    if user_settings_dir.stat().st_uid != os.getuid() or user_settings_dir.stat().st_mode & 0o077:
-        raise PreflightError("invalid_path", ".gemini must be owner-only")
+    _ensure_owner_only_dir(user_settings_dir, ".gemini")
     system_settings = user_settings_dir / "system-settings.json"
     settings_content = build_system_settings(provider, goal.sandbox_image, goal.auth_type)
     persist_exact_private(system_settings, settings_content, "runtime_mismatch")
@@ -773,31 +808,40 @@ def inspect_writable_path(path: Path, deadline: float) -> os.stat_result:
     return metadata
 
 
-def validate_writable_tree(root: Path, deadline: float, allow_missing: bool = False) -> None:
+def _inspect_writable_root_entry(root: Path, deadline: float, allow_missing: bool) -> os.stat_result | None:
     try:
-        root_metadata = root.lstat()
+        root.lstat()
     except FileNotFoundError:
         if allow_missing:
-            return
+            return None
         raise PreflightError("invalid_goal", f"allowed path must already exist: {root}") from None
     except OSError as error:
         raise PreflightError("unsafe_writable_path", f"cannot safely inspect allowed writable path: {root}") from error
-    root_metadata = inspect_writable_path(root, deadline)
+    return inspect_writable_path(root, deadline)
+
+
+def _walk_writable_dir(root: Path, deadline: float) -> None:
+    def walk_error(error: OSError) -> None:
+        raise PreflightError("unsafe_writable_path", f"cannot safely walk allowed writable tree: {root}") from error
+
+    for current_root, directories, files in os.walk(
+        root,
+        topdown=True,
+        onerror=walk_error,
+        followlinks=False,
+    ):
+        current = Path(current_root)
+        inspect_writable_path(current, deadline)
+        for name in directories + files:
+            inspect_writable_path(current / name, deadline)
+
+
+def validate_writable_tree(root: Path, deadline: float, allow_missing: bool = False) -> None:
+    root_metadata = _inspect_writable_root_entry(root, deadline, allow_missing)
+    if root_metadata is None:
+        return
     if stat.S_ISDIR(root_metadata.st_mode):
-
-        def walk_error(error: OSError) -> None:
-            raise PreflightError("unsafe_writable_path", f"cannot safely walk allowed writable tree: {root}") from error
-
-        for current_root, directories, files in os.walk(
-            root,
-            topdown=True,
-            onerror=walk_error,
-            followlinks=False,
-        ):
-            current = Path(current_root)
-            inspect_writable_path(current, deadline)
-            for name in directories + files:
-                inspect_writable_path(current / name, deadline)
+        _walk_writable_dir(root, deadline)
     final_metadata = inspect_writable_path(root, deadline)
     if (root_metadata.st_dev, root_metadata.st_ino) != (final_metadata.st_dev, final_metadata.st_ino):
         raise PreflightError("unsafe_writable_path", f"allowed writable root changed during inspection: {root}")
@@ -806,6 +850,58 @@ def validate_writable_tree(root: Path, deadline: float, allow_missing: bool = Fa
 def validate_goal_writable_paths(cwd: Path, goal: Goal, deadline: float, allow_missing: bool = False) -> None:
     for relative in goal.allowed_paths:
         validate_writable_tree(cwd / relative, deadline, allow_missing)
+
+
+def _install_provider_guard(guard_dir: Path, sandbox_provider: str, content: bytes) -> None:
+    guard_dir.mkdir(mode=0o700, exist_ok=True)
+    if guard_dir.stat().st_uid != os.getuid() or guard_dir.stat().st_mode & 0o077:
+        raise PreflightError("runtime_mismatch", "provider guard directory must be owner-only")
+    guard = guard_dir / ("docker" if sandbox_provider == "runsc" else sandbox_provider)
+    persist_exact_executable(guard, content)
+
+
+def _resolve_allowed_paths(
+    goal: Goal,
+    cwd: Path,
+    common_dir: Path,
+    deadline: float,
+) -> list[str]:
+    allowed_paths: list[str] = []
+    for relative in goal.allowed_paths:
+        source = cwd / relative
+        validate_writable_tree(source, deadline)
+        candidate = source.resolve()
+        if not path_is_within(candidate, cwd.resolve()) or not candidate.exists():
+            raise PreflightError("invalid_goal", f"allowed path must already exist inside the checkout: {relative}")
+        if candidate == common_dir or path_is_within(candidate, common_dir):
+            raise PreflightError("invalid_goal", f"allowed path resolves into Git control metadata: {relative}")
+        allowed_paths.append(str(candidate))
+    return allowed_paths
+
+
+def _build_sandbox_mounts(git_state: GitState, environment: dict[str, str]) -> str:
+    settings_dir = Path(environment["GEMINI_CLI_HOME"]) / ".gemini"
+    protected_settings = [
+        Path(environment["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]),
+        settings_dir / "settings.json",
+        settings_dir / "trustedFolders.json",
+        settings_dir / "control-policy.toml",
+    ]
+    protected_mounts = [(Path(git_state.common_dir), Path(git_state.common_dir))]
+    protected_mounts.extend((path, path) for path in protected_settings)
+    container_settings = Path("/") / "home" / "node" / ".gemini"
+    protected_mounts.extend((path, container_settings / path.name) for path in protected_settings)
+    if any("," in str(path) for mount in protected_mounts for path in mount):
+        raise PreflightError("invalid_path", "control paths containing commas are unsupported")
+    return ",".join(f"{source}:{target}:ro" for source, target in protected_mounts)
+
+
+def _configure_live_proxy(git_state: GitState, proxy_content: bytes, environment: dict[str, str]) -> None:
+    proxy_dir = Path(git_state.common_dir) / "orchestrate-gemini"
+    proxy_dir.mkdir(mode=0o700, exist_ok=True)
+    proxy = proxy_dir / "api-egress-proxy.mjs"
+    persist_exact_executable(proxy, proxy_content)
+    environment["GEMINI_SANDBOX_PROXY_COMMAND"] = f"node {proxy}"
 
 
 def configure_provider_guard(
@@ -826,22 +922,9 @@ def configure_provider_guard(
     except OSError as error:
         raise PreflightError("runtime_mismatch", f"cannot read bundled runtime helper: {error}") from error
     guard_dir = args.state_dir / "provider-guard"
-    guard_dir.mkdir(mode=0o700, exist_ok=True)
-    if guard_dir.stat().st_uid != os.getuid() or guard_dir.stat().st_mode & 0o077:
-        raise PreflightError("runtime_mismatch", "provider guard directory must be owner-only")
-    guard = guard_dir / ("docker" if args.sandbox_provider == "runsc" else args.sandbox_provider)
-    persist_exact_executable(guard, guard_content)
-    allowed_paths: list[str] = []
+    _install_provider_guard(guard_dir, args.sandbox_provider, guard_content)
     common_dir = Path(git_state.common_dir).resolve()
-    for relative in goal.allowed_paths:
-        source = args.cwd / relative
-        validate_writable_tree(source, deadline)
-        candidate = source.resolve()
-        if not path_is_within(candidate, args.cwd.resolve()) or not candidate.exists():
-            raise PreflightError("invalid_goal", f"allowed path must already exist inside the checkout: {relative}")
-        if candidate == common_dir or path_is_within(candidate, common_dir):
-            raise PreflightError("invalid_goal", f"allowed path resolves into Git control metadata: {relative}")
-        allowed_paths.append(str(candidate))
+    allowed_paths = _resolve_allowed_paths(goal, args.cwd, common_dir, deadline)
     environment.update(
         {
             "ORCHESTRATE_GEMINI_ALLOWED_PATHS": json.dumps(allowed_paths, separators=(",", ":")),
@@ -854,26 +937,9 @@ def configure_provider_guard(
             "PATH": f"{guard_dir}:{environment.get('PATH', '')}",
         }
     )
-    settings_dir = Path(environment["GEMINI_CLI_HOME"]) / ".gemini"
-    protected_settings = [
-        Path(environment["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]),
-        settings_dir / "settings.json",
-        settings_dir / "trustedFolders.json",
-        settings_dir / "control-policy.toml",
-    ]
-    protected_mounts = [(Path(git_state.common_dir), Path(git_state.common_dir))]
-    protected_mounts.extend((path, path) for path in protected_settings)
-    container_settings = Path("/") / "home" / "node" / ".gemini"
-    protected_mounts.extend((path, container_settings / path.name) for path in protected_settings)
-    if any("," in str(path) for mount in protected_mounts for path in mount):
-        raise PreflightError("invalid_path", "control paths containing commas are unsupported")
-    environment["SANDBOX_MOUNTS"] = ",".join(f"{source}:{target}:ro" for source, target in protected_mounts)
+    environment["SANDBOX_MOUNTS"] = _build_sandbox_mounts(git_state, environment)
     if live_mode:
-        proxy_dir = Path(git_state.common_dir) / "orchestrate-gemini"
-        proxy_dir.mkdir(mode=0o700, exist_ok=True)
-        proxy = proxy_dir / "api-egress-proxy.mjs"
-        persist_exact_executable(proxy, proxy_content)
-        environment["GEMINI_SANDBOX_PROXY_COMMAND"] = f"node {proxy}"
+        _configure_live_proxy(git_state, proxy_content, environment)
 
 
 def container_filter(label: str) -> str:
@@ -1045,6 +1111,17 @@ def signal_process(pid: int, signum: signal.Signals) -> bool:
     return True
 
 
+def _parse_ps_line(raw_line: str) -> tuple[int, ProcessInfo] | None:
+    fields = raw_line.split(maxsplit=4)
+    if len(fields) != 5:
+        return None
+    try:
+        pid, parent_pid, process_group_id = (int(value) for value in fields[:3])
+    except ValueError:
+        return None
+    return pid, ProcessInfo(parent_pid, process_group_id, fields[3], fields[4])
+
+
 def process_snapshot(timeout_seconds: float = 2) -> ProcessInventory:
     ps = shutil.which("ps")
     if not ps or timeout_seconds <= 0:
@@ -1062,16 +1139,12 @@ def process_snapshot(timeout_seconds: float = 2) -> ProcessInventory:
     snapshot: dict[int, ProcessInfo] = {}
     complete = completed.returncode == 0
     for raw_line in completed.stdout.splitlines():
-        fields = raw_line.split(maxsplit=4)
-        if len(fields) != 5:
+        parsed = _parse_ps_line(raw_line)
+        if parsed is None:
             complete = False
             continue
-        try:
-            pid, parent_pid, process_group_id = (int(value) for value in fields[:3])
-        except ValueError:
-            complete = False
-            continue
-        snapshot[pid] = ProcessInfo(parent_pid, process_group_id, fields[3], fields[4])
+        pid, info = parsed
+        snapshot[pid] = info
     return ProcessInventory(snapshot, complete and bool(snapshot))
 
 
@@ -1112,6 +1185,19 @@ def remember_process_tree(
         tracked_processes[pid] = ProcessIdentity(snapshot[pid].started_at)
 
 
+def _inspect_tracked_process(
+    pid: int,
+    identity: ProcessIdentity,
+    inventory: ProcessInventory,
+) -> tuple[bool, bool]:
+    info = inventory.processes.get(pid)
+    if info is None:
+        return False, not inventory.complete
+    if info.started_at != identity.started_at or info.state.startswith("Z"):
+        return False, False
+    return True, False
+
+
 def tracked_descendant_state(
     root_pid: int,
     tracked_processes: dict[int, ProcessIdentity],
@@ -1122,13 +1208,11 @@ def tracked_descendant_state(
     for pid, identity in tracked_processes.items():
         if pid == root_pid:
             continue
-        info = inventory.processes.get(pid)
-        if info is None:
-            identity_unknown = identity_unknown or not inventory.complete
-            continue
-        if info.started_at != identity.started_at or info.state.startswith("Z"):
-            continue
-        alive.append(pid)
+        is_alive, is_unknown = _inspect_tracked_process(pid, identity, inventory)
+        if is_alive:
+            alive.append(pid)
+        if is_unknown:
+            identity_unknown = True
     if alive:
         return "alive", sorted(alive)
     return ("unknown" if identity_unknown else "absent"), []
@@ -1201,7 +1285,7 @@ def harvest_process_tree(
     return harvested, group_state, descendant_state, alive
 
 
-def recover_stale_worker(state_dir: Path) -> dict[str, Any] | None:
+def _load_stale_worker_lease(state_dir: Path) -> tuple[Path, dict[str, Any], int, int, str] | None:
     lease_path = state_dir / "lease.json"
     if not lease_path.is_file():
         return None
@@ -1214,16 +1298,28 @@ def recover_stale_worker(state_dir: Path) -> dict[str, Any] | None:
     pid = lease.get("worker_pid")
     process_group_id = lease.get("process_group_id")
     started_at = lease.get("worker_started_at")
-    if not isinstance(pid, int) or not isinstance(process_group_id, int):
+    if not isinstance(pid, int) or not isinstance(process_group_id, int) or not isinstance(started_at, str):
         raise PreflightError("stale_worker_unresolved", "prior worker lease has invalid process identity")
+    return lease_path, lease, pid, process_group_id, started_at
+
+
+def _mark_lease_absent(lease_path: Path, lease: dict[str, Any]) -> None:
+    lease["worker_state"] = "absent"
+    lease["reconciled_at"] = utc_now()
+    write_atomic_private(lease_path, lease)
+
+
+def recover_stale_worker(state_dir: Path) -> dict[str, Any] | None:
+    loaded = _load_stale_worker_lease(state_dir)
+    if loaded is None:
+        return None
+    lease_path, lease, pid, process_group_id, started_at = loaded
     inventory = process_snapshot(CLEANUP_GRACE_SECONDS)
     info = inventory.processes.get(pid)
     if info is None and inventory.complete:
-        lease["worker_state"] = "absent"
-        lease["reconciled_at"] = utc_now()
-        write_atomic_private(lease_path, lease)
+        _mark_lease_absent(lease_path, lease)
         return {"worker_pid": pid, "action": "already_absent"}
-    if not isinstance(started_at, str) or info is None or info.started_at != started_at:
+    if info is None or info.started_at != started_at:
         raise PreflightError("stale_worker_unresolved", "cannot prove the stale worker process identity")
     tracked = {pid: ProcessIdentity(started_at)}
     remember_process_tree(pid, inventory.processes, tracked)
@@ -1235,9 +1331,7 @@ def recover_stale_worker(state_dir: Path) -> dict[str, Any] | None:
     )
     if group_state != "absent" or descendant_state != "absent":
         raise PreflightError("stale_worker_unresolved", f"stale worker survivors remain: {alive}")
-    lease["worker_state"] = "absent"
-    lease["reconciled_at"] = utc_now()
-    write_atomic_private(lease_path, lease)
+    _mark_lease_absent(lease_path, lease)
     return {"worker_pid": pid, "action": "harvested"}
 
 
@@ -1264,6 +1358,17 @@ def termination_signal_handlers() -> Iterator[None]:
                 signal.signal(signum, handler)
 
 
+def _check_output_heartbeat(
+    output_paths: tuple[Path, Path],
+    last_output_sizes: tuple[int, int],
+    on_heartbeat: Callable[[], None] | None,
+) -> tuple[int, int]:
+    output_sizes = (output_paths[0].stat().st_size, output_paths[1].stat().st_size)
+    if on_heartbeat and output_sizes != last_output_sizes:
+        on_heartbeat()
+    return output_sizes
+
+
 def monitor_process(
     process: subprocess.Popen[bytes],
     process_deadline: float,
@@ -1271,7 +1376,7 @@ def monitor_process(
     on_heartbeat: Callable[[], None] | None,
     output_paths: tuple[Path, Path],
 ) -> tuple[int, bool, int | None]:
-    last_output_sizes = tuple(path.stat().st_size for path in output_paths)
+    last_output_sizes = (output_paths[0].stat().st_size, output_paths[1].stat().st_size)
     try:
         while True:
             returncode = process.poll()
@@ -1281,12 +1386,8 @@ def monitor_process(
             if inventory is None:
                 return 124, True, None
             remember_process_tree(process.pid, inventory.processes, tracked_processes)
-            output_sizes = tuple(path.stat().st_size for path in output_paths)
-            if on_heartbeat and output_sizes != last_output_sizes:
-                on_heartbeat()
-                last_output_sizes = output_sizes
-            now = time.monotonic()
-            remaining = process_deadline - now
+            last_output_sizes = _check_output_heartbeat(output_paths, last_output_sizes, on_heartbeat)
+            remaining = process_deadline - time.monotonic()
             if remaining <= 0:
                 return 124, True, None
             time.sleep(min(POLL_INTERVAL_SECONDS, remaining))
@@ -1296,6 +1397,33 @@ def monitor_process(
 
 def launch_error_result(message: str) -> ProcessResult:
     return ProcessResult(127, None, None, False, False, "absent", "absent", [], [], None, message)
+
+
+def _cleanup_and_harvest_process(
+    process: subprocess.Popen[bytes],
+    tracked_processes: dict[int, ProcessIdentity],
+    cleanup_deadline: float,
+    current_returncode: int,
+) -> tuple[bool, str, str, list[int], int]:
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, signal.SIG_IGN)
+    final_cleanup_deadline = min(cleanup_deadline, time.monotonic() + CLEANUP_GRACE_SECONDS)
+    survivors_harvested, group_state, descendant_state, alive_descendants = harvest_process_tree(
+        process.pid,
+        process.pid,
+        tracked_processes,
+        final_cleanup_deadline,
+    )
+    if process.poll() is None:
+        signal_process(process.pid, signal.SIGKILL)
+    wait_remaining = final_cleanup_deadline - time.monotonic()
+    returncode = current_returncode
+    if wait_remaining > 0:
+        try:
+            returncode = process.wait(timeout=wait_remaining)
+        except subprocess.TimeoutExpired:
+            returncode = process.poll() if process.poll() is not None else returncode
+    return survivors_harvested, group_state, descendant_state, alive_descendants, returncode
 
 
 def run_process(
@@ -1341,23 +1469,9 @@ def run_process(
                     (stdout_path, stderr_path),
                 )
             finally:
-                for signum in (signal.SIGINT, signal.SIGTERM):
-                    signal.signal(signum, signal.SIG_IGN)
-                final_cleanup_deadline = min(cleanup_deadline, time.monotonic() + CLEANUP_GRACE_SECONDS)
-                survivors_harvested, group_state, descendant_state, alive_descendants = harvest_process_tree(
-                    process.pid,
-                    process.pid,
-                    tracked_processes,
-                    final_cleanup_deadline,
+                survivors_harvested, group_state, descendant_state, alive_descendants, returncode = (
+                    _cleanup_and_harvest_process(process, tracked_processes, cleanup_deadline, returncode)
                 )
-                if process.poll() is None:
-                    signal_process(process.pid, signal.SIGKILL)
-                wait_remaining = final_cleanup_deadline - time.monotonic()
-                if wait_remaining > 0:
-                    try:
-                        returncode = process.wait(timeout=wait_remaining)
-                    except subprocess.TimeoutExpired:
-                        returncode = process.poll() if process.poll() is not None else returncode
     return ProcessResult(
         returncode,
         process.pid,
@@ -1450,11 +1564,11 @@ def reject_workspace_runtime_config(cwd: Path) -> None:
     )
 
 
-def reject_repository_attributes(cwd: Path, common_dir: Path, deadline: float) -> None:
+def _check_walk_attributes(cwd: Path, deadline: float) -> None:
     def walk_error(error: OSError) -> None:
         raise PreflightError("unsafe_git_attributes", "cannot prove repository attribute safety") from error
 
-    for current_root, directories, files in os.walk(cwd, topdown=True, onerror=walk_error, followlinks=False):
+    for _root, directories, files in os.walk(cwd, topdown=True, onerror=walk_error, followlinks=False):
         if time.monotonic() >= deadline:
             raise PreflightError("timed_out", "repository attribute inspection exceeded the attempt deadline")
         if ".gitattributes" in directories or ".gitattributes" in files:
@@ -1462,6 +1576,9 @@ def reject_repository_attributes(cwd: Path, common_dir: Path, deadline: float) -
                 "unsafe_git_attributes",
                 "repository .gitattributes files are unsupported because host Git filters may execute code",
             )
+
+
+def _check_indexed_attributes(cwd: Path, deadline: float) -> None:
     tracked = git_output(cwd, "ls-files", "-z", text=False, deadline=deadline)
     assert isinstance(tracked, bytes)
     if any(path.rsplit(b"/", 1)[-1] == b".gitattributes" for path in tracked.split(b"\0") if path):
@@ -1469,6 +1586,9 @@ def reject_repository_attributes(cwd: Path, common_dir: Path, deadline: float) -
             "unsafe_git_attributes",
             "indexed .gitattributes files are unsupported because host Git filters may execute code",
         )
+
+
+def _check_info_attributes(common_dir: Path) -> None:
     try:
         (common_dir / "info" / "attributes").lstat()
     except FileNotFoundError:
@@ -1479,6 +1599,31 @@ def reject_repository_attributes(cwd: Path, common_dir: Path, deadline: float) -
         "unsafe_git_attributes",
         "Git info/attributes is unsupported because host Git filters may execute code",
     )
+
+
+def reject_repository_attributes(cwd: Path, common_dir: Path, deadline: float) -> None:
+    _check_walk_attributes(cwd, deadline)
+    _check_indexed_attributes(cwd, deadline)
+    _check_info_attributes(common_dir)
+
+
+def _validate_git_checkout_state(
+    cwd: Path,
+    goal: Goal,
+    head: str,
+    status_bytes: bytes,
+    resume_requested: bool,
+    deadline: float | None,
+) -> None:
+    if not resume_requested and head != goal.base_sha:
+        raise PreflightError("base_mismatch", "checkout HEAD does not match goal base_sha")
+    if not resume_requested and status_bytes:
+        raise PreflightError("git_dirty", "checkout must be clean before dispatch")
+    if resume_requested:
+        paths = changed_paths(cwd, goal, deadline)
+        escaped = [path for path in paths if not path_allowed(path, goal.allowed_paths)]
+        if escaped:
+            raise PreflightError("scope_violation", f"resume checkout escaped goal scope: {', '.join(escaped)}")
 
 
 def inspect_git(cwd: Path, goal: Goal, resume_requested: bool = False, deadline: float | None = None) -> GitState:
@@ -1503,15 +1648,7 @@ def inspect_git(cwd: Path, goal: Goal, resume_requested: bool = False, deadline:
         deadline=deadline,
     )
     assert isinstance(status_bytes, bytes)
-    if not resume_requested and head != goal.base_sha:
-        raise PreflightError("base_mismatch", "checkout HEAD does not match goal base_sha")
-    if not resume_requested and status_bytes:
-        raise PreflightError("git_dirty", "checkout must be clean before dispatch")
-    if resume_requested:
-        paths = changed_paths(cwd, goal, deadline)
-        escaped = [path for path in paths if not path_allowed(path, goal.allowed_paths)]
-        if escaped:
-            raise PreflightError("scope_violation", f"resume checkout escaped goal scope: {', '.join(escaped)}")
+    _validate_git_checkout_state(cwd, goal, head, status_bytes, resume_requested, deadline)
     state = "in_scope_changes" if status_bytes or head != goal.base_sha else "clean"
     return GitState(head=head, common_dir=str(common), status=state)
 
@@ -1700,25 +1837,16 @@ def load_stream_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
-def validate_event_shape(event: dict[str, Any]) -> None:
-    event_type = event.get("type")
-    allowed_fields = {
-        "init": {"type", "timestamp", "session_id", "model"},
-        "message": {"type", "timestamp", "role", "content", "delta"},
-        "tool_use": {"type", "timestamp", "tool_name", "tool_id", "parameters"},
-        "tool_result": {"type", "timestamp", "tool_id", "status", "output", "error"},
-        "error": {"type", "timestamp", "severity", "message"},
-        "result": {"type", "timestamp", "status", "error", "stats"},
-    }
-    if event_type not in allowed_fields or not set(event) <= allowed_fields[event_type]:
-        raise PreflightError("invalid_output", "Gemini emitted an unknown or malformed stream event")
-    timestamp = event.get("timestamp")
+def _validate_event_timestamp(timestamp: object) -> None:
     if not is_nonempty_string(timestamp):
         raise PreflightError("invalid_output", "Gemini stream event lacks a timestamp")
     try:
         datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
     except ValueError as error:
         raise PreflightError("invalid_output", "Gemini stream timestamp is invalid") from error
+
+
+def _validate_event_type_fields(event_type: str, event: dict[str, Any]) -> None:
     required_strings = {
         "init": ("session_id", "model"),
         "message": ("role", "content"),
@@ -1739,6 +1867,22 @@ def validate_event_shape(event: dict[str, Any]) -> None:
         raise PreflightError("invalid_output", "Gemini tool_use parameters are invalid")
 
 
+def validate_event_shape(event: dict[str, Any]) -> None:
+    event_type = event.get("type")
+    allowed_fields = {
+        "init": {"type", "timestamp", "session_id", "model"},
+        "message": {"type", "timestamp", "role", "content", "delta"},
+        "tool_use": {"type", "timestamp", "tool_name", "tool_id", "parameters"},
+        "tool_result": {"type", "timestamp", "tool_id", "status", "output", "error"},
+        "error": {"type", "timestamp", "severity", "message"},
+        "result": {"type", "timestamp", "status", "error", "stats"},
+    }
+    if event_type not in allowed_fields or not set(event) <= allowed_fields[event_type]:
+        raise PreflightError("invalid_output", "Gemini emitted an unknown or malformed stream event")
+    _validate_event_timestamp(event.get("timestamp"))
+    _validate_event_type_fields(str(event_type), event)
+
+
 def stream_terminals(events: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     init_events = [event for event in events if event.get("type") == "init"]
     result_events = [event for event in events if event.get("type") == "result"]
@@ -1747,6 +1891,30 @@ def stream_terminals(events: list[dict[str, Any]]) -> tuple[dict[str, Any], dict
     if events[0].get("type") != "init" or events[-1].get("type") != "result":
         raise PreflightError("invalid_output", "Gemini stream must begin with init and end with result")
     return init_events[0], result_events[0]
+
+
+def _check_stream_tool_lifecycle(events: list[dict[str, Any]]) -> None:
+    tool_ids = {str(event["tool_id"]) for event in events if event.get("type") == "tool_use"}
+    result_ids = {str(event["tool_id"]) for event in events if event.get("type") == "tool_result"}
+    if tool_ids != result_ids:
+        raise PreflightError("invalid_output", "Gemini stream has unmatched tool lifecycle events")
+
+
+def _check_stream_model_stats(result: dict[str, Any], requested_model: str, validation_mode: bool) -> None:
+    stats = result.get("stats")
+    models = stats.get("models") if isinstance(stats, dict) else None
+    if not validation_mode and (not isinstance(models, dict) or set(models) != {requested_model}):
+        raise PreflightError(
+            "model_mismatch",
+            "result statistics do not prove exclusive use of the requested model",
+        )
+
+
+def _has_assistant_response(events: list[dict[str, Any]]) -> bool:
+    responses = [
+        event.get("content") for event in events if event.get("type") == "message" and event.get("role") == "assistant"
+    ]
+    return any(is_nonempty_string(response) for response in responses)
 
 
 def validate_stream_content(
@@ -1759,22 +1927,10 @@ def validate_stream_content(
         raise PreflightError("gemini_stream_error", "Gemini emitted a fatal stream error")
     if result.get("status") != "success":
         raise PreflightError("gemini_status_error", "Gemini terminal result was not successful")
-    responses = [
-        event.get("content") for event in events if event.get("type") == "message" and event.get("role") == "assistant"
-    ]
-    if not any(is_nonempty_string(response) for response in responses):
+    if not _has_assistant_response(events):
         raise PreflightError("no_output", "Gemini emitted no non-empty assistant response")
-    tool_ids = {str(event["tool_id"]) for event in events if event.get("type") == "tool_use"}
-    result_ids = {str(event["tool_id"]) for event in events if event.get("type") == "tool_result"}
-    if tool_ids != result_ids:
-        raise PreflightError("invalid_output", "Gemini stream has unmatched tool lifecycle events")
-    stats = result.get("stats")
-    models = stats.get("models") if isinstance(stats, dict) else None
-    if not validation_mode and (not isinstance(models, dict) or set(models) != {requested_model}):
-        raise PreflightError(
-            "model_mismatch",
-            "result statistics do not prove exclusive use of the requested model",
-        )
+    _check_stream_tool_lifecycle(events)
+    _check_stream_model_stats(result, requested_model, validation_mode)
 
 
 def parse_stream(path: Path, requested_model: str, validation_mode: bool) -> dict[str, str]:
@@ -1829,6 +1985,31 @@ def hash_file(path: Path, deadline: float) -> str:
     return digest.hexdigest()
 
 
+def snapshot_path_entry(path: Path, deadline: float) -> str:
+    metadata = path.lstat()
+    mode = metadata.st_mode & 0o7777
+    if path.is_symlink():
+        return f"symlink:{mode:o}:{os.readlink(path)}"
+    if path.is_file():
+        return f"file:{mode:o}:{metadata.st_size}:{hash_file(path, deadline)}"
+    if path.is_dir():
+        return f"dir:{mode:o}"
+    return f"special:{mode:o}:{metadata.st_rdev}"
+
+
+def _snapshot_directory_entries(
+    root: Path,
+    current: Path,
+    entries: list[str],
+    deadline: float,
+    snapshot: dict[str, str],
+) -> None:
+    for name in sorted(entries):
+        path = current / name
+        relative = path.relative_to(root).as_posix()
+        snapshot[relative] = snapshot_path_entry(path, deadline)
+
+
 def filesystem_snapshot(root: Path, deadline: float) -> dict[str, str]:
     snapshot: dict[str, str] = {}
     for current_root, directories, files in os.walk(root, topdown=True, followlinks=False):
@@ -1837,20 +2018,15 @@ def filesystem_snapshot(root: Path, deadline: float) -> dict[str, str]:
         current = Path(current_root)
         if current == root:
             directories[:] = [name for name in directories if name != ".git"]
-        for name in sorted(directories + files):
-            path = current / name
-            relative = path.relative_to(root).as_posix()
-            metadata = path.lstat()
-            mode = metadata.st_mode & 0o7777
-            if path.is_symlink():
-                snapshot[relative] = f"symlink:{mode:o}:{os.readlink(path)}"
-            elif path.is_file():
-                snapshot[relative] = f"file:{mode:o}:{metadata.st_size}:{hash_file(path, deadline)}"
-            elif path.is_dir():
-                snapshot[relative] = f"dir:{mode:o}"
-            else:
-                snapshot[relative] = f"special:{mode:o}:{metadata.st_rdev}"
+        _snapshot_directory_entries(root, current, directories + files, deadline, snapshot)
     return snapshot
+
+
+def _collect_git_metadata_paths(common_dir: Path, candidate: str) -> list[Path]:
+    root = common_dir / candidate
+    if not root.exists() and not root.is_symlink():
+        return []
+    return [root] if not root.is_dir() else [root, *sorted(root.rglob("*"))]
 
 
 def git_metadata_snapshot(common_dir: Path, deadline: float) -> dict[str, str]:
@@ -1868,22 +2044,11 @@ def git_metadata_snapshot(common_dir: Path, deadline: float) -> dict[str, str]:
         "worktrees",
     ]
     for candidate in candidates:
-        root = common_dir / candidate
-        if not root.exists() and not root.is_symlink():
-            continue
-        paths = [root] if not root.is_dir() else [root, *sorted(root.rglob("*"))]
-        for path in paths:
+        for path in _collect_git_metadata_paths(common_dir, candidate):
             if time.monotonic() >= deadline:
                 raise PreflightError("timed_out", "Git metadata snapshot exceeded the attempt deadline")
             relative = path.relative_to(common_dir).as_posix()
-            metadata = path.lstat()
-            mode = metadata.st_mode & 0o7777
-            if path.is_symlink():
-                snapshot[relative] = f"symlink:{mode:o}:{os.readlink(path)}"
-            elif path.is_file():
-                snapshot[relative] = f"file:{mode:o}:{metadata.st_size}:{hash_file(path, deadline)}"
-            elif path.is_dir():
-                snapshot[relative] = f"dir:{mode:o}"
+            snapshot[relative] = snapshot_path_entry(path, deadline)
     return snapshot
 
 
@@ -2174,6 +2339,46 @@ def verify_and_record_checkout(
     )
 
 
+def _setup_attempt_mode(
+    args: argparse.Namespace,
+    prepared: PreparedAttempt,
+    status: dict[str, Any],
+) -> tuple[Path | None, str | None]:
+    validation = prepare_validation_responses(args, prepared)
+    status["credential_identity"] = prepared.goal.credential_identity
+    status["prompt_sha256"] = hashlib.sha256(prepared.prompt_content).hexdigest()
+    if validation:
+        validation_responses, fixture_sha = validation
+        status["validation_fixture_sha256"] = fixture_sha
+        return validation_responses, fixture_sha
+    authorize_generation(prepared.goal)
+    status["credential_transport"] = "owner-only-env-file-via-provider-guard"
+    status["credential_env_file"] = prepare_live_credential(args, prepared)
+    return None, None
+
+
+def _record_worker_command(
+    run_dir: Path,
+    command: list[str],
+    environment: dict[str, str],
+    validation_mode: bool,
+) -> None:
+    write_private(
+        run_dir / "command.json",
+        json.dumps(
+            {
+                "argv": command,
+                "environment_names": sorted(environment),
+                "prompt_transport": "owner-only-staged-file-reference",
+                "validation_mode": validation_mode,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
 def execute_attempt(
     args: argparse.Namespace,
     prepared: PreparedAttempt,
@@ -2182,17 +2387,8 @@ def execute_attempt(
     status: dict[str, Any],
     inherited_lock_fds: tuple[int, ...],
 ) -> int:
-    validation = prepare_validation_responses(args, prepared)
-    status["credential_identity"] = prepared.goal.credential_identity
-    status["prompt_sha256"] = hashlib.sha256(prepared.prompt_content).hexdigest()
-    validation_responses = validation[0] if validation else None
-    if validation:
-        status["validation_fixture_sha256"] = validation[1]
-    else:
-        authorize_generation(prepared.goal)
-        status["credential_transport"] = "owner-only-env-file-via-provider-guard"
-        status["credential_env_file"] = prepare_live_credential(args, prepared)
-    request_digest = execution_request_digest(args, prepared, status, validation[1] if validation else None)
+    validation_responses, fixture_sha = _setup_attempt_mode(args, prepared, status)
+    request_digest = execution_request_digest(args, prepared, status, fixture_sha)
     status["execution_request_sha256"] = request_digest
     resume_id = resume_session(args, request_digest, prepared.git_state, validation_responses is not None)
     staged_prompt = stage_prompt(
@@ -2209,20 +2405,7 @@ def execute_attempt(
         resume_id,
         validation_responses,
     )
-    write_private(
-        args.run_dir / "command.json",
-        json.dumps(
-            {
-                "argv": command,
-                "environment_names": sorted(prepared.environment),
-                "prompt_transport": "owner-only-staged-file-reference",
-                "validation_mode": validation_responses is not None,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-    )
+    _record_worker_command(args.run_dir, command, prepared.environment, validation_responses is not None)
 
     def update_lease(worker_pid: int | None = None, process_group_id: int | None = None) -> None:
         prepared.lease_payload["heartbeat_at"] = utc_now()

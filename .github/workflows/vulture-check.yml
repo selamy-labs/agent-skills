@@ -16,5 +16,5 @@ jobs:
   vulture-check:
     uses: selamy-labs/.github/.github/workflows/vulture-check.yml@main
     with:
-      paths: scripts/ tools/ tests/
+      paths: scripts/ tools/ tests/ skills/
       min-confidence: 80

@@ -1,0 +1,1 @@
+# Fixture: Good Child Module

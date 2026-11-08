@@ -1,36 +1,102 @@
 name: Release
 
 on:
-  push:
+  workflow_run:
+    workflows: ["Quality"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: agent-skills-release
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Semantic Release
+  verify:
+    name: Verify Release Quality And CI Gate
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
     steps:
       - uses: actions/checkout@v7.0.0
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - name: Validate skills before release
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Verify commit is reachable from origin/main
+        run: git merge-base --is-ancestor "${{ github.event.workflow_run.head_sha || github.sha }}" origin/main
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: "1.26.10"
+      - name: Verify Go helper
+        working-directory: tools/hclblocks
+        env:
+          GOTOOLCHAIN: local
+          GOWORK: "off"
+          GOFLAGS: -mod=readonly
+        run: go vet ./...
+      - name: Full test suite verification on exact commit
+        env:
+          COVERAGE_SESSION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          python scripts/lint_skills.py
-          python scripts/privacy_scan.py
-          python scripts/test_privacy_scan.py
-          python scripts/security_scan.py
-          python scripts/test_security_scan.py
-          python scripts/public_api_stability.py
+          python3 -B scripts/lint_skills.py
+          python -m ruff check .
+          python -m ruff format --check --diff .
+          pytest --cov=tools --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
+          python -m tests.test_coverage_threshold coverage.json
+          python tools/validate_skills.py
+          python tools/validate_marketplace.py
+          python tools/tf_module_layout.py --self-test
+      - name: Validate public safety and stability scanners
+        run: |
+          python3 -B scripts/privacy_scan.py
+          python3 -B scripts/test_privacy_scan.py
+          python3 -B scripts/security_scan.py
+          python3 -B scripts/test_security_scan.py
+          python3 -B scripts/public_api_stability.py
+          python3 -B scripts/test_pr_workflow_cancellation.py
+          python3 -B scripts/test_semantic_release.py
+      - name: Enforce Release Gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tools/release_gate.py --repo "${{ github.repository }}" --sha "${{ github.event.workflow_run.head_sha || github.sha }}" --expected-app-slug "github-actions" --check-suite-id "${{ github.event.workflow_run.check_suite_id }}" --wait-seconds 600 --poll-interval-seconds 10
+
+  release:
+    name: Semantic Release
+    needs: verify
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
       - name: Plan release
         id: plan
         run: python scripts/semantic_release.py --notes-file release-notes.md

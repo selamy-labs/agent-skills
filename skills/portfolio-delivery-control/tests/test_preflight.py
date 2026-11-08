@@ -2735,5 +2735,99 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(MODULE.resolve_requested_transition_str(None, {"requested_transition": "review"}), "review")
 
 
+class TestR45ReconciliationRegressions(PreflightTests):
+    """Regressions for PREP R45 reconciliation of PR #154 onto PR #153."""
+
+    def test_r45_stage_aware_guard_active_claim_preservation(self):
+        """Preserves PR #153 stage-aware claim token validation across active stages."""
+        p = self.doc["delivery_control"]["projects"]["foundation"]
+
+        # 1. Implementation stage requires active work_item with claim_token
+        p["stage"] = "implementation"
+        p.pop("work_item", None)
+        res_missing = self.run_audit()
+        self.assertIn("STALE_OR_MISSING_CLAIM", self.codes(res_missing))
+
+        # 2. Review stage with expired claim_expires_at emits STALE_OR_MISSING_CLAIM
+        p["stage"] = "review"
+        p["work_item"] = {
+            "claim_token": "token-1",
+            "claim_expires_at": "2026-11-03T00:00:00Z",
+            "revision": HEAD,
+        }
+        res_expired = self.run_audit()
+        self.assertIn("STALE_OR_MISSING_CLAIM", self.codes(res_expired))
+
+        # 3. Implementation stage with valid active claim token passes claim check
+        p["stage"] = "implementation"
+        p["work_item"]["claim_expires_at"] = "2026-11-03T03:00:00Z"
+        res_valid = self.run_audit()
+        self.assertNotIn("STALE_OR_MISSING_CLAIM", self.codes(res_valid))
+
+        # 4. Non-dict work item emits WORK_ITEM_INVALID schema error
+        p["work_item"] = "not-a-dict"
+        res_invalid = self.run_audit()
+        self.assertIn("WORK_ITEM_INVALID", self.codes(res_invalid))
+
+    def test_r45_stage_aware_guard_auto_enforcement_preservation(self):
+        """Preserves PR #153 automatic stage guard enforcement on active stages."""
+        p = self.doc["delivery_control"]["projects"]["foundation"]
+
+        # Review stage auto-enforces unanimous SHIP reviews; missing reviews emit TRANSITION_GUARD_FAILED
+        p["stage"] = "review"
+        p["work_item"] = {
+            "claim_token": "token-1",
+            "claim_expires_at": "2026-11-03T03:00:00Z",
+            "revision": HEAD,
+        }
+        p["reviews"] = []
+        res = self.run_audit()
+        self.assertIn("TRANSITION_GUARD_FAILED", self.codes(res))
+
+    def test_r45_gate_hygiene_exact_pointer_escaping_and_gap_aggregation(self):
+        """Preserves PR #154 special character escaping and gap aggregation in compact projection."""
+        special_ids = ["quality:lint", " surrounded ", "spec~1/core"]
+        self.policy["required_controls"] = special_ids
+        for r in self.doc["delivery_control"]["projects"].values():
+            r["controls"] = {
+                cid: {"status": "gap", "owner": "dev", "observed_at": NOW, "next_action": "fix"} for cid in special_ids
+            }
+        res = self.run_audit()
+        gaps = res["compact_projection"]["aggregated_gaps"]
+        found_cids = set()
+        for g in gaps:
+            for ptr in g["drilldown_pointers"]:
+                source = self.doc
+                for token in ptr.split("/")[1:]:
+                    source = source[token.replace("~1", "/").replace("~0", "~")]
+                self.assertEqual(source["status"], "gap")
+                if "/controls/" in ptr:
+                    cid = ptr.split("/controls/")[1].replace("~1", "/").replace("~0", "~")
+                    found_cids.add(cid)
+        for cid in special_ids:
+            self.assertIn(cid, found_cids)
+
+    def test_r45_gate_hygiene_blocker_staleness_and_recheck_deadlines(self):
+        """Preserves PR #154 blocker staleness evaluation and overdue recheck deadlines."""
+        p = self.doc["delivery_control"]["projects"]["foundation"]
+        p["stage"] = "blocked"
+
+        # 1. Blocker without recheck and without progress timestamp emits BLOCKER_STALE
+        p["blocker"] = {
+            "owner": "external-team",
+            "reason": "Waiting on dependency release",
+            "evidence": ["ticket-123.md"],
+        }
+        p.pop("last_progress_at", None)
+        res_stale = self.run_audit()
+        self.assertIn("BLOCKER_STALE", self.codes(res_stale))
+
+        # 2. Blocker with overdue recheck deadline emits BLOCKER_RECHECK_DUE
+        p["last_progress_at"] = NOW
+        p["blocker"]["recheck_at"] = "2026-11-03T00:00:00Z"
+        res_overdue = self.run_audit()
+        self.assertIn("BLOCKER_RECHECK_DUE", self.codes(res_overdue))
+
+
 if __name__ == "__main__":
     unittest.main()

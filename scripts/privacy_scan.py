@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.privacy import findings_for_text, scan_all
+from tools.privacy import scan_all
 
 ROOT = Path(__file__).resolve().parents[1]
 

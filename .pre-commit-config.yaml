@@ -1,0 +1,37 @@
+repos:
+  # ruff is pinned (issue #101): `ruff format` output is version-dependent, so an unpinned formatter would cause drift
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.21
+    hooks:
+      - id: ruff
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: lint-skills
+        name: lint skills
+        entry: python3 -B scripts/lint_skills.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: security-scan
+        name: security scan
+        entry: python3 -B scripts/security_scan.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: privacy-scan
+        name: privacy scan
+        entry: python3 -B scripts/privacy_scan.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: public-api-stability
+        name: public api stability
+        entry: python3 -B scripts/public_api_stability.py
+        language: system
+        pass_filenames: false
+        always_run: true

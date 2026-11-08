@@ -62,6 +62,22 @@ def _add_frontmatter_entry(data: dict[str, object], line: str, path: Path) -> st
     return None
 
 
+def _process_frontmatter_line(
+    line: str,
+    active_block: str | None,
+    data: dict[str, object],
+    path: Path,
+) -> str | None:
+    if line.startswith("  "):
+        if active_block != "metadata":
+            raise ValueError(f"{path}: malformed frontmatter indentation: {line!r}")
+        _add_metadata_entry(data, line, path)
+        return active_block
+    if line != line.strip():
+        raise ValueError(f"{path}: malformed frontmatter indentation: {line!r}")
+    return _add_frontmatter_entry(data, line, path)
+
+
 def parse_frontmatter(text: str, path: Path) -> dict[str, object]:
     match = SKILL_RE.match(text)
     if not match:
@@ -72,16 +88,8 @@ def parse_frontmatter(text: str, path: Path) -> dict[str, object]:
     data: dict[str, object] = {}
     active_block: str | None = None
     for line in match.group("frontmatter").splitlines():
-        if not line.strip():
-            continue
-        if line.startswith("  "):
-            if active_block != "metadata":
-                raise ValueError(f"{path}: malformed frontmatter indentation: {line!r}")
-            _add_metadata_entry(data, line, path)
-            continue
-        if line != line.strip():
-            raise ValueError(f"{path}: malformed frontmatter indentation: {line!r}")
-        active_block = _add_frontmatter_entry(data, line, path)
+        if line.strip():
+            active_block = _process_frontmatter_line(line, active_block, data, path)
     return data
 
 

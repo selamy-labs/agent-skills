@@ -67,8 +67,7 @@ MALICIOUS_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
         "covert-action",
         "instructs the agent to act without the user's knowledge/consent",
         re.compile(
-            r"\bwithout\b[^.\n]{0,30}\bthe\s+user'?s?\b[^.\n]{0,20}"
-            r"\b(knowledge|consent|awareness|permission)\b",
+            r"\bwithout\b[^.\n]{0,30}\bthe\s+user'?s?\b[^.\n]{0,20}" r"\b(knowledge|consent|awareness|permission)\b",
             re.IGNORECASE,
         ),
     ),
