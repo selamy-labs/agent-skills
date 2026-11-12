@@ -69,6 +69,28 @@ When the queue backs up, finish or unblock existing work before admitting more;
 do not choose a large PR count as a throughput target. Reserve capacity to
 repair main when unhealthy, and obey any repository-wide stop-the-line policy.
 
+### Stop The Line On A Red Default Branch
+
+Check the default branch's required checks on every coordination pass. When
+its tip is red:
+
+1. Freeze merges except the fix branch, and stop updating other branches onto
+   the red tip.
+2. Rerun the failed jobs once to separate a flake from a real break.
+3. If still red, open a bug and start a top-priority fix loop: fix the root
+   cause, make the check deterministic, or revert the culprit. Never skip or
+   weaken the check.
+4. Lift the freeze automatically once the tip is green. Track a flaky check as
+   a bug, not as noise.
+
+### Host Capacity
+
+Count worker processes and their build servers against real host capacity.
+When memory or load crosses a set threshold, pause the lowest-priority workers
+with a marker that every restart path honors, and stop their leftover build
+servers by exact process ID. Resume at a lower threshold, so workers do not
+flap.
+
 ## Triage And Decomposition
 
 Implement now when one clear outcome fits one reviewable PR. Split only when
