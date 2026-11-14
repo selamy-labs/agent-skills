@@ -99,3 +99,10 @@ dependency manifest and evidence discipline. Fall back to bottom-first
 individual merges with explicit descendant rebases/retargets; this path has no
 native group-merge guarantee. Independent PRs remain flat. Preserve genuine
 host checks and approvals.
+
+Without native stacks, each layer merges only its own parent branch, never
+trunk directly; trunk changes flow up from the bottom layer. After a parent
+merges, retarget its open children to the parent's base before deleting the
+parent branch. A merge into a non-default branch does not close linked issues,
+so when the stack lands on the default branch, close the issues linked from
+every layer merged into it.
