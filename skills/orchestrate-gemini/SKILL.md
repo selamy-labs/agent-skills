@@ -174,12 +174,19 @@ skills/orchestrate-gemini/scripts/verify_dispatch.sh \
   "$SESSION" "$DISPATCH_ID" "$PRE_CAPTURE"
 ```
 
-For a file-backed follow-up, run
-`scripts/submit_followup.sh "$SESSION" "$FOLLOWUP_FILE"`. Count work as
-submitted only when start/end markers appear in order, Gemini emits the exact
-post-marker acknowledgement, fresh tool or thinking activity follows, and a
-clean composer returns. Session existence, stale `Working` text, or a marker
-still sitting in the composer is not proof of dispatch.
+For a file-backed follow-up (an absolute-path, current-user-owned, owner-only
+file), run `scripts/submit_followup.sh "$SESSION" "$FOLLOWUP_FILE"`. Using
+`python3` and the bundled `scripts/orchestrate_dispatch.py` classifier, it
+checks `pre.txt` first (exiting `75` on active modals or dirty composers, and
+also exiting `75` if a modal/approval UI blocks input during paste or submit),
+sends bracketed paste (`tmux paste-buffer -p`), verifies composer readiness
+before `Enter`, and classifies wrapped panes (`submitted`, `queued` with
+`ORCHESTRATION_ALLOW_QUEUED=1` opt-in, `accepted_active`, `unsubmitted`,
+`partial_paste`, `blocked_modal`, `ambiguous`) before allowing a single recovery
+`Enter`. Count work as submitted only when start/end markers appear in order,
+Gemini emits the exact post-end acknowledgement, fresh tool or thinking activity
+follows, and a clean composer returns. Session existence, stale `Working` text,
+or a marker sitting in or split from the composer is not proof of dispatch.
 
 ## Resume and recover
 

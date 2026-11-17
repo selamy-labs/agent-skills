@@ -39,9 +39,9 @@ The launcher prints a unique dispatch ID and empty pre-capture path. After resol
 scripts/verify_dispatch.sh "$SESSION" "$DISPATCH_ID" "$PRE_CAPTURE"
 ```
 
-For a follow-up already stored in an absolute-path file, use `scripts/submit_followup.sh "$SESSION" "$FOLLOWUP"`. It captures the pane before submission, wraps the directive in unique start/end markers plus an exact acknowledgement request, presses Enter, and retries Enter only when the first attempt still appears unsubmitted.
+For a follow-up already stored in an absolute-path file, use `scripts/submit_followup.sh "$SESSION" "$FOLLOWUP"`. Using `python3` and the bundled `scripts/orchestrate_dispatch.py` classifier, it checks `pre.txt` first (exiting `75` if a modal/approval UI or dirty composer blocks input, and also exiting `75` if a modal/approval UI blocks input during paste or submission), sends the directive via bracketed paste (`tmux paste-buffer -p`), verifies composer readiness before `Enter`, and classifies wrapped panes into `submitted`, `queued` (`ORCHESTRATION_ALLOW_QUEUED=1` opts in), `accepted_active`, `unsubmitted`, `partial_paste`, `blocked_modal`, or `ambiguous` — sending at most one recovery `Enter` strictly when the intact directive remains `unsubmitted` in an idle composer.
 
-Count work as dispatched only when the verifier finds the unique start and end markers in order, Claude's exact acknowledgement after the end marker, fresh activity after that acknowledgement, and a new clean composer after the activity. Generic tool-call text anywhere else is stale or unrelated evidence and must fail. A marker still held in the active composer is not submitted work.
+Count work as dispatched only when the verifier finds the unique start and end markers in order (even across soft-wrapped lines), Claude's exact post-end acknowledgement, fresh activity after that acknowledgement, and a new clean composer after the activity. Generic tool-call text anywhere else is stale or unrelated evidence and must fail. A marker still held in the active composer or split across regions is not submitted work.
 
 ## Supervise and recover
 
