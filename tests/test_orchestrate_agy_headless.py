@@ -61,6 +61,12 @@ pathlib.Path(os.environ["FAKE_AGY_PROMPT"]).write_text(prompt)
 def emit(envelope):
     print(json.dumps({"event": "result", "result": envelope}))
 
+
+def record_child_pid(pid):
+    tmp_pid = pathlib.Path(os.environ["FAKE_AGY_CHILD_PID"] + ".tmp")
+    tmp_pid.write_text(str(pid), encoding="utf-8")
+    os.replace(tmp_pid, os.environ["FAKE_AGY_CHILD_PID"])
+
 behavior = os.environ.get("FAKE_AGY_BEHAVIOR", "success")
 if behavior == "success":
     emit({"conversation_id": "conversation-1", "status": "SUCCESS", "response": "done\\n"})
@@ -81,12 +87,12 @@ elif behavior == "malformed":
 elif behavior == "waiting":
     emit({"conversation_id": "conversation-4", "status": "WAITING", "response": "", "error": "input required"})
 elif behavior == "timeout":
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    pathlib.Path(os.environ["FAKE_AGY_CHILD_PID"]).write_text(str(child.pid))
+    child = subprocess.Popen(["/bin/sleep", "60"])
+    record_child_pid(child.pid)
     time.sleep(60)
 elif behavior == "escape":
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
-    pathlib.Path(os.environ["FAKE_AGY_CHILD_PID"]).write_text(str(child.pid))
+    record_child_pid(child.pid)
     time.sleep(0.3)
     emit({"conversation_id": "conversation-5", "status": "SUCCESS", "response": "done\\n"})
 else:
@@ -97,35 +103,22 @@ else:
     return fake_agy
 
 
-def _run_runner(
+def _prepare_runner_workspace(
     tmp_path: Path,
     *,
-    behavior: str = "success",
     model: str = "gemini-test-medium",
     extra_args: tuple[str, ...] = (),
-    extra_env: dict[str, str] | None = None,
     timeout_seconds: int = 5,
     agy_path: Path | None = None,
-) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
+) -> tuple[list[str], dict[str, str], Path, Path]:
     prompt = tmp_path / "prompt.txt"
     prompt.write_text('First $HOME $(not-executed) "quotes"\nSecond `backticks`; apostrophe\'s value\n')
     fake_agy = agy_path or _make_fake_agy(tmp_path)
     run_dir = tmp_path / "evidence" / "run-1"
-    argv_path = tmp_path / "argv.json"
     observed_prompt_path = tmp_path / "observed-prompt.txt"
     cwd = tmp_path / "worktree"
     cwd.mkdir()
-    env = os.environ | {
-        "FAKE_AGY_ARGV": str(argv_path),
-        "FAKE_AGY_BEHAVIOR": behavior,
-        "FAKE_AGY_PROMPT": str(observed_prompt_path),
-    }
-    if extra_env:
-        env.update(extra_env)
-
-    command = [
-        sys.executable,
-        str(RUNNER),
+    runner_args = [
         "--run-dir",
         str(run_dir),
         "--cwd",
@@ -144,6 +137,33 @@ def _run_runner(
         "high",
         *extra_args,
     ]
+    fake_env = {"FAKE_AGY_PROMPT": str(observed_prompt_path)}
+    return runner_args, fake_env, run_dir, prompt
+
+
+def _run_runner(
+    tmp_path: Path,
+    *,
+    behavior: str = "success",
+    model: str = "gemini-test-medium",
+    extra_args: tuple[str, ...] = (),
+    extra_env: dict[str, str] | None = None,
+    timeout_seconds: int = 5,
+    agy_path: Path | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
+    runner_args, fake_env, run_dir, prompt = _prepare_runner_workspace(
+        tmp_path,
+        model=model,
+        extra_args=extra_args,
+        timeout_seconds=timeout_seconds,
+        agy_path=agy_path,
+    )
+    argv_path = tmp_path / "argv.json"
+    env = os.environ | fake_env | {"FAKE_AGY_ARGV": str(argv_path), "FAKE_AGY_BEHAVIOR": behavior}
+    if extra_env:
+        env.update(extra_env)
+
+    command = [sys.executable, str(RUNNER), *runner_args]
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -205,8 +225,60 @@ def _kill_known_pids(pids: set[int]) -> None:
     for pid in pids:
         try:
             os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (PermissionError, ProcessLookupError):
             pass
+
+
+def _read_optional_pid(pid_path: Path) -> int | None:
+    try:
+        raw = pid_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return int(raw) if raw.isdigit() else None
+
+
+def _read_status_payload(run_dir: Path | None) -> dict[str, object]:
+    if run_dir is None:
+        return {}
+    status_path = run_dir / "status.json"
+    try:
+        raw = status_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _kill_foreign_group(pgid: object) -> None:
+    if not isinstance(pgid, int) or pgid <= 0 or pgid == os.getpgrp():
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (PermissionError, ProcessLookupError):
+        pass
+
+
+def _kill_pid_file_and_run_group(known_pids: set[int], child_pid_path: Path, run_dir: Path | None = None) -> None:
+    recorded_pid = _read_optional_pid(child_pid_path)
+    if recorded_pid is not None:
+        known_pids.add(recorded_pid)
+    payload = _read_status_payload(run_dir)
+    _kill_foreign_group(payload.get("process_group_id"))
+    pid = payload.get("pid")
+    if isinstance(pid, int) and pid > 0 and pid != os.getpid():
+        known_pids.add(pid)
+    _kill_known_pids(known_pids)
+
+
+def _spawn_sleep_and_record_pid_script(sleep_seconds: float) -> str:
+    return (
+        "import os, pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen(['/bin/sleep', '60']); "
+        "tmp = sys.argv[1] + '.tmp'; "
+        "pathlib.Path(tmp).write_text(str(child.pid), encoding='utf-8'); "
+        "os.replace(tmp, sys.argv[1]); "
+        f"time.sleep({sleep_seconds})"
+    )
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -301,20 +373,46 @@ def test_runner_rejects_a_model_missing_from_live_discovery(tmp_path: Path) -> N
     assert not argv_path.exists()
 
 
-def test_runner_harvests_the_process_group_after_wall_timeout(tmp_path: Path) -> None:
-    child_pid_path = tmp_path / "child.pid"
-    known_pids: set[int] = set()
-    try:
-        result, run_dir, _, _ = _run_runner(
-            tmp_path,
-            behavior="timeout",
-            timeout_seconds=1,
-            extra_env={"FAKE_AGY_CHILD_PID": str(child_pid_path)},
-        )
+def _monotonic_frozen_until_pid_file(
+    pid_path: Path,
+    max_freeze_seconds: float = 15.0,
+) -> SimpleNamespace:
+    real_monotonic = time.monotonic
+    started = real_monotonic()
+    ready_at: float | None = None
 
-        assert result.returncode == 124
+    def monotonic() -> float:
+        nonlocal ready_at
+        now = real_monotonic()
+        if ready_at is None:
+            is_ready = pid_path.exists() and pid_path.stat().st_size > 0
+            if not is_ready and now - started < max_freeze_seconds:
+                return started
+            ready_at = now
+        return started + (now - ready_at)
+
+    return SimpleNamespace(monotonic=monotonic, sleep=time.sleep)
+
+
+def test_runner_harvests_the_process_group_after_wall_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _load_runner_module()
+    child_pid_path = tmp_path / "child.pid"
+    runner_args, fake_env, run_dir, _ = _prepare_runner_workspace(tmp_path, timeout_seconds=1)
+    for key, value in (fake_env | {"FAKE_AGY_BEHAVIOR": "timeout", "FAKE_AGY_CHILD_PID": str(child_pid_path)}).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "argv", ["run_headless.py", *runner_args])
+    monkeypatch.setattr(runner, "time", _monotonic_frozen_until_pid_file(child_pid_path))
+
+    known_pids: set[int] = set()
+    prev_sigint = signal.getsignal(signal.SIGINT)
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
+    try:
+        returncode = runner.main()
+
+        assert returncode == 124
         status = _status(run_dir)
         assert status["classification"] == "timed_out"
+        assert status["agent_timeout_seconds"] == 1
         assert status["process_group_alive_after_harvest"] is False
         deadline = time.monotonic() + 2
         child_pid = int(child_pid_path.read_text())
@@ -326,7 +424,9 @@ def test_runner_harvests_the_process_group_after_wall_timeout(tmp_path: Path) ->
         else:
             pytest.fail(f"child process {child_pid} survived timeout harvesting")
     finally:
-        _kill_known_pids(known_pids)
+        signal.signal(signal.SIGINT, prev_sigint)
+        signal.signal(signal.SIGTERM, prev_sigterm)
+        _kill_pid_file_and_run_group(known_pids, child_pid_path, run_dir)
 
 
 def test_runner_harvests_a_descendant_that_starts_a_new_session(tmp_path: Path) -> None:
@@ -498,12 +598,7 @@ def test_run_process_harvests_owned_group_when_process_listing_fails(tmp_path: P
     runner = _load_runner_module()
     child_pid_path = tmp_path / "child.pid"
     known_pids: set[int] = set()
-    script = (
-        "import pathlib, subprocess, sys, time; "
-        "child = subprocess.Popen(['/bin/sleep', '60']); "
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-        "time.sleep(0.2)"
-    )
+    script = _spawn_sleep_and_record_pid_script(0.2)
     runner.process_snapshot = lambda _timeout_seconds=2: runner.ProcessInventory({}, False)
 
     try:
@@ -520,20 +615,20 @@ def test_run_process_harvests_owned_group_when_process_listing_fails(tmp_path: P
         assert not _pid_is_running(child_pid)
         assert result.process_group_alive_after_harvest is False
     finally:
-        _kill_known_pids(known_pids)
+        _kill_pid_file_and_run_group(known_pids, child_pid_path)
 
 
-def test_run_process_times_out_cleanly_without_process_listing(tmp_path: Path) -> None:
+def test_run_process_times_out_cleanly_without_process_listing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = _load_runner_module()
     child_pid_path = tmp_path / "child.pid"
     known_pids: set[int] = set()
-    script = (
-        "import pathlib, subprocess, sys, time; "
-        "child = subprocess.Popen(['/bin/sleep', '60']); "
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-        "time.sleep(60)"
+    script = _spawn_sleep_and_record_pid_script(60)
+    monkeypatch.setattr(
+        runner,
+        "process_snapshot",
+        lambda _timeout_seconds=2: runner.ProcessInventory({}, False),
     )
-    runner.process_snapshot = lambda _timeout_seconds=2: runner.ProcessInventory({}, False)
+    monkeypatch.setattr(runner, "time", _monotonic_frozen_until_pid_file(child_pid_path))
 
     try:
         result = runner.run_process(
@@ -550,7 +645,7 @@ def test_run_process_times_out_cleanly_without_process_listing(tmp_path: Path) -
         known_pids.add(child_pid)
         assert not _pid_is_running(child_pid)
     finally:
-        _kill_known_pids(known_pids)
+        _kill_pid_file_and_run_group(known_pids, child_pid_path)
 
 
 def test_permission_denied_group_probe_is_unknown_unless_snapshot_proves_zombies(

@@ -373,7 +373,7 @@ def get_on_triggers(doc: dict[str, Any]) -> list[str] | dict[str, Any]:
     triggers = raw_doc.get("on")
     if triggers is None:
         triggers = raw_doc.get(True)
-    if isinstance(triggers, (list, dict)):
+    if isinstance(triggers, list | dict):
         return triggers
     return {}
 
