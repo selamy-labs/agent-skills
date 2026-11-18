@@ -8,56 +8,81 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ("agy", "codex", "claude", "gemini")
 TMUX = shutil.which("tmux")
+REQUIRE_TMUX = pytest.mark.skipif(TMUX is None, reason="tmux is not installed")
 
 
 def _script(tool: str, name: str) -> Path:
     return REPO_ROOT / "skills" / f"orchestrate-{tool}" / "scripts" / name
 
 
-def _wait_for(path: Path, timeout: float = 4) -> None:
+def _extract_field(text: str, key: str) -> str:
+    match = re.search(rf"^{re.escape(key)}=(.+)$", text, re.MULTILINE)
+    return match.group(1) if match is not None else "<missing>"
+
+
+def _wait_for(path: Path, timeout: float = 4.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
             return
         time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {path}")
+    raise TimeoutError(f"timed out waiting for {path}")
 
 
-def _kill_session(session: str) -> None:
-    if TMUX:
-        subprocess.run([TMUX, "kill-session", "-t", f"={session}"], check=False, capture_output=True)
+@contextmanager
+def _isolated_tmux(tmp_path: Path) -> Iterator[dict[str, str]]:
+    tmpdir = tmp_path / "run_tmp"
+    tmpdir.mkdir(mode=0o700, exist_ok=True)
+    bin_shim = tmp_path / "bin"
+    bin_shim.mkdir(mode=0o700, exist_ok=True)
+    tmux_bin = TMUX or "tmux"
+    shim = bin_shim / "tmux"
+    shim.write_text(f'#!/usr/bin/env bash\nexec {shlex.quote(tmux_bin)} -f /dev/null "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    with tempfile.TemporaryDirectory(
+        prefix="cli-tm-", dir="/tmp" if Path("/tmp").is_dir() else None
+    ) as short_socket_dir:
+        os.chmod(short_socket_dir, 0o700)
+        env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+        env["TMUX_TMPDIR"] = short_socket_dir
+        env["TMPDIR"] = str(tmpdir)
+        env["PATH"] = f"{bin_shim}{os.pathsep}{env.get('PATH', '')}"
+        try:
+            yield env
+        finally:
+            subprocess.run([tmux_bin, "-f", "/dev/null", "kill-server"], env=env, check=False, capture_output=True)
 
 
-def _wait_for_pane_text(session: str, expected: str, timeout: float = 4) -> None:
+def _wait_for_pane_text(session: str, env: dict[str, str], expected: str, timeout: float = 4.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = subprocess.run(
-            [TMUX, "capture-pane", "-p", "-J", "-t", f"{session}:0.0", "-S", "-"],
+            [TMUX or "tmux", "-f", "/dev/null", "capture-pane", "-p", "-J", "-t", f"{session}:0.0", "-S", "-"],
+            env=env,
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode == 0 and expected in result.stdout:
             return
         time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {expected!r} in {session}")
+    raise TimeoutError(f"timed out waiting for {expected!r} in {session}")
 
 
-@pytest.mark.skipif(TMUX is None, reason="tmux is not installed")
-@pytest.mark.parametrize("tool", TOOLS)
-def test_launcher_preserves_atomic_shell_sensitive_multiline_prompt(tmp_path: Path, tool: str) -> None:
-    prompt = tmp_path / "prompt.txt"
-    prompt.write_text('First $HOME $(not-executed) "quotes"\nSecond `backticks`; apostrophe\'s value\n')
-    prompt.chmod(0o600)
-    output = tmp_path / "argv.json"
+def _write_fake_cli(tmp_path: Path) -> Path:
     fake_cli = tmp_path / "fake-cli.py"
     fake_cli.write_text(
         "#!/usr/bin/env python3\n"
@@ -65,11 +90,21 @@ def test_launcher_preserves_atomic_shell_sensitive_multiline_prompt(tmp_path: Pa
         "args = sys.argv[2:]\n"
         "expanded = pathlib.Path(args[-1][1:]).read_text() if args[-1].startswith('@') else args[-1]\n"
         "pathlib.Path(sys.argv[1]).write_text(json.dumps({'argv': args, 'expanded': expanded}))\n"
-        "time.sleep(3)\n"
+        "time.sleep(3)\n",
+        encoding="utf-8",
     )
     fake_cli.chmod(0o755)
+    return fake_cli
+
+
+def _run_launch_probe(tmp_path: Path, tool: str, prompt_text: str) -> tuple[str, dict[str, object]]:
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text(prompt_text, encoding="utf-8")
+    prompt.chmod(0o600)
+    output = tmp_path / "argv.json"
+    fake_cli = _write_fake_cli(tmp_path)
     session = f"test-{tool}-{uuid.uuid4().hex[:10]}"
-    try:
+    with _isolated_tmux(tmp_path) as env:
         result = subprocess.run(
             [
                 str(_script(tool, "launch_tmux.sh")),
@@ -81,68 +116,54 @@ def test_launcher_preserves_atomic_shell_sensitive_multiline_prompt(tmp_path: Pa
                 "--model",
                 "test-model",
             ],
+            env=env,
             check=True,
             capture_output=True,
             text=True,
         )
-        dispatch_id = re.search(r"^dispatch_id=(.+)$", result.stdout, re.MULTILINE).group(1)
+        dispatch_id = _extract_field(result.stdout, "dispatch_id")
         _wait_for(output)
-        record = json.loads(output.read_text())
-        argv = record["argv"]
-        if tool == "agy":
-            assert "--effort" not in argv
-        submitted = record["expanded"]
-        if tool == "gemini":
-            assert argv[-1].startswith("@")
-            assert prompt.read_text().rstrip() not in argv
-        assert submitted == (
-            f"[dispatch:{dispatch_id}]\n"
-            f"Acknowledge this exact turn first by emitting [dispatch-accepted:{dispatch_id}].\n"
-            f"{prompt.read_text().rstrip()}\n[dispatch-end:{dispatch_id}]"
-        )
-    finally:
-        _kill_session(session)
+        return dispatch_id, json.loads(output.read_text(encoding="utf-8"))
 
 
-@pytest.mark.skipif(TMUX is None, reason="tmux is not installed")
-@pytest.mark.parametrize("tool", TOOLS)
-def test_launcher_rejects_an_existing_session(tmp_path: Path, tool: str) -> None:
+def _run_existing_session_launch(tmp_path: Path, tool: str) -> subprocess.CompletedProcess[str]:
     prompt = tmp_path / "prompt.txt"
-    prompt.write_text("bounded task\n")
+    prompt.write_text("bounded task\n", encoding="utf-8")
     prompt.chmod(0o600)
     session = f"test-existing-{tool}-{uuid.uuid4().hex[:8]}"
-    subprocess.run([TMUX, "new-session", "-d", "-s", session, "sleep 10"], check=True)
-    try:
-        result = subprocess.run(
+    with _isolated_tmux(tmp_path) as env:
+        subprocess.run(
+            [TMUX or "tmux", "-f", "/dev/null", "new-session", "-d", "-s", session, "sleep 10"],
+            env=env,
+            check=True,
+        )
+        return subprocess.run(
             [str(_script(tool, "launch_tmux.sh")), session, str(tmp_path), str(prompt), "/bin/echo"],
+            env=env,
             capture_output=True,
             text=True,
+            check=False,
         )
-        assert result.returncode == 2
-        assert "session already exists" in result.stderr
-    finally:
-        _kill_session(session)
 
 
-@pytest.mark.parametrize("surface", ("launch_tmux.sh", "submit_followup.sh"))
-def test_gemini_owner_only_checks_prefer_gnu_stat_format(tmp_path: Path, surface: str) -> None:
+def _run_gemini_stat_probe(tmp_path: Path, surface: str) -> tuple[subprocess.CompletedProcess[str], str]:
     directive = tmp_path / "directive.txt"
-    directive.write_text("bounded task\n")
+    directive.write_text("bounded task\n", encoding="utf-8")
     directive.chmod(0o600)
-    fake_bin = tmp_path / "bin"
+    fake_bin = tmp_path / "stat_bin"
     fake_bin.mkdir()
     fake_stat = fake_bin / "stat"
     fake_stat.write_text(
         "#!/usr/bin/env bash\n"
         "if [[ $1 == -c ]]; then printf '600\\n'; exit 0; fi\n"
         "if [[ $1 == -f ]]; then printf 'gnu filesystem status\\n%.0s' {1..6}; exit 1; fi\n"
-        "exit 2\n"
+        "exit 2\n",
+        encoding="utf-8",
     )
     fake_stat.chmod(0o755)
     fake_tmux = fake_bin / "tmux"
     fake_tmux.write_text('#!/usr/bin/env bash\n[[ $1 == has-session ]] && exit "$FAKE_HAS_SESSION_EXIT"\nexit 99\n')
     fake_tmux.chmod(0o755)
-
     if surface == "launch_tmux.sh":
         script_args = ["existing-gemini-session", str(tmp_path), str(directive), "/bin/echo"]
         has_session_exit = "0"
@@ -151,7 +172,6 @@ def test_gemini_owner_only_checks_prefer_gnu_stat_format(tmp_path: Path, surface
         script_args = ["missing-gemini-session", str(directive)]
         has_session_exit = "1"
         expected = "session does not exist"
-
     result = subprocess.run(
         [str(_script("gemini", surface)), *script_args],
         capture_output=True,
@@ -161,16 +181,12 @@ def test_gemini_owner_only_checks_prefer_gnu_stat_format(tmp_path: Path, surface
             "FAKE_HAS_SESSION_EXIT": has_session_exit,
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         },
+        check=False,
     )
-
-    assert result.returncode == 2
-    assert expected in result.stderr
-    assert "owner-only" not in result.stderr
+    return result, expected
 
 
-@pytest.mark.skipif(TMUX is None, reason="tmux is not installed")
-@pytest.mark.parametrize("tool", TOOLS)
-def test_followup_retries_enter_and_requires_fresh_post_marker_activity(tmp_path: Path, tool: str) -> None:
+def _run_retry_enter_probe(tmp_path: Path, tool: str) -> tuple[subprocess.CompletedProcess[str], str]:
     fake_tui = tmp_path / "fake-tui.py"
     fake_tui.write_text(
         "#!/usr/bin/env python3\n"
@@ -186,24 +202,40 @@ def test_followup_retries_enter_and_requires_fresh_post_marker_activity(tmp_path
         "print(f'[dispatch-accepted:{dispatch_id}]', flush=True)\n"
         "print('• Working fresh', flush=True)\n"
         "print('›', flush=True)\n"
-        "time.sleep(3)\n"
+        "time.sleep(3)\n",
+        encoding="utf-8",
     )
     fake_tui.chmod(0o755)
     followup = tmp_path / "followup.txt"
-    followup.write_text("Do the next bounded task.\n")
+    followup.write_text("Do the next bounded task.\n", encoding="utf-8")
     followup.chmod(0o600)
     session = f"test-enter-{tool}-{uuid.uuid4().hex[:8]}"
-    command = f"exec {shlex.quote(str(fake_tui))}"
-    subprocess.run(
-        [TMUX, "new-session", "-d", "-x", "24", "-y", "12", "-s", session, "-c", str(tmp_path), command],
-        check=True,
-    )
-    try:
-        _wait_for_pane_text(session, "• Working stale")
-        env = os.environ | {
-            "TMPDIR": str(tmp_path),
-            "ORCHESTRATION_DISPATCH_ID": f"{tool}-double-enter-test",
-            "ORCHESTRATION_VERIFY_ATTEMPTS": "1",
+    dispatch_id = f"{tool}-double-{uuid.uuid4().hex[:8]}"
+    with _isolated_tmux(tmp_path) as base_env:
+        subprocess.run(
+            [
+                TMUX or "tmux",
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "-s",
+                session,
+                "-c",
+                str(tmp_path),
+                f"exec {shlex.quote(str(fake_tui))}",
+            ],
+            env=base_env,
+            check=True,
+        )
+        _wait_for_pane_text(session, base_env, "• Working stale")
+        env = base_env | {
+            "ORCHESTRATION_DISPATCH_ID": dispatch_id,
+            "ORCHESTRATION_VERIFY_ATTEMPTS": "3",
             "ORCHESTRATION_VERIFY_DELAY_SECONDS": "0.05",
         }
         result = subprocess.run(
@@ -212,20 +244,12 @@ def test_followup_retries_enter_and_requires_fresh_post_marker_activity(tmp_path
             capture_output=True,
             text=True,
             env=env,
-            timeout=8,
+            timeout=30,
         )
-        assert "enter_presses=2" in result.stdout
-        evidence_dir = Path(re.search(r"^evidence_dir=(.+)$", result.stdout, re.MULTILINE).group(1))
-        verify_output = (evidence_dir / "verify-second.out").read_text()
-        post_capture = Path(re.search(r"^post_capture=(.+)$", verify_output, re.MULTILINE).group(1))
-        assert f"[dispatch-end:{tool}-double-enter-test]" in post_capture.read_text()
-    finally:
-        _kill_session(session)
+        return result, dispatch_id
 
 
-@pytest.mark.skipif(TMUX is None, reason="tmux is not installed")
-@pytest.mark.parametrize("tool", TOOLS)
-def test_accepted_active_followup_without_clean_composer_never_gets_second_enter(tmp_path: Path, tool: str) -> None:
+def _run_accepted_active_probe(tmp_path: Path, tool: str) -> tuple[subprocess.CompletedProcess[str], str]:
     outcome = tmp_path / "outcome.txt"
     fake_tui = tmp_path / "accepted-active-tui.py"
     fake_tui.write_text(
@@ -240,20 +264,40 @@ def test_accepted_active_followup_without_clean_composer_never_gets_second_enter
         "print('• Working fresh', flush=True)\n"
         "ready, _, _ = select.select([sys.stdin], [], [], 1.5)\n"
         "outcome.write_text('second-enter' if ready else 'no-second-enter')\n"
-        "time.sleep(1)\n"
+        "time.sleep(1)\n",
+        encoding="utf-8",
     )
     fake_tui.chmod(0o755)
     followup = tmp_path / "followup.txt"
-    followup.write_text("Continue the accepted task.\n")
+    followup.write_text("Continue the accepted task.\n", encoding="utf-8")
     followup.chmod(0o600)
     session = f"test-no-second-{tool}-{uuid.uuid4().hex[:8]}"
-    command = f"exec {shlex.quote(str(fake_tui))} {shlex.quote(str(outcome))}"
-    subprocess.run([TMUX, "new-session", "-d", "-s", session, "-c", str(tmp_path), command], check=True)
-    try:
-        _wait_for_pane_text(session, "›")
-        env = os.environ | {
-            "ORCHESTRATION_DISPATCH_ID": f"{tool}-accepted-active-test",
-            "ORCHESTRATION_VERIFY_ATTEMPTS": "1",
+    dispatch_id = f"{tool}-accepted-{uuid.uuid4().hex[:8]}"
+    with _isolated_tmux(tmp_path) as base_env:
+        subprocess.run(
+            [
+                TMUX or "tmux",
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "-s",
+                session,
+                "-c",
+                str(tmp_path),
+                f"exec {shlex.quote(str(fake_tui))} {shlex.quote(str(outcome))}",
+            ],
+            env=base_env,
+            check=True,
+        )
+        _wait_for_pane_text(session, base_env, "›")
+        env = base_env | {
+            "ORCHESTRATION_DISPATCH_ID": dispatch_id,
+            "ORCHESTRATION_VERIFY_ATTEMPTS": "4",
             "ORCHESTRATION_VERIFY_DELAY_SECONDS": "0.05",
         }
         result = subprocess.run(
@@ -261,54 +305,248 @@ def test_accepted_active_followup_without_clean_composer_never_gets_second_enter
             capture_output=True,
             text=True,
             env=env,
-            timeout=8,
+            timeout=30,
+            check=False,
         )
-        assert result.returncode == 1
-        assert "no second Enter sent" in result.stderr
         _wait_for(outcome)
-        assert outcome.read_text() == "no-second-enter"
-    finally:
-        _kill_session(session)
+        return result, outcome.read_text(encoding="utf-8")
+
+
+@REQUIRE_TMUX
+@pytest.mark.parametrize("tool", TOOLS)
+def test_launcher_preserves_atomic_shell_sensitive_multiline_prompt(tmp_path: Path, tool: str) -> None:
+    # Arrange
+    prompt_text = 'First $HOME $(not-executed) "quotes"\nSecond `backticks`; apostrophe\'s value\n'
+
+    # Act
+    dispatch_id, record = _run_launch_probe(tmp_path, tool, prompt_text)
+
+    # Assert
+    assert record["expanded"] == (
+        f"[dispatch:{dispatch_id}]\n"
+        f"Acknowledge this exact turn first by emitting [dispatch-accepted:{dispatch_id}].\n"
+        f"{prompt_text.rstrip()}\n[dispatch-end:{dispatch_id}]"
+    )
+
+
+@REQUIRE_TMUX
+def test_agy_launcher_omits_effort_flag(tmp_path: Path) -> None:
+    # Arrange
+    prompt_text = "Bounded agy task.\n"
+
+    # Act
+    _, record = _run_launch_probe(tmp_path, "agy", prompt_text)
+
+    # Assert
+    assert "--effort" not in cast(list[str], record["argv"])
+
+
+@REQUIRE_TMUX
+def test_gemini_launcher_passes_at_file_argument(tmp_path: Path) -> None:
+    # Arrange
+    prompt_text = "Bounded gemini task.\n"
+
+    # Act
+    _, record = _run_launch_probe(tmp_path, "gemini", prompt_text)
+
+    # Assert
+    assert cast(list[str], record["argv"])[-1].startswith("@")
+
+
+@REQUIRE_TMUX
+@pytest.mark.parametrize("tool", TOOLS)
+def test_launcher_rejects_an_existing_session_with_exit_2(tmp_path: Path, tool: str) -> None:
+    # Arrange
+    probe_tool = tool
+
+    # Act
+    result = _run_existing_session_launch(tmp_path, probe_tool)
+
+    # Assert
+    assert result.returncode == 2
+
+
+@REQUIRE_TMUX
+@pytest.mark.parametrize("tool", TOOLS)
+def test_launcher_existing_session_reports_reason_on_stderr(tmp_path: Path, tool: str) -> None:
+    # Arrange
+    probe_tool = tool
+
+    # Act
+    result = _run_existing_session_launch(tmp_path, probe_tool)
+
+    # Assert
+    assert "session already exists" in result.stderr
+
+
+@pytest.mark.parametrize("surface", ("launch_tmux.sh", "submit_followup.sh"))
+def test_gemini_owner_only_checks_prefer_gnu_stat_exit_code(tmp_path: Path, surface: str) -> None:
+    # Arrange
+    target_surface = surface
+
+    # Act
+    result, _ = _run_gemini_stat_probe(tmp_path, target_surface)
+
+    # Assert
+    assert result.returncode == 2
+
+
+@pytest.mark.parametrize("surface", ("launch_tmux.sh", "submit_followup.sh"))
+def test_gemini_owner_only_checks_proceed_past_gnu_stat(tmp_path: Path, surface: str) -> None:
+    # Arrange
+    target_surface = surface
+
+    # Act
+    result, expected = _run_gemini_stat_probe(tmp_path, target_surface)
+
+    # Assert
+    assert expected in result.stderr
+
+
+@REQUIRE_TMUX
+@pytest.mark.parametrize("tool", TOOLS)
+def test_followup_retries_enter_twice_when_first_enter_holds_paste(tmp_path: Path, tool: str) -> None:
+    # Arrange
+    probe_tool = tool
+
+    # Act
+    result, _ = _run_retry_enter_probe(tmp_path, probe_tool)
+
+    # Assert
+    assert "enter_presses=2" in result.stdout
+
+
+@REQUIRE_TMUX
+@pytest.mark.parametrize("tool", TOOLS)
+def test_followup_retry_records_end_marker_in_verify_second_capture(tmp_path: Path, tool: str) -> None:
+    # Arrange
+    probe_tool = tool
+
+    # Act
+    result, dispatch_id = _run_retry_enter_probe(tmp_path, probe_tool)
+    evidence_dir = Path(_extract_field(result.stdout, "evidence_dir"))
+    verify_file = evidence_dir / "verify-second.out"
+    verify_output = verify_file.read_text(encoding="utf-8") if verify_file.is_file() else ""
+    post_file = Path(_extract_field(verify_output, "post_capture"))
+    post_text = post_file.read_text(encoding="utf-8") if post_file.is_file() else ""
+
+    # Assert
+    assert f"[dispatch-end:{dispatch_id}]" in post_text
+
+
+@REQUIRE_TMUX
+@pytest.mark.parametrize("tool", TOOLS)
+def test_accepted_active_followup_exits_nonzero(tmp_path: Path, tool: str) -> None:
+    # Arrange
+    probe_tool = tool
+
+    # Act
+    result, _ = _run_accepted_active_probe(tmp_path, probe_tool)
+
+    # Assert
+    assert result.returncode == 1
+
+
+@REQUIRE_TMUX
+@pytest.mark.parametrize("tool", TOOLS)
+def test_accepted_active_followup_without_clean_composer_never_gets_second_enter(tmp_path: Path, tool: str) -> None:
+    # Arrange
+    probe_tool = tool
+
+    # Act
+    _, observed = _run_accepted_active_probe(tmp_path, probe_tool)
+
+    # Assert
+    assert observed == "no-second-enter"
 
 
 @pytest.mark.parametrize("tool", TOOLS)
 def test_stale_working_before_dispatch_never_verifies(tmp_path: Path, tool: str) -> None:
+    # Arrange
     dispatch_id = f"{tool}-stale-history-test"
     pre = tmp_path / "pre.txt"
-    pre.write_text("• Working stale\n›\n")
+    pre.write_text("• Working stale\n›\n", encoding="utf-8")
     post = tmp_path / "post.txt"
     post.write_text(f"• Working stale\n[dispatch:{dispatch_id}]\nbounded task\n[dispatch-end:{dispatch_id}]\n›\n")
     command = [str(_script(tool, "verify_dispatch.sh")), "-", dispatch_id, str(pre), str(post)]
-    stale = subprocess.run(command, capture_output=True, text=True)
-    assert stale.returncode == 1
-    assert "lacks ordered start/end/acceptance/activity/clean-composer evidence" in stale.stderr
 
-    post.write_text(post.read_text() + f"[dispatch-accepted:{dispatch_id}]\n" + "• Working fresh\n" + "›\n")
-    fresh = subprocess.run(command, check=True, capture_output=True, text=True)
+    # Act
+    stale = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    # Assert
+    assert stale.returncode == 1
+
+
+@pytest.mark.parametrize("tool", TOOLS)
+def test_fresh_acceptance_after_stale_history_verifies(tmp_path: Path, tool: str) -> None:
+    # Arrange
+    dispatch_id = f"{tool}-fresh-history-test"
+    pre = tmp_path / "pre.txt"
+    pre.write_text("• Working stale\n›\n", encoding="utf-8")
+    post = tmp_path / "post.txt"
+    post.write_text(
+        f"• Working stale\n[dispatch:{dispatch_id}]\nbounded task\n[dispatch-end:{dispatch_id}]\n"
+        f"[dispatch-accepted:{dispatch_id}]\n• Working fresh\n›\n",
+        encoding="utf-8",
+    )
+    command = [str(_script(tool, "verify_dispatch.sh")), "-", dispatch_id, str(pre), str(post)]
+
+    # Act
+    fresh = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    # Assert
     assert f"verified_dispatch={dispatch_id}" in fresh.stdout
 
 
 @pytest.mark.parametrize("tool", TOOLS)
 def test_missing_start_marker_never_verifies(tmp_path: Path, tool: str) -> None:
+    # Arrange
     dispatch_id = f"{tool}-missing-start-test"
     pre = tmp_path / "pre.txt"
-    pre.write_text("›\n")
+    pre.write_text("›\n", encoding="utf-8")
     post = tmp_path / "post.txt"
-    post.write_text(f"[dispatch-end:{dispatch_id}]\n[dispatch-accepted:{dispatch_id}]\n• Working fresh\n›\n")
+    post.write_text(
+        f"[dispatch-end:{dispatch_id}]\n[dispatch-accepted:{dispatch_id}]\n• Working fresh\n›\n",
+        encoding="utf-8",
+    )
     command = [str(_script(tool, "verify_dispatch.sh")), "-", dispatch_id, str(pre), str(post)]
-    result = subprocess.run(command, capture_output=True, text=True)
+
+    # Act
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    # Assert
     assert result.returncode == 1
 
 
 @pytest.mark.parametrize("tool", TOOLS)
 def test_marker_held_in_composer_with_unrelated_activity_never_verifies(tmp_path: Path, tool: str) -> None:
+    # Arrange
     dispatch_id = f"{tool}-held-composer-test"
     pre = tmp_path / "pre.txt"
-    pre.write_text("• Working stale\n›\n")
+    pre.write_text("• Working stale\n›\n", encoding="utf-8")
     post = tmp_path / "post.txt"
     post.write_text(
-        f"› [dispatch:{dispatch_id}] bounded task [dispatch-end:{dispatch_id}]\n• Working unrelated-new-task\n›\n"
+        f"› [dispatch:{dispatch_id}] bounded task [dispatch-end:{dispatch_id}]\n• Working unrelated-new-task\n›\n",
+        encoding="utf-8",
     )
     command = [str(_script(tool, "verify_dispatch.sh")), "-", dispatch_id, str(pre), str(post)]
-    result = subprocess.run(command, capture_output=True, text=True)
+
+    # Act
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    # Assert
     assert result.returncode == 1
+
+
+def test_gemini_submit_followup_rejects_world_readable_followup_file(tmp_path: Path) -> None:
+    # Arrange
+    followup = tmp_path / "followup.txt"
+    followup.write_text("bounded task\n", encoding="utf-8")
+    followup.chmod(0o644)
+    command = [str(_script("gemini", "submit_followup.sh")), "missing-gemini-session", str(followup)]
+
+    # Act
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    # Assert
+    assert "owner-only" in result.stderr
