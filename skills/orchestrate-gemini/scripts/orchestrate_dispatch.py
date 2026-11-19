@@ -49,15 +49,17 @@ UNICODE_PROMPT_RE = re.compile(r"^(?:›|❯)(?:[ \t]|$)")
 DIVIDER_LINE_RE = re.compile(r"^[ \t]*(?:[│┃─━═╭╰┌└┐┘┼┴┬╮╯\-][ \t]*){3,}$")
 BOX_BORDER_RE = re.compile(r"^[ \t]*[╭┌╰└┼├┤┬┴─━═]{3}[─━═╭┌╮┐╰└╯┘┼├┤┬┴ \t]*$")
 COMPOSER_RULE_RE = re.compile(r"^[ \t]*[─━═╭┌├┬╮┐┤┼]{8}[─━═╭┌├┬╮┐┤┼]*[ \t]*$")
+_TIER_BADGE_PAT = r"(?-i:[A-Z][A-Za-z0-9_.-]{2,31}[ \t]+\((?:Carbon|Neon|Argon|Hydrogen)\))$"
 FOOTER_CHROME_RE = re.compile(
     r"(?i)^[ \t]*(?:\?[ \t]+for[ \t]+shortcuts|⚠[ \t]*\d+[ \t]+warning|"
     r"esc[ \t]+to[ \t]+(?:interrupt|cancel|stop)|tab[ \t]+to[ \t]+queue|"
     r"press[ \t]+(?:↑|up)[ \t]+to[ \t]+edit|"
     r"(?:[⏵⏸▸]+[ \t]*)?(?:accept[ \t-]+edits|bypass[ \t]+permissions|plan[ \t]+mode)|"
     r"shift\+tab|ctrl\+[a-z]|no[ \t]+sandbox|\d+%[ \t]+context[ \t]+left|"
-    r"GPT-\d|Gemini[ \t]+\d|Claude[ \t])"
+    + _TIER_BADGE_PAT
+    + r"|GPT-(?:\d|OSS\b)|Gemini[ \t]+\d|Claude[ \t])"
 )
-_STATUS_DOT_FOOTER_RE = re.compile(r"(?i)(?<![ \t])[ \t]+·[ \t]+(?:/|~/|\d+%)")
+_STATUS_DOT_FOOTER_RE = re.compile(r"(?i)(?<![ \t])[ \t]+·[ \t]+(?:/|~/|\d+%|" + _TIER_BADGE_PAT + r")")
 ACTIVE_STOP_RE = re.compile(
     r"^(?:Worked[ \t]+for[ \t]+\d+[smh]\b"
     r"|[•●○⏺◉▸*✻✽✢✳✶][ \t]+(?:(?:Working|Thinking|Generating|Brewing)(?:[ \t]*(?:$|[.(•·…]))|Running\b)"
