@@ -42,6 +42,9 @@ TRANSITION_REFUSAL_CODES = {
     # Core stage guards in transitions.py
     "ABSENT_APPROVAL",
     "APPROVAL_DIGEST_MISMATCH",
+    "APPROVAL_DIGEST_MISSING",
+    "APPROVAL_PATH_INVALID",
+    "APPROVAL_REF_MALFORMED",
     "APPROVAL_FILE_NOT_FOUND",
     "APPROVAL_READ_FAILED",
     "APPROVAL_WITHDRAWN",
@@ -164,26 +167,41 @@ def _mod_absent_approval(ctx: dict[str, Any]) -> None:
 
 
 def _mod_approval_file_not_found(ctx: dict[str, Any]) -> None:
-    ctx["wi"]["approval_ref"] = str(Path(ctx["temp_dir"]) / "missing-approval.txt")
+    ctx["wi"]["approval_ref"] = str(Path(ctx["temp_dir"]) / "missing-approval.txt") + ":" + "a" * 64
     ctx["save_doc"]()
 
 
 def _mod_approval_read_failed(ctx: dict[str, Any]) -> None:
     dir_as_file = Path(ctx["temp_dir"]) / "dir_approval"
     dir_as_file.mkdir(parents=True, exist_ok=True)
-    ctx["wi"]["approval_ref"] = str(dir_as_file)
+    ctx["wi"]["approval_ref"] = f"{dir_as_file}:{'0' * 64}"
     ctx["save_doc"]()
 
 
 def _mod_approval_withdrawn(ctx: dict[str, Any]) -> None:
     withdrawn_file = Path(ctx["temp_dir"]) / "withdrawn_app.txt"
     withdrawn_file.write_text("Coordinator [WITHDRAWN] approval", encoding="utf-8")
-    ctx["wi"]["approval_ref"] = str(withdrawn_file)
+    ctx["wi"]["approval_ref"] = f"{withdrawn_file}:{hashlib.sha256(withdrawn_file.read_bytes()).hexdigest()}"
     ctx["save_doc"]()
 
 
 def _mod_approval_digest_mismatch(ctx: dict[str, Any]) -> None:
     ctx["wi"]["approval_ref"] = {"path": str(ctx["approval_file"]), "sha256": "f" * 64}
+    ctx["save_doc"]()
+
+
+def _mod_approval_digest_missing(ctx: dict[str, Any]) -> None:
+    ctx["wi"]["approval_ref"] = {"path": str(ctx["approval_file"]), "sha256": None}
+    ctx["save_doc"]()
+
+
+def _mod_approval_path_invalid(ctx: dict[str, Any]) -> None:
+    ctx["wi"]["approval_ref"] = {"path": "/" + "a" * 300, "sha256": "a" * 64}
+    ctx["save_doc"]()
+
+
+def _mod_approval_ref_malformed(ctx: dict[str, Any]) -> None:
+    ctx["wi"]["approval_ref"] = {"path": str(ctx["approval_file"]), "sha_256": "a" * 64}
     ctx["save_doc"]()
 
 
@@ -515,6 +533,9 @@ TRANS_MODIFIERS = {
     "APPROVAL_READ_FAILED": _mod_approval_read_failed,
     "APPROVAL_WITHDRAWN": _mod_approval_withdrawn,
     "APPROVAL_DIGEST_MISMATCH": _mod_approval_digest_mismatch,
+    "APPROVAL_DIGEST_MISSING": _mod_approval_digest_missing,
+    "APPROVAL_PATH_INVALID": _mod_approval_path_invalid,
+    "APPROVAL_REF_MALFORMED": _mod_approval_ref_malformed,
     "UNRESOLVED_REVISE_FINDINGS": _mod_unresolved_revise_findings,
     "MISSING_OR_EXPIRED_CLAIM": _mod_missing_or_expired_claim,
     "STALE_CLAIM": _mod_stale_claim,
@@ -1529,7 +1550,9 @@ class TestGuardInventory(unittest.TestCase):
                         "issue_num": "152",
                         "task_id": task_id,
                         "spec_path": str(self.spec_file),
-                        "approval_ref": str(self.approval_file),
+                        "approval_ref": (
+                            f"{self.approval_file}:{hashlib.sha256(self.approval_file.read_bytes()).hexdigest()}"
+                        ),
                         "claim": {
                             "owner": "lane-01",
                             "session_id": "sess-01",
