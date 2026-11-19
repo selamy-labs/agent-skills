@@ -1826,9 +1826,9 @@ def test_record_server_records_the_servers_own_session(module: ModuleType, tmp_p
 
 def test_process_running_a_binary_from_the_root_is_a_holder(module: ModuleType, tmp_path: Path) -> None:
     # Arrange: cwd is /, argv[0] is bare, no open files under the root; only /proc/<pid>/exe points inside it.
-    binary = tmp_path / "out" / "bin" / "sleeper"
+    binary = tmp_path / "out" / "bin" / "sleep"
     binary.parent.mkdir(parents=True)
-    # PATH can contain a runner/test helper rather than the system executable.
+    # Use the system executable and preserve its applet basename for multicall coreutils.
     shutil.copy2(Path("/bin/sleep").resolve(strict=True), binary)
     proc = subprocess.Popen(
         ["sleep", "30"], cwd="/", executable=str(binary), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
@@ -1840,8 +1840,13 @@ def test_process_running_a_binary_from_the_root_is_a_holder(module: ModuleType, 
             pytest.fail("live executable fixture did not start the copied system binary")
         # Act
         found, _ = module.holders(str(tmp_path / "out"))
+        if proc.poll() is not None:
+            pytest.fail(
+                f"live executable fixture exited during scan {proc.returncode}: {proc.communicate()[1].decode()}"
+            )
     finally:
-        proc.kill()
+        if proc.poll() is None:
+            proc.kill()
         proc.wait()
     # Assert
     assert proc.pid in found
