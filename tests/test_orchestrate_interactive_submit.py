@@ -490,6 +490,246 @@ class TestSanitizedIncidentRegressions:
         # Assert
         assert verdict.state is DeliveryState.PARTIAL_PASTE
 
+    def test_tier_badge_carbon_pre_capture_is_ready(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = (
+            "  • Completed prior verification sweep.\n\n"
+            f"{rule}\n"
+            "> " + " " * 148 + "\n"
+            f"{rule}\n"
+            f"? for shortcuts{' ' * 99}Coordinator (Carbon)\n"
+        )
+
+        # Act
+        ok, reason = check_pre_capture(pre, did)
+
+        # Assert
+        assert (ok, reason) == (True, "ok")
+
+    def test_tier_badge_carbon_filled_wrapped_composer_is_unsubmitted(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = f"• Done\n{rule}\n> \n{rule}\n? for shortcuts{' ' * 99}Coordinator (Carbon)\n"
+        prepared = (
+            "  • Completed prior verification sweep.\n\n"
+            f"{rule}\n"
+            f"> [dispatch:{did}] Acknowledge this exact turn first by emitting\n"
+            f"  [dispatch-accepted:{did}]. Read /workspace/app/wake.txt fully and\n"
+            "  continue the existing independent reviewer goal; deduplicate completed\n"
+            f"  work before closing the turn. [dispatch-end:{did}]\n"
+            f"{rule}\n"
+            f"{' ' * 130}Coordinator (Carbon)\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, prepared, did)
+
+        # Assert
+        assert verdict.state is DeliveryState.UNSUBMITTED
+
+    @pytest.mark.parametrize(
+        "footer_line",
+        [
+            "                                                                Coordinator (Neon)",
+            "                                                                Coordinator (Argon)",
+            "                                                                Supervisor (Hydrogen)",
+            "  GPT-OSS 120B (Medium)                                       /workspace/app",
+            "  /workspace/app · Coordinator (Carbon)",
+            "  main · Supervisor (Hydrogen)",
+        ],
+    )
+    def test_tier_badge_and_gpt_oss_footer_variants_classify_unsubmitted(self, footer_line: str) -> None:
+        # Arrange
+        did = "agy-20261119T040000Z-100-1"
+        rule = "─" * 80
+        pre = f"> \n{rule}\n? for shortcuts · Coordinator (Carbon)\n"
+        post = (
+            f"• Done\n{rule}\n"
+            f"> [dispatch:{did}] Acknowledge this exact turn first by emitting\n"
+            f"  [dispatch-accepted:{did}]. Execute wake check. [dispatch-end:{did}]\n"
+            f"{rule}\n{footer_line}\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, post, did)
+
+        # Assert
+        assert verdict.state is DeliveryState.UNSUBMITTED
+
+    def test_tier_badge_carbon_completed_turn_classifies_submitted(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = f"> \n{rule}\n? for shortcuts{' ' * 99}Coordinator (Carbon)\n"
+        post = (
+            f"> [dispatch:{did}] Acknowledge this exact turn first by emitting\n"
+            f"  [dispatch-accepted:{did}]. Read /workspace/app/wake.txt. [dispatch-end:{did}]\n"
+            "▸ Thought for 3s\n"
+            f"  [dispatch-accepted:{did}]\n"
+            "• Explored 2 files (wake.txt, status.json)\n"
+            f"{rule}\n> \n{rule}\n{' ' * 130}Coordinator (Carbon)\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, post, did)
+
+        # Assert
+        assert verdict.state is DeliveryState.SUBMITTED
+
+    def test_tier_badge_carbon_active_esc_to_cancel_without_queue_is_ambiguous(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = f"> \n{rule}\n? for shortcuts{' ' * 99}Coordinator (Carbon)\n"
+        post = (
+            f"• Done\n{rule}\n"
+            f"> [dispatch:{did}] Acknowledge [dispatch-end:{did}]\n"
+            f"{rule}\n"
+            f"esc to cancel{' ' * 117}Coordinator (Carbon)\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, post, did)
+
+        # Assert
+        assert verdict.state is DeliveryState.AMBIGUOUS
+
+    def test_tier_badge_carbon_active_esc_to_cancel_with_tab_to_queue_sets_flag(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = f"> \n{rule}\n? for shortcuts{' ' * 99}Coordinator (Carbon)\n"
+        post = (
+            f"• Done\n{rule}\n"
+            f"> [dispatch:{did}] Acknowledge [dispatch-end:{did}]\n"
+            f"{rule}\n"
+            f"esc to cancel · tab to queue{' ' * 102}Coordinator (Carbon)\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, post, did)
+
+        # Assert
+        assert verdict.tab_to_queue is True
+
+    def test_tier_badge_carbon_queued_message_classifies_queued(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = f"> \n{rule}\n? for shortcuts{' ' * 99}Coordinator (Carbon)\n"
+        post = (
+            "• Working\n"
+            "  Queued messages:\n"
+            f"  [dispatch:{did}] Acknowledge [dispatch-end:{did}]\n"
+            f"{rule}\n>   \n{rule}\n"
+            f"{' ' * 130}Coordinator (Carbon)\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, post, did)
+
+        # Assert
+        assert verdict.state is DeliveryState.QUEUED
+
+    def test_tier_badge_carbon_unaccepted_transcript_with_clean_composer_is_ambiguous(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = f"> \n{rule}\n? for shortcuts{' ' * 99}Coordinator (Carbon)\n"
+        post = (
+            "• Done\n"
+            f"  [dispatch:{did}] Acknowledge [dispatch-end:{did}]\n"
+            f"{rule}\n>   \n{rule}\n"
+            f"{' ' * 130}Coordinator (Carbon)\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, post, did)
+
+        # Assert
+        assert verdict.state is DeliveryState.AMBIGUOUS
+
+    def test_tier_badge_carbon_partial_paste_without_end_marker_is_partial_paste(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = f"> \n{rule}\n? for shortcuts{' ' * 99}Coordinator (Carbon)\n"
+        post = (
+            f"• Done\n{rule}\n> [dispatch:{did}] truncated paste without end\n{rule}\n{' ' * 130}Coordinator (Carbon)\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, post, did)
+
+        # Assert
+        assert verdict.state is DeliveryState.PARTIAL_PASTE
+
+    def test_tier_badge_carbon_dirty_composer_fails_pre_check(self) -> None:
+        # Arrange
+        did = "agy-20261119T035545Z-2109196-11097"
+        rule = "─" * 150
+        pre = f"• Done\n{rule}\n> unfinished operator draft\n{rule}\n{' ' * 130}Coordinator (Carbon)\n"
+
+        # Act
+        ok, _reason = check_pre_capture(pre, did)
+
+        # Assert
+        assert ok is False
+
+    @pytest.mark.parametrize(
+        "non_footer_line",
+        [
+            "Coordinator (Carbon) approved the PR.",
+            "Approved by Coordinator (Carbon)",
+            "coordinator (Carbon)",
+            "Coordinator (carbon)",
+            "Summary · claude fixed the bug.",
+            "Summary · Claude reviewed the PR.",
+            "Note · Gemini 3 failed the check.",
+            "Note · GPT-OSS is mentioned.",
+            "Result · coordinator (Carbon)",
+        ],
+    )
+    def test_non_footer_prose_and_case_mismatches_block_pre_check(self, non_footer_line: str) -> None:
+        # Arrange
+        did = "agy-20261119T040500Z-101-1"
+        pre = f"• Done\n> \n{non_footer_line}\n"
+
+        # Act
+        ok, _reason = check_pre_capture(pre, did)
+
+        # Assert
+        assert ok is False
+
+    @pytest.mark.parametrize(
+        "non_footer_line",
+        [
+            "Coordinator (Carbon) approved the PR.",
+            "Approved by Coordinator (Carbon)",
+            "Summary · Claude reviewed the PR.",
+            "Note · Gemini 3 failed the check.",
+        ],
+    )
+    def test_non_footer_prose_below_composer_does_not_classify_unsubmitted(self, non_footer_line: str) -> None:
+        # Arrange
+        did = "agy-20261119T040500Z-101-2"
+        rule = "─" * 80
+        pre = f"> \n{rule}\n? for shortcuts · Coordinator (Carbon)\n"
+        post = (
+            f"• Done\n{rule}\n"
+            f"> [dispatch:{did}] Acknowledge this turn. [dispatch-end:{did}]\n"
+            f"{rule}\n{non_footer_line}\n"
+        )
+
+        # Act
+        verdict = classify_capture(pre, post, did)
+
+        # Assert
+        assert verdict.state is DeliveryState.AMBIGUOUS
+
     def test_open_models_quota_modal_pre_check_blocks_input(self) -> None:
         # Arrange
         did = "agy-modal-pre-1"
