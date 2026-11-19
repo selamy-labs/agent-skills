@@ -276,7 +276,9 @@ class TestTransitions(unittest.TestCase):
                         "task_id": task_id,
                         "base_branch": base_branch,
                         "spec_path": str(self.spec_file),
-                        "approval_ref": str(self.approval_file),
+                        "approval_ref": (
+                            f"{self.approval_file}:{hashlib.sha256(self.approval_file.read_bytes()).hexdigest()}"
+                        ),
                         "claim": {
                             "owner": "lane-01",
                             "session_id": "sess-01",
@@ -621,7 +623,7 @@ class TestTransitions(unittest.TestCase):
 
         # 4. Approval file not found
         doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]["approval_ref"] = (
-            "/tmp/nonexistent-approval.txt"
+            "/tmp/nonexistent-approval.txt:" + "a" * 64
         )
         status_file.write_text(json.dumps(doc))
         res4 = execute_transition(
@@ -635,8 +637,8 @@ class TestTransitions(unittest.TestCase):
         # 5. Approval withdrawn
         withdrawn_file = Path(self.temp_dir) / "withdrawn.txt"
         withdrawn_file.write_text("Coordinator [WITHDRAWN]\n")
-        doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]["approval_ref"] = str(
-            withdrawn_file
+        doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]["approval_ref"] = (
+            f"{withdrawn_file}:{hashlib.sha256(withdrawn_file.read_bytes()).hexdigest()}"
         )
         status_file.write_text(json.dumps(doc))
         res5 = execute_transition(
@@ -648,8 +650,8 @@ class TestTransitions(unittest.TestCase):
         self.assertEqual(res5.get("reason_code"), "APPROVAL_WITHDRAWN")
 
         # 6. Unresolved revise findings
-        doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]["approval_ref"] = str(
-            self.approval_file
+        doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]["approval_ref"] = (
+            f"{self.approval_file}:{hashlib.sha256(self.approval_file.read_bytes()).hexdigest()}"
         )
         doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]["remediation_required"] = True
         status_file.write_text(json.dumps(doc))
@@ -731,7 +733,7 @@ class TestTransitions(unittest.TestCase):
         # Approval file has [WITHDRAWN]
         withdrawn_app = Path(self.temp_dir) / "withdrawn.txt"
         withdrawn_app.write_text("Coordinator [WITHDRAWN] approval", encoding="utf-8")
-        wi["approval_ref"] = str(withdrawn_app)
+        wi["approval_ref"] = f"{withdrawn_app}:{hashlib.sha256(withdrawn_app.read_bytes()).hexdigest()}"
         status_file.write_text(json.dumps(doc))
         res_w = execute_transition(
             str(self.state_dir), "selamy-labs-agent-skills-152-MP464", "push", claim_token=self.claim_token
@@ -741,7 +743,7 @@ class TestTransitions(unittest.TestCase):
         # Approval file read error (pointing to a directory)
         app_dir = Path(self.temp_dir) / "app_dir"
         app_dir.mkdir(parents=True, exist_ok=True)
-        wi["approval_ref"] = str(app_dir)
+        wi["approval_ref"] = f"{app_dir}:{'0' * 64}"
         status_file.write_text(json.dumps(doc))
         res_r = execute_transition(
             str(self.state_dir), "selamy-labs-agent-skills-152-MP464", "push", claim_token=self.claim_token
@@ -1618,6 +1620,87 @@ exit 0
         )
         self.assertEqual(res.get("status"), "refused")
         self.assertEqual(res.get("reason_code"), "MISSING_MANDATORY_GATE")
+
+    def test_verify_live_approval_malformed_approval_ref_and_sha256_fail_closed(self) -> None:
+        from transitions import _verify_live_approval
+
+        valid_sha = hashlib.sha256(self.approval_file.read_bytes()).hexdigest()
+        f = str(self.approval_file)
+        refusal_matrix: dict[str, list[Any]] = {
+            "ABSENT_APPROVAL": [
+                {"sha256": valid_sha},
+                {"path": None},
+                {"path": ""},
+                {"path": "   "},
+                {"path": 123},
+                {},
+                "",
+                "   ",
+                f":{'a' * 64}",
+                123,
+                ["list"],
+            ],
+            "APPROVAL_REF_MALFORMED": [
+                {"path": f, "sha_256": "0" * 64},
+                {"path": f, "sha256": valid_sha, "extra": "1"},
+                {"path": f, "digest": valid_sha},
+            ],
+            "APPROVAL_DIGEST_MISSING": [
+                f,
+                self.approval_file,
+                {"path": f},
+                {"path": f, "sha256": None},
+                {"path": f, "sha256": ""},
+                {"path": f, "sha256": "   "},
+                f"{f}:",
+                f"{f}:   ",
+            ],
+            "APPROVAL_DIGEST_MISMATCH": [
+                {"path": f, "sha256": 123},
+                {"path": f, "sha256": "not-64-hex"},
+                {"path": f, "sha256": "f" * 64},
+                f"{f}:not-64-hex",
+                f"{f}:{'f' * 64}",
+            ],
+            "APPROVAL_PATH_INVALID": [
+                {"path": "/" + "a" * 300, "sha256": valid_sha},
+                {"path": "/" + "a" * 300, "sha256": "not-64-hex"},
+                f"/{'a' * 300}:{valid_sha}",
+                {"path": "/tmp/bad\x00path.md", "sha256": valid_sha},
+            ],
+        }
+        for expected_code, cases in refusal_matrix.items():
+            for case in cases:
+                ok, err = _verify_live_approval(case, control_dir=self.state_dir)
+                self.assertFalse(ok, f"Expected refusal for {case!r}")
+                self.assertEqual(err, expected_code, f"Expected {expected_code} for {case!r}, got {err}")
+
+        positive_cases = [
+            {"path": f, "sha256": valid_sha},
+            {"path": f, "sha256": valid_sha.upper()},
+            f"{f}:{valid_sha}",
+            f"{f}:{valid_sha.upper()}",
+        ]
+        for case in positive_cases:
+            ok, err = _verify_live_approval(case, control_dir=self.state_dir)
+            self.assertTrue(ok, f"Expected acceptance for {case!r}")
+            self.assertEqual(err, "", f"Expected empty err for {case!r}")
+
+        self._setup_coordinator_state(task_id="MP464", qualified=True, project_ci_status="passing")
+        status_file = self.state_dir / "coordinator-status.json"
+        doc = json.loads(status_file.read_text(encoding="utf-8"))
+        wi = doc["delivery_control"]["work_items"]["selamy-labs-agent-skills-152-MP464"]
+        wi["approval_ref"] = f"{f}:{valid_sha}"
+        status_file.write_text(json.dumps(doc), encoding="utf-8")
+        res = execute_transition(
+            str(self.state_dir),
+            "selamy-labs-agent-skills-152-MP464",
+            "push",
+            claim_token=self.claim_token,
+            branch="feat/MP464",
+            command_runner=lambda cmd, cwd=None: (0, f"{self.c_sha}\trefs/heads/feat/MP464\n"),
+        )
+        self.assertEqual(res.get("status"), "transitioned", res)
 
 
 if __name__ == "__main__":

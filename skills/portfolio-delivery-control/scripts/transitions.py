@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -27,25 +28,110 @@ from receipts import check_qualification, validate_review_receipt
 VALID_ACTIONS = {"push", "publish_pr", "merge_pr", "complete_spec_task"}
 
 
-def _verify_live_approval(approval_ref: Any, control_dir: Path | str | None = None) -> tuple[bool, str]:
-    if not approval_ref:
-        return False, "ABSENT_APPROVAL"
-    path_str = approval_ref.get("path") if isinstance(approval_ref, dict) else str(approval_ref)
-    expected_sha = approval_ref.get("sha256") if isinstance(approval_ref, dict) else None
+APPROVAL_REF_KEYS = frozenset({"path", "sha256"})
+
+
+def _validate_approval_digest(raw_sha: Any) -> tuple[str | None, str]:
+    if raw_sha is None:
+        return None, "APPROVAL_DIGEST_MISSING"
+    if not isinstance(raw_sha, str):
+        return None, "APPROVAL_DIGEST_MISMATCH"
+    stripped = raw_sha.strip()
+    if not stripped:
+        return None, "APPROVAL_DIGEST_MISSING"
+    if not is_hex_64(stripped):
+        return None, "APPROVAL_DIGEST_MISMATCH"
+    return stripped, ""
+
+
+def _extract_dict_approval(d: dict[str, Any]) -> tuple[str | None, str | None, str]:
+    if not d:
+        return None, None, "ABSENT_APPROVAL"
+    if set(d) - APPROVAL_REF_KEYS:
+        return None, None, "APPROVAL_REF_MALFORMED"
+    raw_path = d.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None, None, "ABSENT_APPROVAL"
+    path_str = raw_path.strip()
+    if "sha256" not in d:
+        return path_str, None, "APPROVAL_DIGEST_MISSING"
+    expected_sha, err = _validate_approval_digest(d["sha256"])
+    return path_str, expected_sha, err
+
+
+def _extract_str_approval(raw_str: str) -> tuple[str | None, str | None, str]:
+    stripped = raw_str.strip()
+    if not stripped:
+        return None, None, "ABSENT_APPROVAL"
+    if ":" not in stripped:
+        return stripped, None, "APPROVAL_DIGEST_MISSING"
+    raw_path, raw_sha = stripped.rsplit(":", 1)
+    path_str = raw_path.strip()
+    if not path_str:
+        return None, None, "ABSENT_APPROVAL"
+    expected_sha, err = _validate_approval_digest(raw_sha)
+    return path_str, expected_sha, err
+
+
+def _extract_approval_ref(approval_ref: Any) -> tuple[str | None, str | None, str]:
+    if isinstance(approval_ref, dict):
+        return _extract_dict_approval(approval_ref)
+    if isinstance(approval_ref, str):
+        return _extract_str_approval(approval_ref)
+    if isinstance(approval_ref, Path):
+        return str(approval_ref), None, "APPROVAL_DIGEST_MISSING"
+    return None, None, "ABSENT_APPROVAL"
+
+
+def _read_approval_bytes(path_str: str, control_dir: Path | str | None) -> tuple[bytes, str]:
+    """Return (content, refusal_code); content is b"" whenever a refusal code is returned."""
+    # Path.exists() swallows ValueError for NUL bytes and returns False, so reject them explicitly.
+    if "\x00" in path_str:
+        return b"", "APPROVAL_PATH_INVALID"
     p = Path(path_str)
     if not p.is_absolute() and control_dir:
         p = Path(control_dir) / p
-    if not p.exists():
-        return False, "APPROVAL_FILE_NOT_FOUND"
     try:
-        content = p.read_bytes()
-    except OSError:
+        if not p.exists():
+            return b"", "APPROVAL_FILE_NOT_FOUND"
+    except (OSError, ValueError):
+        return b"", "APPROVAL_PATH_INVALID"
+    try:
+        return p.read_bytes(), ""
+    except (OSError, ValueError):
+        return b"", "APPROVAL_READ_FAILED"
+
+
+def _verify_approval_content(
+    path_str: str, expected_sha: str | None, ref_err: str, control_dir: Path | str | None
+) -> tuple[bool, str]:
+    content, io_err = _read_approval_bytes(path_str, control_dir)
+    if io_err == "APPROVAL_PATH_INVALID":
+        return False, "APPROVAL_PATH_INVALID"
+    if io_err == "APPROVAL_FILE_NOT_FOUND":
+        return False, "APPROVAL_FILE_NOT_FOUND"
+    if io_err:
         return False, "APPROVAL_READ_FAILED"
     if b"[WITHDRAWN]" in content:
         return False, "APPROVAL_WITHDRAWN"
-    if expected_sha and sha256_file(p).lower() != expected_sha.lower():
+    if ref_err or expected_sha is None:
+        return False, "APPROVAL_DIGEST_MISMATCH"
+    if hashlib.sha256(content).hexdigest() != expected_sha.lower():
         return False, "APPROVAL_DIGEST_MISMATCH"
     return True, ""
+
+
+def _verify_live_approval(approval_ref: Any, control_dir: Path | str | None = None) -> tuple[bool, str]:
+    if not approval_ref:
+        return False, "ABSENT_APPROVAL"
+    path_str, expected_sha, ref_err = _extract_approval_ref(approval_ref)
+    if ref_err == "APPROVAL_REF_MALFORMED":
+        return False, "APPROVAL_REF_MALFORMED"
+    if not path_str:
+        return False, "ABSENT_APPROVAL"
+    if ref_err == "APPROVAL_DIGEST_MISSING":
+        return False, "APPROVAL_DIGEST_MISSING"
+    return _verify_approval_content(path_str, expected_sha, ref_err, control_dir)
 
 
 def _guard_approval_and_defects(wi: dict[str, Any], control_dir: Path | str | None = None) -> tuple[bool, str]:
