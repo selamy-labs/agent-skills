@@ -1409,12 +1409,15 @@ class Task:
         try:
             return self.teardown()
         except Exception as exc:  # noqa: BLE001 - any failure must still end as an audited, retained lease
-            self.reasons.append(f"teardown error: {exc!r}")
-            self.resources.setdefault("output_root", "blocked" if os.path.lexists(self.out) else "absent")
-            self.resources.setdefault("worktree", "blocked" if os.path.lexists(self.worktree) else "absent")
-            with contextlib.suppress(Exception):
-                self.write_manifest(f"terminal-{Outcome.BLOCKED}")
-            return Outcome.BLOCKED
+            return self.retain_after_error(exc)
+
+    def retain_after_error(self, exc: Exception) -> Outcome:
+        self.reasons.append(f"teardown error: {exc!r}")
+        self.resources.setdefault("output_root", "blocked" if os.path.lexists(self.out) else "absent")
+        self.resources.setdefault("worktree", "blocked" if os.path.lexists(self.worktree) else "absent")
+        with contextlib.suppress(Exception):
+            self.write_manifest(f"terminal-{Outcome.BLOCKED}")
+        return Outcome.BLOCKED
 
     def teardown(self) -> Outcome:
         """The single terminal lifecycle for success, failure, signals and the reaper."""
@@ -1442,14 +1445,22 @@ class Task:
 
     def server_pid_file(self) -> int | None:
         try:
-            fd = os.open(self.out / "base" / "server" / "server.pid.txt", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        except OSError:
+            fd = os.open(
+                self.out / "base" / "server" / "server.pid.txt",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            )
+        except FileNotFoundError:
             return None
         try:
-            text = os.read(fd, 32).decode(errors="replace").strip()
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RefusedError("server PID file is not a regular file")
+            raw = os.read(fd, 33)
         finally:
             os.close(fd)
-        return int(text) if text.isdigit() else None
+        text = raw.decode(errors="replace").strip()
+        if len(raw) > 32 or re.fullmatch(r"[0-9]+", text) is None or int(text) <= 1:
+            raise RefusedError("server PID file is malformed or oversized")
+        return int(text)
 
     def scoped_shutdown(self) -> bool:
         if not (self.bazel and not self.worktree.is_symlink() and self.worktree.is_dir()):
@@ -1572,7 +1583,11 @@ class Task:
         if status.stdout:
             self.reasons.append("worktree has modified, untracked or ignored files")
             return False
-        hidden = [ln for ln in git(self.worktree, "ls-files", "-v").stdout.splitlines() if re.match(r"^([a-z]|S) ", ln)]
+        index = git(self.worktree, "ls-files", "-v")
+        if index.returncode != 0:
+            self.reasons.append("hidden-index probe failed; worktree cleanliness is unknown")
+            return False
+        hidden = [ln for ln in index.stdout.splitlines() if re.match(r"^([a-z]|S) ", ln)]
         if hidden:
             self.reasons.append("worktree has assume-unchanged or skip-worktree entries")
             return False
@@ -1923,20 +1938,21 @@ def reap_claimed(settings: Settings, root: Path, task_dir: Path, data: dict[str,
     task = task_from_manifest(settings, root, data)
     if _owner_is_active(task, task_dir):
         return Outcome.RETAINED
-    task.adopt_pid_file_server()
-    try:
-        found, unknown = holders(str(task.out), task.sessions(), task.ancestors())
-    except OSError as exc:
-        print(f"blocked {task_dir}: process scan failed: {exc}", flush=True)
-        return Outcome.BLOCKED
-    others = [pid for pid in found if pid != task.server]
-    if others or unknown:
-        print(
-            f"retained {task_dir}: live or uninspectable processes reference {task.out}: {others + unknown}", flush=True
-        )
-        return Outcome.RETAINED
     record = AuditRecord(mode="reap", branch=task.branch)
-    outcome = task.safe_teardown()
+    try:
+        task.adopt_pid_file_server()
+        found, unknown = holders(str(task.out), task.sessions(), task.ancestors())
+    except (RefusedError, OSError) as exc:
+        outcome = task.retain_after_error(exc)
+    else:
+        others = [pid for pid in found if pid != task.server]
+        if others or unknown:
+            print(
+                f"retained {task_dir}: live or uninspectable processes reference {task.out}: {others + unknown}",
+                flush=True,
+            )
+            return Outcome.RETAINED
+        outcome = task.safe_teardown()
     fill_record(record, task, outcome)
     log_.write(record)
     print(f"{outcome} {task_dir}{': ' + record.reason if record.reason else ''}", flush=True)

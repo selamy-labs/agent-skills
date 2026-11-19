@@ -147,6 +147,7 @@ case ${STUB_ACTION:-} in
   ignored) echo build-output >build.ignored ;;
   skip-worktree) git update-index --skip-worktree MODULE.bazel ;;
   assume-unchanged) git update-index --assume-unchanged MODULE.bazel ;;
+  hidden-dirty) git update-index --assume-unchanged MODULE.bazel; echo precious >>MODULE.bazel ;;
   commit-break-remote)
     git commit --allow-empty -q -m "local only"
     mv "$STUB_ORIGIN" "$STUB_ORIGIN.gone"
@@ -3046,3 +3047,50 @@ def test_failed_reflog_probe_does_not_authorize_worktree_removal(
     durable = task.head_is_durable()
     # Assert
     assert not durable
+
+
+@pytest.mark.parametrize("failed_probe", [False, True])
+def test_hidden_modified_source_survives_an_index_probe_failure(sandbox: Sandbox, failed_probe: bool) -> None:
+    # Arrange: all other Git operations stay native; only the hidden-index probe can fail.
+    if failed_probe:
+        _write_exe(
+            sandbox.bin / "git",
+            f'#!/usr/bin/env bash\nfor arg in "$@"; do [[ $arg != ls-files ]] || exit 128; done\nexec {GIT} "$@"\n',
+        )
+    # Act
+    result = sandbox.run(STUB_ACTION="hidden-dirty")
+    files = [path for path in result.root.glob("*/src/MODULE.bazel") if "precious" in path.read_text()]
+    # Assert
+    assert (result.audit()["outcome"], len(files)) == ("retained", 1)
+
+
+@pytest.mark.parametrize("recorded_server", [False, True])
+@pytest.mark.parametrize("kind", ["fifo", "malformed", "oversized", "symlink"])
+def test_public_reaper_refuses_untrusted_pid_file_without_hanging(
+    sandbox: Sandbox, recorded_server: bool, kind: str
+) -> None:
+    # Arrange: a real orphaned lease and native Git; only the build-written PID file is replaced.
+    sandbox.orphan(kill_client=True, kill_server=True)
+    manifest_path = next(sandbox.root.glob("*/manifest.json"))
+    data = json.loads(manifest_path.read_text())
+    if not recorded_server:
+        data.update(server_pid=0, server_start="", server_sid=0)
+        manifest_path.write_text(json.dumps(data))
+    pid_file = manifest_path.parent / "out" / "base" / "server" / "server.pid.txt"
+    pid_file.unlink()
+    if kind == "fifo":
+        os.mkfifo(pid_file, 0o600)
+    elif kind == "symlink":
+        foreign = sandbox.tmp / "foreign-pid"
+        foreign.write_text("999999")
+        pid_file.symlink_to(foreign)
+    else:
+        pid_file.write_text("9" * 33 if kind == "oversized" else "not-a-pid")
+    # Act: timeout kills/reaps only this disposable CLI if the regression blocks.
+    proc = subprocess.run(
+        [str(SCRIPT), "--reap"], cwd=sandbox.tmp, env=sandbox.env, capture_output=True, text=True, timeout=5
+    )
+    result = sandbox.result(proc.returncode)
+    state = json.loads(manifest_path.read_text())["state"]
+    # Assert: both resources and a terminal audit survive; the global lock is released on exit.
+    assert (result.task_audit()["outcome"], state, pid_file.exists()) == ("blocked", "terminal-blocked", True)
