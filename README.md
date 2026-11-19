@@ -30,6 +30,9 @@ their own license terms; they should not be republished in this repository.
   usable.
 - `ephemeral-workspace-lifecycle`: create, hand off, and safely reap temporary
   worktrees, clones, task directories, build outputs, and caches.
+- `bazel-ephemeral-sandbox`: run each Bazel invocation in a per-task worktree
+  with a private output root, a durable lease and reaper, a capped owner-only
+  disk cache, and free-space gates.
 - `verify-real-artifact`: verify the real user/system artifact instead of a
   proxy such as logs or CI alone.
 - `grounded-generation`: generate from verified inputs with explicit source
