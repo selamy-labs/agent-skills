@@ -78,6 +78,7 @@ echo "$$" >>"$STUB_PIDS"
 if [[ ${STUB_ACTION:-} == symlink-out ]]; then
   mkdir -p "$ESCAPE_DIR"
   echo keep >"$ESCAPE_DIR/precious"
+  rmdir "$out"
   ln -s "$ESCAPE_DIR" "$out"
   exit "${STUB_EXIT:-0}"
 fi
@@ -119,6 +120,24 @@ case ${STUB_ACTION:-} in
   reset-away)
     git commit --allow-empty -q -m "reset away"
     git reset -q --hard HEAD~1
+    ;;
+  long-reflog)
+    published=$(git rev-parse HEAD)
+    git commit --allow-empty -q -m "reset away beyond enumeration boundary"
+    git rev-parse HEAD >"$STUB_RESET_SHA"
+    git reset -q --hard "$published"
+    for ((i=0; i<105; i++)); do
+      git reset -q --hard "$published~1"
+      git reset -q --hard "$published"
+    done
+    ;;
+  swap-output-directory)
+    task=$(dirname "$out")
+    mv "$out" "$out-old"
+    mv "$task/src" "$out"
+    echo preserve >"$out/precious.txt"
+    cp -a "$out" "$task/src"
+    rm "$task/src/precious.txt"
     ;;
   wt-holder)
     (exec sleep 300) </dev/null >/dev/null 2>&1 &
@@ -1032,6 +1051,7 @@ def _forge_lease(sandbox: Sandbox, pid: int, uid: int) -> Path:
         "pid_start": start,
         "sid": os.getsid(0),
         "task_ino": task.stat().st_ino,
+        "out_ino": (task / "out").stat().st_ino,
         "created_branch": False,
         "created": "2000-01-01T00:00:00Z",
     }
@@ -1667,6 +1687,7 @@ def _inproc_task(module: ModuleType, tmp_path: Path, reaping: bool = True) -> An
     task.task_dir.mkdir(mode=0o700)
     task.task_ino = task.task_dir.stat().st_ino
     (task.out / "base" / "server").mkdir(parents=True)
+    task.out_ino = task.out.stat().st_ino
     return task
 
 
@@ -1807,9 +1828,16 @@ def test_process_running_a_binary_from_the_root_is_a_holder(module: ModuleType, 
     # Arrange: cwd is /, argv[0] is bare, no open files under the root; only /proc/<pid>/exe points inside it.
     binary = tmp_path / "out" / "bin" / "sleeper"
     binary.parent.mkdir(parents=True)
-    shutil.copy2(shutil.which("sleep") or "/bin/sleep", binary)
-    proc = _spawn(["sleeper", "30"], Path("/"), executable=str(binary))
+    # PATH can contain a runner/test helper rather than the system executable.
+    shutil.copy2(Path("/bin/sleep").resolve(strict=True), binary)
+    proc = subprocess.Popen(
+        ["sleep", "30"], cwd="/", executable=str(binary), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+    )
     try:
+        if proc.poll() is not None:
+            pytest.fail(f"live executable fixture exited {proc.returncode}: {proc.communicate()[1].decode()}")
+        if Path(f"/proc/{proc.pid}/exe").resolve() != binary:
+            pytest.fail("live executable fixture did not start the copied system binary")
         # Act
         found, _ = module.holders(str(tmp_path / "out"))
     finally:
@@ -1867,7 +1895,9 @@ def test_removal_refuses_to_cross_a_filesystem_boundary(
 
     monkeypatch.setattr(module.os, "stat", fake_stat)
     # Act
-    raised = pytest.raises(module.RefusedError, module.remove_tree, task.root, task.id, "out", task.task_ino)
+    raised = pytest.raises(
+        module.RefusedError, module.remove_tree, task.root, task.id, "out", task.task_ino, task.out_ino
+    )
     # Assert
     assert "filesystem boundary" in str(raised.value)
 
@@ -2457,7 +2487,9 @@ def test_remove_tree_refuses_a_root_with_loose_mode(module: ModuleType, tmp_path
     root.chmod(0o755)
     ino = (root / "t").stat().st_ino
     # Act
-    outcome = pytest.raises(module.RefusedError, module.remove_tree, root, "t", "out", ino)
+    outcome = pytest.raises(
+        module.RefusedError, module.remove_tree, root, "t", "out", ino, (root / "t/out").stat().st_ino
+    )
     # Assert
     assert "mode" in str(outcome.value)
 
@@ -2977,3 +3009,35 @@ def test_reap_one_blocks_on_fifo_lease_lock(module: ModuleType, tmp_path: Path) 
         outcome = module.reap_one(settings, root, task_dir, audit)
     # Assert
     assert outcome is module.Outcome.BLOCKED
+
+
+def test_reset_away_commit_beyond_200_reflog_entries_retains_worktree(sandbox: Sandbox) -> None:
+    # Arrange: two published commits conceal an older unpublished commit in a long HEAD reflog.
+    _git(sandbox.repo, "commit", "--allow-empty", "-q", "-m", "second published baseline")
+    _git(sandbox.repo, "push", "-q", "origin", "main")
+    # Act
+    result = sandbox.run(STUB_ACTION="long-reflog", STUB_RESET_SHA=str(sandbox.tmp / "reset.sha"))
+    # Assert
+    assert result.audit()["outcome"] == "retained"
+
+
+def test_output_directory_replaced_with_dirty_source_is_preserved(sandbox: Sandbox) -> None:
+    # Arrange: a same-owner, same-filesystem plain directory replaces the original output root.
+    # Act
+    result = sandbox.run(STUB_ACTION="swap-output-directory", STUB_NO_SERVER="1")
+    # Assert
+    assert any(path.exists() for path in result.root.glob("*/out/precious.txt"))
+
+
+def test_failed_reflog_probe_does_not_authorize_worktree_removal(
+    module: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a failed probe has no complete history even if the current HEAD is published.
+    task = _inproc_task(module, tmp_path)
+    task.head = "a" * 40
+    monkeypatch.setattr(module, "git", lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, "", "probe failed"))
+    monkeypatch.setattr(module.Task, "uncovered", lambda self, commits: [])
+    # Act
+    durable = task.head_is_durable()
+    # Assert
+    assert not durable

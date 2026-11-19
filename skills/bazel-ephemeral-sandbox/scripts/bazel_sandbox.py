@@ -84,7 +84,6 @@ CACHE_SUBDIRS = ("cas", "ac")
 SIZE_RE = re.compile(r"^([0-9]{1,15})([KMGT]?)$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SIZE_SHIFT = {"": 0, "K": 10, "M": 20, "G": 30, "T": 40}
-REFLOG_LIMIT = 200
 TICK = 0.1
 PROC = Path("/proc")
 
@@ -777,14 +776,14 @@ def allocated_bytes(dfd: int, dev: int, strict: bool = False) -> int:
     return total
 
 
-def remove_tree(root: Path, task_id: str, name: str, task_ino: int) -> int:
+def remove_tree(root: Path, task_id: str, name: str, task_ino: int, resource_ino: int) -> int:
     with opened_task(root, task_id, task_ino) as (_, tfd, dev):
         try:
             nfd = _open_dir(name, tfd)
         except FileNotFoundError:
             return 0
         try:
-            _check(nfd, os.getuid(), dev)
+            _check(nfd, os.getuid(), dev, resource_ino)
             os.fchmod(nfd, 0o700)
             freed = clear_dir(nfd, dev)
         finally:
@@ -1123,6 +1122,7 @@ class Task:
     id: str = field(default_factory=lambda: secrets.token_hex(8))
     head: str = ""
     task_ino: int = 0
+    out_ino: int = 0
     created_branch: bool = False
     owner_pid: int = field(default_factory=os.getpid)
     owner_start: str = ""
@@ -1180,6 +1180,7 @@ class Task:
             "server_start": self.server_start,
             "server_sid": self.server_sid,
             "task_ino": self.task_ino,
+            "out_ino": self.out_ino,
             "created_branch": self.created_branch,
             "created": self.created,
             "updated": now(),
@@ -1289,12 +1290,34 @@ class Task:
 
     # ---- supervise
 
+    def prepare_output_root(self) -> None:
+        """Bind the output directory incarnation before any build-controlled code runs."""
+        with opened_task(self.root, self.id, self.task_ino) as (_, tfd, dev):
+            os.mkdir("out", mode=0o700, dir_fd=tfd)
+            fd = _open_dir("out", tfd)
+            try:
+                self.out_ino = _check(fd, os.getuid(), dev).st_ino
+            finally:
+                os.close(fd)
+        self.write_manifest("active")
+
+    def verify_output_root(self) -> None:
+        if not self.out_ino:
+            raise RefusedError("original output root inode is not recorded; retained")
+        with opened_task(self.root, self.id, self.task_ino) as (_, tfd, dev):
+            fd = _open_dir("out", tfd)
+            try:
+                _check(fd, os.getuid(), dev, self.out_ino)
+            finally:
+                os.close(fd)
+
     def run_bazel(self, command: str, args: list[str], signals: SignalForwarder) -> int:
         self.bazel = shutil.which("bazelisk") or shutil.which("bazel")
         if self.bazel is None:
             raise SandboxError(EXIT_SOFTWARE, "neither bazelisk nor bazel is on PATH")
         if Path(self.bazel).name == "bazel" and (self.worktree / ".bazelversion").exists():
             log("bazelisk not found; .bazelversion is not enforced by plain bazel")
+        self.prepare_output_root()
         self.child = subprocess.Popen(self.bazel_argv(command, args), cwd=self.worktree)
         signals.child = self.child
         if signals.received is not None:
@@ -1515,6 +1538,11 @@ class Task:
     def dispose_output_root(self) -> Outcome:
         if not os.path.lexists(self.out):
             return Outcome.ABSENT
+        try:
+            self.verify_output_root()
+        except (RefusedError, OSError) as exc:
+            self.reasons.append(f"output root identity refused: {exc}")
+            return Outcome.BLOCKED
         if not self.shutdown_server():
             self.reasons.append(
                 "the reaper cannot run bazel shutdown and the recorded server is not proven gone; output root retained"
@@ -1530,7 +1558,7 @@ class Task:
                 "released after a complete process scan found nothing referencing the output root"
             )
         try:
-            self.bytes_reclaimed += remove_tree(self.root, self.id, "out", self.task_ino)
+            self.bytes_reclaimed += remove_tree(self.root, self.id, "out", self.task_ino, self.out_ino)
         except (RefusedError, OSError) as exc:
             self.reasons.append(f"output root removal refused: {exc}")
             return Outcome.BLOCKED
@@ -1575,10 +1603,13 @@ class Task:
         self.reasons.append("bundle creation or verification failed")
         return False
 
-    def local_commits(self) -> list[str]:
-        """HEAD plus every commit in the worktree's HEAD reflog, so reset-away work is not lost."""
-        reflog = git(self.worktree, "reflog", "--format=%H", "-n", str(REFLOG_LIMIT), "HEAD").stdout.split()
-        return list(dict.fromkeys([self.head, *reflog]))
+    def local_commits(self) -> list[str] | None:
+        """HEAD plus the complete HEAD reflog; a failed probe cannot prove durability."""
+        reflog = git(self.worktree, "reflog", "--format=%H", "HEAD")
+        if reflog.returncode != 0:
+            self.reasons.append("HEAD reflog probe failed; complete commit history is unknown")
+            return None
+        return list(dict.fromkeys([self.head, *reflog.stdout.split()]))
 
     def uncovered(self, commits: list[str]) -> list[str] | None:
         """Commits not reachable from a fresh explicit fetch of the branch or base (None: fetch failed)."""
@@ -1603,6 +1634,8 @@ class Task:
 
     def head_is_durable(self) -> bool:
         commits = self.local_commits()
+        if commits is None:
+            return False
         missing = self.uncovered(commits)
         if missing == []:
             return True
@@ -1808,6 +1841,7 @@ def task_from_manifest(settings: Settings, root: Path, data: dict[str, object]) 
         id=str(data["id"]),
         head=str(data["head"]),
         task_ino=int(str(data["task_ino"])),
+        out_ino=int(str(data.get("out_ino") or 0)),
         created_branch=bool(data["created_branch"]),
         owner_pid=int(str(data["pid"])),
         owner_start=str(data["pid_start"]),
