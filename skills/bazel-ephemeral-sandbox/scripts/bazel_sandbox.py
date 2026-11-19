@@ -1445,21 +1445,12 @@ class Task:
 
     def server_pid_file(self) -> int | None:
         try:
-            fd = os.open(
-                self.out / "base" / "server" / "server.pid.txt",
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
-            )
+            raw = read_regular_metadata(self.out / "base" / "server" / "server.pid.txt", 32)
         except FileNotFoundError:
             return None
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise RefusedError("server PID file is not a regular file")
-            raw = os.read(fd, 33)
-        finally:
-            os.close(fd)
         text = raw.decode(errors="replace").strip()
-        if len(raw) > 32 or re.fullmatch(r"[0-9]+", text) is None or int(text) <= 1:
-            raise RefusedError("server PID file is malformed or oversized")
+        if re.fullmatch(r"[0-9]+", text) is None or int(text) <= 1:
+            raise RefusedError("server PID file is malformed")
         return int(text)
 
     def scoped_shutdown(self) -> bool:
@@ -1822,22 +1813,24 @@ def run(argv: list[str], env: Mapping[str, str], record: AuditRecord, signals: S
     return signals.exit_code() or rc
 
 
+def read_regular_metadata(path: Path, limit: int) -> bytes:
+    """Read only owned, regular metadata through a nonblocking descriptor and a byte bound."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        st = os.fstat(stream.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            raise RefusedError("metadata is not an owned regular file")
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise RefusedError(f"metadata exceeds {limit}-byte limit")
+    return raw
+
+
 def load_manifest(task_dir: Path) -> dict[str, object] | None:
     try:
-        fd = os.open(task_dir / "manifest.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
+        data = json.loads(read_regular_metadata(task_dir / "manifest.json", 1024 * 1024).decode("utf-8"))
+    except (OSError, ValueError, RefusedError):
         return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        chunks: list[bytes] = []
-        while piece := os.read(fd, 65536):
-            chunks.append(piece)
-        data = json.loads(b"".join(chunks).decode("utf-8"))
-    except (OSError, ValueError):
-        return None
-    finally:
-        os.close(fd)
     expected = {
         "id": task_dir.name,
         "uid": os.getuid(),

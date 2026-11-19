@@ -3094,3 +3094,25 @@ def test_public_reaper_refuses_untrusted_pid_file_without_hanging(
     state = json.loads(manifest_path.read_text())["state"]
     # Assert: both resources and a terminal audit survive; the global lock is released on exit.
     assert (result.task_audit()["outcome"], state, pid_file.exists()) == ("blocked", "terminal-blocked", True)
+
+
+@pytest.mark.parametrize("kind", ["regular", "fifo", "oversized"])
+def test_public_reaper_bounds_and_validates_manifest_before_reading(sandbox: Sandbox, kind: str) -> None:
+    # Arrange: the same valid orphaned lease is removable only with readable, bounded metadata.
+    sandbox.orphan(kill_client=True, kill_server=True)
+    manifest = next(sandbox.root.glob("*/manifest.json"))
+    if kind == "fifo":
+        manifest.unlink()
+        os.mkfifo(manifest, 0o600)
+    elif kind == "oversized":
+        with manifest.open("a") as stream:
+            stream.write(" " * (2 * 1024 * 1024))
+    # Act: the public CLI must return and release its lock even with a FIFO at the manifest path.
+    proc = subprocess.run(
+        [str(SCRIPT), "--reap"], cwd=sandbox.tmp, env=sandbox.env, capture_output=True, text=True, timeout=5
+    )
+    result = sandbox.result(proc.returncode)
+    # Assert
+    assert (result.audit()["outcome"], manifest.parent.exists()) == (
+        ("removed", False) if kind == "regular" else ("blocked", True)
+    )
