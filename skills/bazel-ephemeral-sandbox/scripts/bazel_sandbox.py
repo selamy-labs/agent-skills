@@ -427,12 +427,6 @@ def pid_start(pid: int) -> str:
     return fields[19] if isinstance(fields, list) and len(fields) > 19 else ""
 
 
-def pid_flags(pid: int) -> int | None:
-    """The leader's kernel flags word (field 9 of /proc/<pid>/stat), or None when stat cannot be read."""
-    fields = stat_fields(pid)
-    return int(fields[6]) if isinstance(fields, list) and fields[6].isdigit() else None
-
-
 def _group_exiting_pass(pid: int, tids: list[int]) -> bool | None:
     for tid in tids:
         fields = stat_fields(pid, tid)
