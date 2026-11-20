@@ -2224,16 +2224,17 @@ def test_unreadable_stat_never_earns_the_exiting_exemption(
     assert unknown == [FAKE_PID]
 
 
+@pytest.mark.parametrize(("flags", "expected"), [(0x4, True), (0x40, False), (0, False)])
 def test_flags_parse_after_the_last_parenthesis(
-    module: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    module: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: int, expected: bool
 ) -> None:
-    # Arrange: a command name that imitates the stat layout.
-    _fake_stat_entry(tmp_path / "proc", FAKE_PID, flags=0x4, comm="evil) R 1 2 3 4 5 0 (x")
+    # Arrange: the hostile command name cannot shift the real runtime flags decision.
+    _fake_stat_entry(tmp_path / "proc", FAKE_PID, flags=flags, comm="evil) R 1 2 3 4 5 0 (x")
     monkeypatch.setattr(module, "PROC", tmp_path / "proc")
     # Act
-    flags = module.pid_flags(FAKE_PID)
-    # Assert
-    assert flags == 0x4  # PF_EXITING on Linux; kernel-verified, not taken from the module
+    exiting = module.group_exiting(FAKE_PID)
+    # Assert: PF_EXITING is 0x4; other nonzero flags must not earn the exemption.
+    assert exiting is expected
 
 
 def test_process_that_stops_exiting_and_holds_the_root_is_not_ignored(
