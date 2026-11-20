@@ -3116,3 +3116,120 @@ def test_public_reaper_bounds_and_validates_manifest_before_reading(sandbox: San
     assert (result.audit()["outcome"], manifest.parent.exists()) == (
         ("removed", False) if kind == "regular" else ("blocked", True)
     )
+
+
+@pytest.mark.parametrize("reader_present", [False, True])
+def test_fifo_audit_refuses_before_task_admission(sandbox: Sandbox, reader_present: bool) -> None:
+    # Arrange: a connected reader must not make a pipe qualify as a regular audit file.
+    sandbox.audit_path.parent.mkdir(parents=True)
+    os.mkfifo(sandbox.audit_path, 0o600)
+    reader = os.open(sandbox.audit_path, os.O_RDONLY | os.O_NONBLOCK) if reader_present else None
+    try:
+        # Act
+        proc = subprocess.run(
+            sandbox.command("task-branch"),
+            cwd=sandbox.tmp,
+            env=sandbox.env,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    finally:
+        if reader is not None:
+            os.close(reader)
+    # Assert
+    assert (proc.returncode, sandbox.result().calls(), sandbox.root.exists()) == (70, [], False)
+
+
+def test_device_audit_refuses_before_argument_dispatch(sandbox: Sandbox) -> None:
+    # Arrange
+    env = {**sandbox.env, "BAZEL_SANDBOX_AUDIT": "/dev/null"}
+    # Act
+    proc = subprocess.run([str(SCRIPT)], cwd=sandbox.tmp, env=env, capture_output=True, text=True, timeout=2)
+    # Assert
+    assert (proc.returncode, sandbox.result().calls(), sandbox.root.exists()) == (70, [], False)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_regular_audit_preserves_append_bytes_and_normal_status(sandbox: Sandbox, existing: bool) -> None:
+    # Arrange
+    prefix = b'{"previous":true}\n' if existing else b""
+    if existing:
+        sandbox.audit_path.parent.mkdir(parents=True)
+        sandbox.audit_path.write_bytes(prefix)
+        sandbox.audit_path.chmod(0o640)
+    # Act
+    result = sandbox.invoke([str(SCRIPT)])
+    content = sandbox.audit_path.read_bytes()
+    # Assert
+    assert (
+        result.returncode,
+        content.startswith(prefix),
+        json.loads(content[len(prefix) :])["exit_code"],
+        sandbox.audit_path.stat().st_mode & 0o777,
+        result.calls(),
+    ) == (64, True, 64, 0o640 if existing else 0o600, [])
+
+
+@pytest.mark.parametrize("reader_present", [False, True])
+def test_optional_eviction_log_ignores_fifo_without_changing_gc_status(cached: Sandbox, reader_present: bool) -> None:
+    # Arrange: all evictions are private fixture files; no fleet cache is used.
+    _fill_cache(cached.root, "cas", 2)
+    sink = cached.tmp / "evictions.jsonl"
+    os.mkfifo(sink, 0o600)
+    reader = os.open(sink, os.O_RDONLY | os.O_NONBLOCK) if reader_present else None
+    received = b""
+    try:
+        # Act
+        proc = subprocess.run(
+            [str(SCRIPT), "--gc"],
+            cwd=cached.tmp,
+            env={**cached.env, "BAZEL_SANDBOX_DISK_CACHE_MAX": "1M", "BAZEL_SANDBOX_GC_LOG": str(sink)},
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if reader is not None:
+            received = os.read(reader, 65536)
+    finally:
+        if reader is not None:
+            os.close(reader)
+    # Assert
+    assert (proc.returncode, cached.result().audit()["cache"]["collected"], received) == (0, True, b"")
+
+
+def test_optional_eviction_log_preserves_regular_append_records(cached: Sandbox) -> None:
+    # Arrange
+    _fill_cache(cached.root, "cas", 2)
+    sink = cached.tmp / "evictions.jsonl"
+    prefix = b'{"previous":true}\n'
+    sink.write_bytes(prefix)
+    # Act
+    result = cached.invoke([str(SCRIPT), "--gc"], BAZEL_SANDBOX_DISK_CACHE_MAX="1M", BAZEL_SANDBOX_GC_LOG=str(sink))
+    content = sink.read_bytes()
+    # Assert
+    assert (
+        result.returncode,
+        content.startswith(prefix),
+        [json.loads(line) for line in content[len(prefix) :].splitlines()],
+    ) == (
+        0,
+        True,
+        [
+            {"entry": "cas/aa/blob0", "bytes": 1048576, "age": 1000000.0},
+            {"entry": "cas/aa/blob1", "bytes": 1048576, "age": 1001000.0},
+        ],
+    )
+
+
+def test_optional_eviction_log_does_not_append_through_symlink(cached: Sandbox) -> None:
+    # Arrange
+    _fill_cache(cached.root, "cas", 2)
+    target = cached.tmp / "unrelated.log"
+    target.write_bytes(b"keep unchanged")
+    sink = cached.tmp / "evictions.jsonl"
+    sink.symlink_to(target)
+    # Act
+    result = cached.invoke([str(SCRIPT), "--gc"], BAZEL_SANDBOX_DISK_CACHE_MAX="1M", BAZEL_SANDBOX_GC_LOG=str(sink))
+    # Assert
+    assert (result.returncode, target.read_bytes()) == (0, b"keep unchanged")

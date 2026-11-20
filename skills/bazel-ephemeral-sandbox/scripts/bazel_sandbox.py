@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import errno
 import fcntl
 import json
 import os
@@ -258,6 +259,19 @@ class AuditRecord:
         self.reason = f"{self.reason}; {reason}" if self.reason else reason
 
 
+def _open_regular_append(path: Path) -> int:
+    """Open a regular append sink without waiting for a pipe's reader."""
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    fd = os.open(path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "log path is not a regular file")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
 class AuditLog:
     """Append-only JSON Lines sink, opened for the whole invocation."""
 
@@ -268,8 +282,7 @@ class AuditLog:
     def __enter__(self) -> AuditLog:
         try:
             self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
-            self.fd = os.open(self.path, flags, 0o600)
+            self.fd = _open_regular_append(self.path)
         except OSError as exc:
             log(f"audit log unavailable: {self.path}: {exc.strerror}")
         return self
@@ -1056,7 +1069,7 @@ def _collect_exclusive(settings: Settings, root: Path, cache: Path) -> dict[str,
 def _write_gc_log(gc_log_path: Path | None, evicted: list[dict[str, object]]) -> None:
     if gc_log_path is None or not evicted:
         return
-    with contextlib.suppress(OSError), gc_log_path.open("a") as gc_log:
+    with contextlib.suppress(OSError), os.fdopen(_open_regular_append(gc_log_path), "a", encoding="utf-8") as gc_log:
         for item in evicted:
             gc_log.write(json.dumps(item) + "\n")
 
