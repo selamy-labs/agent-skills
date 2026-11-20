@@ -44,7 +44,7 @@ That skill is binding; this one applies it to Bazel.
 | `<root>/<id>/src` | Linked Git worktree | Disposed only after the output root is released. Removed with `git worktree remove` (never `--force`) only when it passes the same containment and holder gates as the output root, is clean (ignored files and hidden index state included), and HEAD plus every commit in its HEAD reflog is reachable from a fresh explicit fetch of the branch or base, or HEAD is covered by a verified bundle. Otherwise it is retained with the reason. A branch the sandbox created is then deleted with `git branch -d` |
 | `<root>/disk-cache` | Shared cache, owner-only | Never deleted by a task. Builds use it under a shared lock; the collector caps it (see below) |
 | `<root>/<id>/manifest.json`, `lease.lock` | Durable lease | Exclusively locked for the owner's lifetime. It records the owner PID, start time, and session, plus the Bazel server PID and start time once known. Removed on `removed`; otherwise rewritten as `terminal-retained` or `terminal-blocked` with the owner, reason, next action, and next review time |
-| Audit file | Append-only | One JSON line per invocation, with per-resource outcomes and the exact exit code. The wrapper refuses to start a build without it |
+| Audit file | Append-only | One JSON line per invocation, with per-resource outcomes and the exact exit code. The path must name a regular file: pipes, devices and symlinks are refused before task admission. The wrapper refuses to start a build without it |
 
 Guarantees:
 
@@ -167,7 +167,8 @@ a bootstrap for every host, so the wrapper carries an equivalent:
   them on cache hits. `bytes_after` is the measured remainder after the
   successful unlinks: it is at most `BAZEL_SANDBOX_DISK_CACHE_MAX` when every
   needed unlink succeeds, and above it otherwise. Writing the eviction log is
-  best-effort and never changes the result.
+  best-effort and never changes the result. Only a regular file is used; special-file
+  and symbolic sinks are ignored.
 - Locking: a build passes `<cache>.gate` (shared) and then holds `<cache>.lock`
   shared until its own teardown ends. The collector takes the gate exclusively,
   which stops new builds from entering, waits for running builds to drain from
