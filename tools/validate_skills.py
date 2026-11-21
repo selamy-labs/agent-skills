@@ -68,9 +68,10 @@ PINNED_TOOL_REQUIREMENTS: dict[str, str] = {
     "pytest": "pytest==8.3.4",
     "pytest-cov": "pytest-cov==6.0.0",
     "ruff": "ruff==0.15.21",
+    "prek": "prek==0.5.5",
 }
 
-GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "complexipy", "vulture"})
+GATED_PACKAGES = frozenset({"ruff", "pytest", "pytest-cov", "prek", "complexipy", "vulture"})
 DISALLOWED_PIP_PACKAGES = frozenset({"complexipy", "vulture", "python-hcl2"})
 
 
@@ -1337,6 +1338,7 @@ EXPECTED_DEV_REQUIREMENTS: frozenset[str] = frozenset(
         "pytest-cov==6.0.0",
         "pyyaml==6.0.1",
         "ruff==0.15.21",
+        "prek==0.5.5",
     }
 )
 

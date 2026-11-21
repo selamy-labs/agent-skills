@@ -2746,7 +2746,9 @@ def test_rule_c_declared_imports(
     from tools.validate_skills import _validate_single_python_file
 
     req_file = tmp_path / "requirements-dev.txt"
-    req_file.write_text("pytest==8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n", encoding="utf-8")
+    req_file.write_text(
+        "pytest==8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\nprek==0.5.5\n", encoding="utf-8"
+    )
     pinned_dists = {"pytest", "pytest-cov", "pyyaml", "ruff"}
 
     test_file = tmp_path / "test_module.py"
@@ -3038,27 +3040,29 @@ class TestR36RequirementsDevExactness:
     def test_canonical_requirements_dev_passes(self) -> None:
         from tools.validate_skills import validate_requirements_dev_content
 
-        canonical = "# Development dependencies\npytest==8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        canonical = (
+            "# Development dependencies\npytest==8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\nprek==0.5.5\n"
+        )
         assert validate_requirements_dev_content(canonical) == []
 
     def test_drifted_pin_fails(self) -> None:
         from tools.validate_skills import validate_requirements_dev_content
 
-        drifted = "pytest==8.3.41\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        drifted = "pytest==8.3.41\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\nprek==0.5.5\n"
         errors = validate_requirements_dev_content(drifted)
         assert any("unexpected or drifted requirement: 'pytest==8.3.41'" in e for e in errors)
 
     def test_unpinned_line_fails(self) -> None:
         from tools.validate_skills import validate_requirements_dev_content
 
-        unpinned = "pytest\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        unpinned = "pytest\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\nprek==0.5.5\n"
         errors = validate_requirements_dev_content(unpinned)
         assert any("requirement must use exact '==' pin: 'pytest'" in e for e in errors)
 
     def test_non_exact_operator_fails(self) -> None:
         from tools.validate_skills import validate_requirements_dev_content
 
-        gte = "pytest>=8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        gte = "pytest>=8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\nprek==0.5.5\n"
         errors = validate_requirements_dev_content(gte)
         assert any("requirement must use exact '==' pin" in e for e in errors)
 
@@ -3078,14 +3082,14 @@ class TestR36RequirementsDevExactness:
     def test_option_or_flag_line_fails(self, option_line: str) -> None:
         from tools.validate_skills import validate_requirements_dev_content
 
-        content = f"{option_line}\npytest==8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\n"
+        content = f"{option_line}\npytest==8.3.4\npytest-cov==6.0.0\npyyaml==6.0.1\nruff==0.15.21\nprek==0.5.5\n"
         errors = validate_requirements_dev_content(content)
         assert any("disallowed option or flag" in e for e in errors)
 
     def test_missing_pin_fails(self) -> None:
         from tools.validate_skills import validate_requirements_dev_content
 
-        missing = "pytest==8.3.4\npytest-cov==6.0.0\nruff==0.15.21\n"
+        missing = "pytest==8.3.4\npytest-cov==6.0.0\nruff==0.15.21\nprek==0.5.5\n"
         errors = validate_requirements_dev_content(missing)
         assert any("missing expected requirement: 'pyyaml==6.0.1'" in e for e in errors)
 
