@@ -25,7 +25,7 @@ MAX_PACKET_BYTES = 1024 * 1024
 
 
 def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], text=True).strip()
+    return os.fsdecode(subprocess.check_output(["git", *args]).removesuffix(b"\n"))
 
 
 def native_executable() -> Path:

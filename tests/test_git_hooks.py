@@ -458,3 +458,72 @@ def test_native_package_admission_rejects_invalid_installations(tmp_path: Path, 
     monkeypatch.setattr(git_hooks, "distribution", lambda _: package)
     with pytest.raises(ValueError):
         git_hooks.native_executable()
+
+
+@pytest.mark.parametrize("suffix", [" ", "\t", "\n", "\r"])
+def test_significant_hook_path_whitespace_keeps_exact_install_and_native_lifecycle(repo: Path, suffix: str) -> None:
+    sibling = repo.parent / "configured hooks"
+    sibling.mkdir()
+    sentinel = sibling / "unrelated"
+    sentinel.write_bytes(b"preserve sibling\n")
+    hooks = repo.parent / ("configured hooks" + suffix)
+    assert git(repo, "config", "core.hooksPath", str(hooks)).returncode == 0
+    remote = repo.parent / "remote.git"
+    assert git(repo, "init", "--bare", str(remote)).returncode == 0
+    assert git(repo, "remote", "add", "origin", str(remote)).returncode == 0
+    (repo / "payload.txt").write_text("bad\n", encoding="utf-8")
+    assert git(repo, "add", "payload.txt").returncode == 0
+    assert git(repo, "commit", "-m", "test: invalid baseline before installation").returncode == 0
+
+    installed = command(repo, "install")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    assert (hooks / "pre-commit").is_file()
+    assert (hooks / "pre-push").is_file()
+    assert list(sibling.iterdir()) == [sentinel]
+    assert sentinel.read_bytes() == b"preserve sibling\n"
+
+    head = git(repo, "rev-parse", "HEAD").stdout
+    rejected = git(repo, "commit", "--allow-empty", "-m", "test: invalid after installation")
+    assert rejected.returncode != 0
+    assert "canonical check: bad" in rejected.stdout + rejected.stderr
+    assert git(repo, "rev-parse", "HEAD").stdout == head
+    pushed = git(repo, "push", "origin", "HEAD:refs/heads/verified")
+    assert pushed.returncode != 0
+    assert "canonical check: bad" in pushed.stdout + pushed.stderr
+    assert git(repo, "ls-remote", "origin", "refs/heads/verified").stdout == ""
+
+    (repo / "payload.txt").write_text("good\n", encoding="utf-8")
+    assert git(repo, "add", "payload.txt").returncode == 0
+    corrected = git(repo, "commit", "-m", "test: corrected after installation")
+    assert corrected.returncode == 0, corrected.stdout + corrected.stderr
+    accepted = git(repo, "push", "origin", "HEAD:refs/heads/verified")
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert git(repo, "ls-remote", "origin", "refs/heads/verified").stdout.startswith(
+        git(repo, "rev-parse", "HEAD").stdout.removesuffix("\n") + "\t"
+    )
+    assert list(sibling.iterdir()) == [sentinel]
+    assert sentinel.read_bytes() == b"preserve sibling\n"
+
+
+@pytest.mark.parametrize("suffix", [" ", "\t", "\n", "\r"])
+def test_significant_checkout_whitespace_runs_in_the_actual_root(repo: Path, suffix: str) -> None:
+    root = repo.with_name(repo.name + suffix)
+    repo.rename(root)
+    repo.mkdir()
+    sentinel = repo / "unrelated"
+    sentinel.write_bytes(b"preserve root sibling\n")
+    installed = command(root, "install")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    (root / "payload.txt").write_text("bad\n", encoding="utf-8")
+    assert git(root, "add", "payload.txt").returncode == 0
+    head = git(root, "rev-parse", "HEAD").stdout
+    rejected = git(root, "commit", "-m", "test: exact whitespace checkout")
+    assert rejected.returncode != 0
+    assert "canonical check: bad" in rejected.stdout + rejected.stderr
+    assert git(root, "rev-parse", "HEAD").stdout == head
+    (root / "payload.txt").write_text("good\n", encoding="utf-8")
+    assert git(root, "add", "payload.txt").returncode == 0
+    corrected = git(root, "commit", "--allow-empty", "-m", "test: exact root recovery")
+    assert corrected.returncode == 0, corrected.stdout + corrected.stderr
+    assert list(repo.iterdir()) == [sentinel]
+    assert sentinel.read_bytes() == b"preserve root sibling\n"
