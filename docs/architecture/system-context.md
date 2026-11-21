@@ -9,10 +9,13 @@ C4Context
     title System Context for Agent Skills
     Person(contributor, "Contributor", "Authors and reviews repository changes")
     System(catalog, "Agent Skills", "Publishes versioned skills and manifests")
+    System_Ext(hooks, "Local Git hooks", "Pinned native prek runs canonical checks")
     System_Ext(actions, "GitHub Actions", "Validates and releases content")
     System_Ext(agent, "Compatible agent tooling", "Installs and uses versioned skills")
 
     Rel(contributor, catalog, "Proposes changes through pull requests")
+    Rel(contributor, hooks, "Bootstraps the effective Git hook directory")
+    Rel(hooks, catalog, "Checks local commits and pushes")
     Rel(actions, catalog, "Validates and releases")
     Rel(agent, catalog, "Installs versioned skills from")
 ```
