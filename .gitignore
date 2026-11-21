@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 .coverage
+.coverage.*
 .pytest_cache/
 coverage.json
 .coverage_session_start
+.venv/
